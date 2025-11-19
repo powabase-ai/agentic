@@ -10,9 +10,12 @@ from pgvector.sqlalchemy import Vector
 
 
 class DocumentMixin:
-    """Mixin for document models"""
+    """Mixin for document models
 
-    raw_content: Mapped[str]  # Full extracted text
+    Note: Raw content is not stored at document level - use chunks for text storage.
+    This keeps the document table lean and allows for better scalability.
+    """
+
     file_path: Mapped[str]
     file_size: Mapped[int]
     file_type: Mapped[str]  # pdf, docx, txt, etc.

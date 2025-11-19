@@ -8,9 +8,16 @@ from typing import Optional
 class ETLConfig:
     """ETL pipeline configuration"""
 
-    # Extraction
+    # Extraction - PDFs
     mistral_api_key: Optional[str] = None
     openai_api_key: str = ""
+
+    # Extraction - Images (vision models)
+    vision_model: str = (
+        "gpt-4o"  # gpt-4o, gpt-4o-mini, claude-3-sonnet, gemini-pro-vision, etc.
+    )
+    vision_max_tokens: int = 1000
+    vision_temperature: float = 0.7
 
     # Chunking
     chunk_size: int = 1000

@@ -45,6 +45,7 @@ class ImageExtractor(BaseExtractor):
         max_tokens: int = 1000,
         temperature: float = 0.7,
         prompt_template: Optional[str] = None,
+        completion_kwargs: Optional[dict] = None,
         **kwargs,
     ):
         """Initialize ImageExtractor
@@ -56,14 +57,15 @@ class ImageExtractor(BaseExtractor):
             max_tokens: Maximum tokens in response
             temperature: Sampling temperature
             prompt_template: Custom prompt template (must include {filename} placeholder)
-            **kwargs: Additional parameters passed to litellm.completion()
+            completion_kwargs: Additional parameters passed to litellm.completion() (e.g., top_p, frequency_penalty)
+            **kwargs: Ignored (for compatibility with registry system that may pass extra config)
         """
         self.model = model
         self.api_key = api_key
         self.api_base = api_base
         self.max_tokens = max_tokens
         self.temperature = temperature
-        self.extra_params = kwargs
+        self.completion_kwargs = completion_kwargs or {}
 
         # Default prompt template
         self.prompt_template = prompt_template or (
@@ -126,7 +128,7 @@ class ImageExtractor(BaseExtractor):
                 "max_tokens": self.max_tokens,
                 "temperature": self.temperature,
                 "response_format": {"type": "json_object"},
-                **self.extra_params,
+                **self.completion_kwargs,
             }
 
             # Add API key if provided

@@ -39,9 +39,8 @@ class PostgreSQLSink(BaseSink):
             # Ensure pgvector extension
             self._ensure_pgvector_extension(session)
             
-            # Store document
+            # Store document metadata (text is stored in chunks)
             doc_data = {
-                "raw_content": extraction["text"],
                 "file_path": extraction.get("file_path", ""),
                 "file_size": extraction.get("file_size", 0),
                 "file_type": extraction.get("file_type", ""),
@@ -53,8 +52,8 @@ class PostgreSQLSink(BaseSink):
             # This is a simplified version - actual implementation would use ORM models
             doc_insert = text(f"""
                 INSERT INTO {self.document_table} 
-                (raw_content, file_path, file_size, file_type, extraction_method, meta)
-                VALUES (:raw_content, :file_path, :file_size, :file_type, :extraction_method, :meta)
+                (file_path, file_size, file_type, extraction_method, meta)
+                VALUES (:file_path, :file_size, :file_type, :extraction_method, :meta)
                 RETURNING id
             """)
             result = session.execute(doc_insert, doc_data)
