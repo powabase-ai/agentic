@@ -6,10 +6,11 @@ This document provides detailed explanations of the core concepts in the agentic
 
 1. [Overview](#overview)
 2. [Agent](#agent)
-3. [Orchestration](#orchestration) (planned)
-4. [Workflow](#workflow) (planned)
-5. [Execution Model](#execution-model)
-6. [Design Philosophy](#design-philosophy)
+3. [Knowledge](#knowledge)
+4. [Orchestration](#orchestration) (planned)
+5. [Workflow](#workflow) (planned)
+6. [Execution Model](#execution-model)
+7. [Design Philosophy](#design-philosophy)
 
 ---
 
@@ -126,6 +127,181 @@ output2 = agent.run("What's my name?", session=session)
 - `get_messages(limit=None)`: Get conversation messages
 - `get_last_output()`: Get most recent output
 - `clear()`: Reset session history
+
+---
+
+## Knowledge
+
+> **Status: Planned**
+
+The **Knowledge** module provides abstractions for indexing content and retrieving relevant context for agents. It separates **indexing** (how content is prepared) from **retrieval** (how content is queried).
+
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           INDEXING PIPELINE                                  │
+│  Content → [IndexingAlgorithm] → IndexResult (pure data)                    │
+│                                                                              │
+│  Examples:                                                                   │
+│  • ChunkAndEmbed: text → chunks with embeddings                             │
+│  • Graph: text → entities + relations                                        │
+│  • SummaryTree: text → hierarchical summaries                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+                           (Platform stores artifacts)
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          RETRIEVAL PIPELINE                                  │
+│  Query → [RetrievalAlgorithm] → Retrieved Context                           │
+│                                                                              │
+│  Examples:                                                                   │
+│  • VectorSearch: embed query → cosine similarity                            │
+│  • HybridSearch: vector + full-text with RRF fusion                         │
+│  • GraphTraversal: find entities → traverse relations                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Core Abstractions
+
+#### IndexingAlgorithm
+
+Transforms content into indexed artifacts. Returns pure data without storage dependencies.
+
+```python
+from agentic.knowledge.indexing import IndexingAlgorithm, IndexResult
+
+class ChunkAndEmbedAlgorithm(IndexingAlgorithm):
+    name = "chunk_embed"
+    
+    def index(self, content: str, config: IndexingConfig) -> IndexResult:
+        # 1. Chunk the content
+        chunks = self.chunker.chunk(content, config.chunk_size)
+        # 2. Embed each chunk
+        for chunk in chunks:
+            chunk.embedding = self.embedder.embed(chunk.text)
+        # 3. Return result (no DB write!)
+        return ChunkEmbedResult(chunks=chunks)
+```
+
+#### RetrievalAlgorithm
+
+Queries indexed content and post-processes results.
+
+```python
+from agentic.knowledge.retrieval import RetrievalAlgorithm
+
+class VectorSearchAlgorithm(RetrievalAlgorithm):
+    name = "vector_search"
+    
+    async def retrieve(
+        self, 
+        query: str, 
+        store: KnowledgeStore,  # Abstract interface
+        config: RetrievalConfig
+    ) -> list[RetrievedChunk]:
+        # 1. Embed query
+        query_embedding = await self.embedder.async_embed(query)
+        # 2. Query store (platform-specific)
+        raw_results = await store.vector_search(query_embedding, top_k=config.top_k)
+        # 3. Post-process (filtering, reranking)
+        return self._apply_threshold(raw_results, config.similarity_threshold)
+```
+
+#### KnowledgeStore (Interface)
+
+Abstract interface for storage operations. Implemented by platforms.
+
+```python
+from agentic.knowledge.store import KnowledgeStore
+
+class KnowledgeStore(ABC):
+    """Interface for knowledge storage - implemented by platforms"""
+    
+    @abstractmethod
+    async def vector_search(self, embedding: list[float], top_k: int) -> list[RawChunk]:
+        ...
+    
+    @abstractmethod
+    async def full_text_search(self, query: str, top_k: int) -> list[RawChunk]:
+        ...
+    
+    @abstractmethod
+    async def store_chunks(self, chunks: list[ChunkData]) -> None:
+        ...
+```
+
+### Strategy-Specific Models
+
+Each indexing strategy has its own output models:
+
+```
+agentic/knowledge/indexing/
+├── base.py                    # IndexingAlgorithm ABC, IndexResult base
+├── chunk_embed/               # RAG-style chunking + embedding
+│   ├── algorithm.py           # ChunkAndEmbedAlgorithm
+│   └── models.py              # ChunkData, ChunkEmbedResult
+├── graph/                     # GraphRAG (future)
+│   ├── algorithm.py           # GraphIndexAlgorithm
+│   └── models.py              # Entity, Relation, GraphResult
+└── summary_tree/              # Hierarchical summaries (future)
+    ├── algorithm.py           # SummaryTreeAlgorithm
+    └── models.py              # SummaryNode, SummaryTreeResult
+```
+
+**ChunkData** (for chunk_embed strategy):
+```python
+class ChunkData(BaseModel):
+    text: str
+    embedding: list[float] | None
+    chunk_index: int
+    start_char: int
+    end_char: int
+    tokens: int | None
+    meta: dict = {}
+```
+
+**Entity** (for graph strategy):
+```python
+class Entity(BaseModel):
+    id: str
+    name: str
+    type: str  # person, organization, concept
+    description: str | None
+    embedding: list[float] | None
+```
+
+### Chunking Strategies
+
+Built-in chunking algorithms:
+
+```python
+from agentic.knowledge.chunking import RecursiveChunking, SemanticChunking
+
+# Fixed-size recursive chunking
+chunker = RecursiveChunking(chunk_size=500, overlap=50)
+
+# Semantic boundary chunking (future)
+chunker = SemanticChunking(embedder=embedder, similarity_threshold=0.8)
+```
+
+### Embedders
+
+Embedding providers via LiteLLM:
+
+```python
+from agentic.knowledge.embedder import OpenAIEmbedder
+
+embedder = OpenAIEmbedder(model="text-embedding-3-small")
+embedding = embedder.embed("Hello world")
+```
+
+### Planned Features
+
+1. **v0.3**: ChunkAndEmbed indexing, VectorSearch retrieval
+2. **v0.4**: HybridSearch (vector + full-text), Reranking
+3. **v0.5**: GraphRAG indexing and traversal
+4. **v0.6**: SummaryTree for hierarchical retrieval
 
 ---
 
@@ -311,9 +487,10 @@ Platforms can be built on top of agentic for persistence, APIs, and multi-tenanc
 ## Roadmap
 
 1. **v0.1** (current): Agent core with session support
-2. **v0.2**: Tools interface and execution
-3. **v0.3**: Memory provider system
-4. **v0.4**: Orchestration module
-5. **v0.5**: Workflow module
-6. **v1.0**: Stable API with streaming support
+2. **v0.2**: Streaming support (Agent.stream(), Agent.astream())
+3. **v0.3**: Knowledge module - ChunkAndEmbed indexing, VectorSearch retrieval
+4. **v0.4**: Knowledge advanced - HybridSearch, Reranking
+5. **v0.5**: Orchestration module (Sequential, Supervisor, Router, Parallel)
+6. **v0.6**: Workflow module
+7. **v1.0**: Stable API, GraphRAG, comprehensive retrieval strategies
 
