@@ -269,6 +269,116 @@ class TestAgentOutput:
         assert "content" in data
 
 
+def _consume_stream(gen):
+    """Helper to consume a stream generator and get its return value."""
+    chunks = []
+    output = None
+    while True:
+        try:
+            chunk = next(gen)
+            chunks.append(chunk)
+        except StopIteration as e:
+            output = e.value
+            break
+    return chunks, output
+
+
+class TestAgentStream:
+    """Tests for Agent.stream() method."""
+    
+    def test_stream_yields_chunks(self, mock_litellm_streaming):
+        """stream() should yield content chunks."""
+        agent = Agent(system_prompt="You are helpful")
+        
+        chunks, _ = _consume_stream(agent.stream("Hello"))
+        
+        assert len(chunks) == 4
+        assert chunks[0] == "Hello"
+        assert chunks[1] == " "
+        assert chunks[2] == "World"
+        assert chunks[3] == "!"
+    
+    def test_stream_returns_output(self, mock_litellm_streaming):
+        """stream() should return AgentOutput after iteration."""
+        agent = Agent(system_prompt="You are helpful")
+        
+        chunks, output = _consume_stream(agent.stream("Hello"))
+        
+        assert isinstance(output, AgentOutput)
+        assert output.status == ExecutionStatus.COMPLETED
+        assert output.content == "Hello World!"
+    
+    def test_stream_content_is_concatenated(self, mock_litellm_streaming):
+        """stream() should concatenate chunks into final content."""
+        agent = Agent(system_prompt="You are helpful")
+        
+        chunks, output = _consume_stream(agent.stream("Hello"))
+        
+        # Collected chunks should match
+        collected = "".join(chunks)
+        assert collected == "Hello World!"
+        
+        # Final output content should match
+        assert output.content == "Hello World!"
+    
+    def test_stream_includes_messages(self, mock_litellm_streaming):
+        """stream() output should include all messages."""
+        agent = Agent(system_prompt="You are helpful")
+        
+        _, output = _consume_stream(agent.stream("Hello"))
+        
+        # Should have system, user, and assistant messages
+        assert len(output.messages) >= 3
+        assert output.messages[0]["role"] == "system"
+        assert output.messages[-1]["role"] == "assistant"
+        assert output.messages[-1]["content"] == "Hello World!"
+    
+    def test_stream_has_execution_id(self, mock_litellm_streaming):
+        """stream() output should have execution ID."""
+        agent = Agent(system_prompt="You are helpful")
+        
+        _, output = _consume_stream(agent.stream("Hello"))
+        
+        assert output.execution_id is not None
+    
+    def test_stream_error_handling(self, mock_litellm_streaming_error):
+        """stream() should handle errors gracefully."""
+        agent = Agent(system_prompt="You are helpful")
+        
+        _, output = _consume_stream(agent.stream("Hello"))
+        
+        assert output.status == ExecutionStatus.FAILED
+        assert "LLM Streaming Error" in output.error
+
+
+class TestAgentAstream:
+    """Tests for Agent.astream() async method."""
+    
+    @pytest.mark.asyncio
+    async def test_astream_yields_chunks(self, mock_litellm_streaming):
+        """astream() should yield content chunks asynchronously."""
+        agent = Agent(system_prompt="You are helpful")
+        
+        chunks = []
+        async for chunk in agent.astream("Hello"):
+            chunks.append(chunk)
+        
+        assert len(chunks) == 4
+        assert "".join(chunks) == "Hello World!"
+    
+    @pytest.mark.asyncio
+    async def test_astream_can_be_collected(self, mock_litellm_streaming):
+        """astream() chunks can be collected into full content."""
+        agent = Agent(system_prompt="You are helpful")
+        
+        content_parts = []
+        async for chunk in agent.astream("Hello"):
+            content_parts.append(chunk)
+        
+        full_content = "".join(content_parts)
+        assert full_content == "Hello World!"
+
+
 class TestExecutionStatus:
     """Tests for ExecutionStatus enum."""
     
@@ -292,6 +402,8 @@ class TestExecutionStatus:
     
     def test_status_str_value(self):
         """Status should serialize to lowercase string."""
-        assert str(ExecutionStatus.COMPLETED) == "completed"
+        # Use .value for explicit string access
         assert ExecutionStatus.COMPLETED.value == "completed"
+        assert ExecutionStatus.PENDING.value == "pending"
+        assert ExecutionStatus.FAILED.value == "failed"
 

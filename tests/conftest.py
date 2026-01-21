@@ -64,6 +64,70 @@ def mock_litellm_error():
 
 
 @pytest.fixture
+def mock_litellm_streaming():
+    """
+    Mock litellm.completion for streaming tests.
+    
+    This fixture patches litellm to return a mock streaming response,
+    simulating chunks arriving one at a time.
+    
+    Usage:
+        def test_agent_stream(mock_litellm_streaming):
+            agent = Agent(system_prompt="You are helpful")
+            for chunk in agent.stream("Hello"):
+                print(chunk)  # Will print "Hello", " ", "World", "!"
+    """
+    with patch("agentic.agent.agent.litellm") as mock:
+        # Create mock chunks for streaming
+        def create_chunk(content):
+            chunk = MagicMock()
+            chunk.choices = [MagicMock()]
+            chunk.choices[0].delta = MagicMock()
+            chunk.choices[0].delta.content = content
+            return chunk
+        
+        # Create chunks that simulate streaming "Hello World!"
+        def get_chunks():
+            return [
+                create_chunk("Hello"),
+                create_chunk(" "),
+                create_chunk("World"),
+                create_chunk("!"),
+            ]
+        
+        # Mock sync streaming - returns an iterable (new iterator each call)
+        mock.completion.side_effect = lambda **kwargs: iter(get_chunks())
+        
+        # Mock async streaming - returns an awaitable that returns async iterable
+        async def async_completion(**kwargs):
+            async def async_chunks():
+                for chunk in get_chunks():
+                    yield chunk
+            return async_chunks()
+        
+        mock.acompletion.side_effect = async_completion
+        
+        yield mock
+
+
+@pytest.fixture
+def mock_litellm_streaming_error():
+    """
+    Mock litellm.completion to raise an error during streaming.
+    
+    Usage:
+        def test_agent_stream_error(mock_litellm_streaming_error):
+            agent = Agent(system_prompt="You are helpful")
+            gen = agent.stream("Hello")
+            # Error occurs during iteration
+    """
+    with patch("agentic.agent.agent.litellm") as mock:
+        mock.completion.side_effect = Exception("LLM Streaming Error")
+        mock.acompletion.side_effect = Exception("LLM Streaming Error")
+        yield mock
+
+
+@pytest.fixture
 def sample_agent():
     """
     Create a sample agent for testing.

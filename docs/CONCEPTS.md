@@ -130,6 +130,199 @@ output2 = agent.run("What's my name?", session=session)
 
 ---
 
+## Content Ingestion
+
+> **Status: Planned**
+
+The **Content Ingestion** module provides abstractions for bringing content into the system and extracting usable derivatives. It consists of two parts: **Connectors** (how content enters) and **Extractors** (how content is processed).
+
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         CONTENT INGESTION PIPELINE                           │
+│                                                                              │
+│  Connectors (Source of Input):                                               │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
+│  │ FileUpload   │  │ CloudStorage │  │ WebCrawler   │  │ APIWebhook   │     │
+│  │ Connector    │  │ Connector    │  │ Connector    │  │ Connector    │     │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘     │
+│         └──────────────────┴────────┬───────┴──────────────────┘            │
+│                                     ▼                                        │
+│                        ┌───────────────────────┐                             │
+│                        │    RawContent         │  ← Unified input model      │
+│                        │  (bytes, mime, meta)  │                             │
+│                        └───────────┬───────────┘                             │
+│                                    │                                         │
+│                                    ▼                                         │
+│  Extractors (Content → Derivatives):                                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
+│  │ PDFExtractor │  │ DocxExtract  │  │ ImageOCR     │  │ AudioTransc  │     │
+│  │ → text, imgs │  │ → text       │  │ → text       │  │ → text       │     │
+│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘     │
+│                                    │                                         │
+│                                    ▼                                         │
+│                        ┌───────────────────────┐                             │
+│                        │   ExtractionResult    │                             │
+│                        │  derivatives: [       │                             │
+│                        │    {type: "text", ..} │                             │
+│                        │    {type: "image",...}│                             │
+│                        │  ]                    │                             │
+│                        └───────────────────────┘                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Core Abstractions
+
+#### Connector (ABC)
+
+Defines how content enters the system. Connectors are pluggable and extensible.
+
+```python
+from agentic.ingest import Connector, RawContent
+
+class Connector(ABC):
+    """Base class for all content connectors."""
+    name: str
+    
+    @abstractmethod
+    async def connect(self, config: dict) -> None:
+        """Establish connection to the source."""
+        ...
+    
+    @abstractmethod
+    async def list_items(self) -> list[ContentItem]:
+        """List available items (for sync connectors like CloudStorage)."""
+        ...
+    
+    @abstractmethod
+    async def fetch(self, item: ContentItem) -> RawContent:
+        """Fetch a single item as RawContent."""
+        ...
+```
+
+**Built-in Connectors** (MVP):
+- `FileUploadConnector` - Direct file upload
+
+**Future Connectors**:
+- `S3Connector` - Sync from S3/GCS buckets
+- `WebCrawlerConnector` - Crawl websites
+- `WebhookConnector` - Receive content via webhooks
+- `GoogleDriveConnector` - Sync from Google Drive
+
+#### RawContent (Model)
+
+Unified input model that all connectors produce:
+
+```python
+class RawContent(BaseModel):
+    """Unified input from any connector."""
+    content: bytes              # Raw file bytes
+    mime_type: str              # e.g., "application/pdf"
+    source_uri: str             # Original location identifier
+    filename: str | None        # Original filename
+    metadata: dict = {}         # User-provided metadata
+    fetched_at: datetime
+```
+
+#### Extractor (ABC)
+
+Transforms raw content into usable derivatives. Extractors are registered by MIME type.
+
+```python
+from agentic.ingest import Extractor, ExtractionResult
+
+class Extractor(ABC):
+    """Base class for content extractors."""
+    name: str
+    supported_types: list[str]  # MIME types this extractor handles
+    
+    def supports(self, mime_type: str) -> bool:
+        """Check if this extractor supports the given MIME type."""
+        return mime_type in self.supported_types
+    
+    @abstractmethod
+    async def extract(self, raw: RawContent) -> ExtractionResult:
+        """Extract content and produce derivatives."""
+        ...
+```
+
+**Built-in Extractors**:
+- `PDFExtractor` - PDF → text (+ images in future)
+- `DocxExtractor` - DOCX → text
+- `TextExtractor` - TXT, MD → text (passthrough)
+- `HTMLExtractor` - HTML → text
+
+**Future Extractors**:
+- `ImageOCRExtractor` - Image → text via OCR
+- `AudioExtractor` - Audio → transcript
+- `VideoExtractor` - Video → transcript + frames
+- `SpreadsheetExtractor` - Excel/CSV → structured data
+
+#### ExtractionResult (Model)
+
+Output from extraction, containing one or more derivatives:
+
+```python
+class Derivative(BaseModel):
+    """A single derivative from extraction."""
+    type: str                   # "text", "markdown", "images", "transcript"
+    content: str | bytes        # The extracted content
+    format: str                 # "plain", "markdown", "json", etc.
+    metadata: dict = {}         # Derivative-specific metadata
+
+class ExtractionResult(BaseModel):
+    """Result of extraction process."""
+    source_uri: str
+    mime_type: str
+    derivatives: list[Derivative]
+    auto_metadata: dict = {}    # Auto-extracted (page_count, language, etc.)
+    extraction_method: str      # Which extractor was used
+    extracted_at: datetime
+```
+
+### Extractor Registry
+
+Extractors are registered and selected automatically based on MIME type:
+
+```python
+from agentic.ingest import ExtractorRegistry
+
+# Register custom extractor
+registry = ExtractorRegistry()
+registry.register(MyCustomExtractor())
+
+# Auto-select extractor for content
+extractor = registry.get_extractor("application/pdf")
+result = await extractor.extract(raw_content)
+```
+
+### Extensibility Design
+
+The content ingestion system is designed for extensibility:
+
+1. **New Connectors**: Implement `Connector` ABC to add new data sources
+2. **New Extractors**: Implement `Extractor` ABC to support new file types
+3. **Custom Derivatives**: Extractors can produce multiple derivative types
+4. **Chained Extraction**: Future support for extraction pipelines (e.g., PDF → images → OCR)
+
+### OSS vs Platform Responsibilities
+
+| Component | Location | Reason |
+|-----------|----------|--------|
+| `Connector` ABC | **agentic** | Interface definition |
+| `FileUploadConnector` | **agentic** | Basic connector |
+| `Extractor` ABC | **agentic** | Interface definition |
+| Built-in extractors | **agentic** | PDF, DOCX, TXT, HTML |
+| `RawContent`, `ExtractionResult` | **agentic** | Pydantic models |
+| `ExtractorRegistry` | **agentic** | Auto-selection logic |
+| Connector configs/schedules | **platform** | Persistence, scheduling |
+| Storage of raw files | **platform** | Supabase Storage |
+| Storage of derivatives | **platform** | Supabase Storage |
+| Celery orchestration | **platform** | Async job execution |
+
+---
+
 ## Knowledge
 
 > **Status: Planned**
@@ -488,9 +681,10 @@ Platforms can be built on top of agentic for persistence, APIs, and multi-tenanc
 
 1. **v0.1** (current): Agent core with session support
 2. **v0.2**: Streaming support (Agent.stream(), Agent.astream())
-3. **v0.3**: Knowledge module - ChunkAndEmbed indexing, VectorSearch retrieval
-4. **v0.4**: Knowledge advanced - HybridSearch, Reranking
-5. **v0.5**: Orchestration module (Sequential, Supervisor, Router, Parallel)
-6. **v0.6**: Workflow module
-7. **v1.0**: Stable API, GraphRAG, comprehensive retrieval strategies
+3. **v0.3**: Content Ingestion - Connectors, Extractors, Registry
+4. **v0.4**: Knowledge module - ChunkAndEmbed indexing, VectorSearch retrieval
+5. **v0.5**: Knowledge advanced - HybridSearch, Reranking
+6. **v0.6**: Orchestration module (Sequential, Supervisor, Router, Parallel)
+7. **v0.7**: Workflow module
+8. **v1.0**: Stable API, GraphRAG, comprehensive retrieval strategies, advanced connectors
 

@@ -24,6 +24,8 @@ Core Components:
     
     - ExecutionContext: Runtime context for executions
     - ExecutionStatus: Status enum (PENDING, RUNNING, COMPLETED, etc.)
+    
+    - Knowledge: Indexing and retrieval for RAG applications
 
 See Also:
     - README.md for installation and quickstart
@@ -41,6 +43,31 @@ from agentic.workflow import Workflow, WorkflowOutput, WorkflowSession
 
 # Execution infrastructure
 from agentic.execution import ExecutionContext, ExecutionStatus
+
+# Knowledge module - base classes and interfaces
+from agentic.knowledge import (
+    KnowledgeStore,
+    IndexingAlgorithm,
+    RetrievalAlgorithm,
+    ChunkingStrategy,
+    Embedder,
+    IndexResult,
+    RetrievedChunk,
+    IndexingConfig,
+    RetrievalConfig,
+)
+
+# Ingest module - content ingestion (connectors & extractors)
+from agentic.ingest import (
+    RawContent,
+    Derivative,
+    ExtractionResult,
+    ContentItem,
+    Connector,
+    FileUploadConnector,
+    Extractor,
+    ExtractorRegistry,
+)
 
 __version__ = "0.1.0"
 
@@ -60,4 +87,23 @@ __all__ = [
     # Execution infrastructure
     "ExecutionContext",
     "ExecutionStatus",
+    # Knowledge (base classes)
+    "KnowledgeStore",
+    "IndexingAlgorithm",
+    "RetrievalAlgorithm",
+    "ChunkingStrategy",
+    "Embedder",
+    "IndexResult",
+    "RetrievedChunk",
+    "IndexingConfig",
+    "RetrievalConfig",
+    # Ingest (connectors & extractors)
+    "RawContent",
+    "Derivative",
+    "ExtractionResult",
+    "ContentItem",
+    "Connector",
+    "FileUploadConnector",
+    "Extractor",
+    "ExtractorRegistry",
 ]
