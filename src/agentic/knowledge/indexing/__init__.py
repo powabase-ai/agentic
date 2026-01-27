@@ -15,7 +15,7 @@ Example:
     >>> from agentic.knowledge.indexing import ChunkAndEmbedAlgorithm
     >>> from agentic.knowledge.chunking import RecursiveChunking
     >>> from agentic.knowledge.embedder import OpenAIEmbedder
-    >>> 
+    >>>
     >>> indexer = ChunkAndEmbedAlgorithm(
     ...     chunker=RecursiveChunking(chunk_size=500),
     ...     embedder=OpenAIEmbedder(),

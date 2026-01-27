@@ -6,7 +6,7 @@ multi-agent orchestrations, and complex workflows.
 
 Quick Start:
     >>> from agentic import Agent
-    >>> 
+    >>>
     >>> agent = Agent(
     ...     model="gpt-4o-mini",
     ...     system_prompt="You are a helpful assistant.",
@@ -18,13 +18,13 @@ Core Components:
     - Agent: Single LLM-powered agent
     - AgentOutput: Result of agent execution
     - AgentSession: Conversation history container
-    
+
     - Orchestration: Multi-agent coordination (not yet implemented)
     - Workflow: Pipeline execution (not yet implemented)
-    
+
     - ExecutionContext: Runtime context for executions
     - ExecutionStatus: Status enum (PENDING, RUNNING, COMPLETED, etc.)
-    
+
     - Knowledge: Indexing and retrieval for RAG applications
 
 See Also:
@@ -35,39 +35,43 @@ See Also:
 # Agent module - fully implemented
 from agentic.agent import Agent, AgentOutput, AgentSession
 
-# Orchestration module - placeholder
-from agentic.orchestration import Orchestration, OrchestrationOutput, OrchestrationSession
-
-# Workflow module - placeholder
-from agentic.workflow import Workflow, WorkflowOutput, WorkflowSession
-
 # Execution infrastructure
 from agentic.execution import ExecutionContext, ExecutionStatus
 
-# Knowledge module - base classes and interfaces
-from agentic.knowledge import (
-    KnowledgeStore,
-    IndexingAlgorithm,
-    RetrievalAlgorithm,
-    ChunkingStrategy,
-    Embedder,
-    IndexResult,
-    RetrievedChunk,
-    IndexingConfig,
-    RetrievalConfig,
-)
-
 # Ingest module - content ingestion (connectors & extractors)
 from agentic.ingest import (
-    RawContent,
+    Connector,
+    ContentItem,
     Derivative,
     ExtractionResult,
-    ContentItem,
-    Connector,
-    FileUploadConnector,
     Extractor,
     ExtractorRegistry,
+    FileUploadConnector,
+    RawContent,
 )
+
+# Knowledge module - base classes and interfaces
+from agentic.knowledge import (
+    ChunkingStrategy,
+    Embedder,
+    IndexingAlgorithm,
+    IndexingConfig,
+    IndexResult,
+    KnowledgeStore,
+    RetrievalAlgorithm,
+    RetrievalConfig,
+    RetrievedChunk,
+)
+
+# Orchestration module - placeholder
+from agentic.orchestration import (
+    Orchestration,
+    OrchestrationOutput,
+    OrchestrationSession,
+)
+
+# Workflow module - placeholder
+from agentic.workflow import Workflow, WorkflowOutput, WorkflowSession
 
 __version__ = "0.1.0"
 

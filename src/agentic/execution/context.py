@@ -11,17 +11,17 @@ from uuid import uuid4
 class ExecutionContext:
     """
     Runtime context for an execution.
-    
+
     ExecutionContext carries information about the current execution that may
     be needed by various components during processing. It is created at the
     start of each execution and passed through the execution pipeline.
-    
+
     Attributes:
         execution_id: Unique identifier for this execution
         session_id: Optional session this execution belongs to
         user_id: Optional user who initiated this execution
         metadata: Additional key-value metadata for this execution
-    
+
     Example:
         >>> ctx = ExecutionContext(
         ...     execution_id="exec-123",
@@ -31,19 +31,19 @@ class ExecutionContext:
         >>> ctx.execution_id
         'exec-123'
     """
-    
+
     execution_id: str = field(default_factory=lambda: str(uuid4()))
     session_id: str | None = None
     user_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-    
+
     def with_metadata(self, **kwargs: Any) -> "ExecutionContext":
         """
         Create a new context with additional metadata.
-        
+
         Args:
             **kwargs: Key-value pairs to add to metadata
-            
+
         Returns:
             New ExecutionContext with merged metadata
         """
@@ -54,4 +54,3 @@ class ExecutionContext:
             user_id=self.user_id,
             metadata=new_metadata,
         )
-

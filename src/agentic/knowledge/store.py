@@ -15,29 +15,29 @@ if TYPE_CHECKING:
 class KnowledgeStore(ABC):
     """
     Abstract interface for knowledge storage operations.
-    
+
     This interface defines how knowledge artifacts are stored and retrieved.
     Platform implementations (e.g., PgVectorKnowledgeStore) provide the
     actual storage logic.
-    
+
     The separation allows the agentic framework to define algorithms without
     being coupled to specific storage backends.
-    
+
     Example Implementation:
         >>> class PgVectorKnowledgeStore(KnowledgeStore):
         ...     def __init__(self, db_session, tenant_schema: str, kb_id: str):
         ...         self.session = db_session
         ...         self.schema = tenant_schema
         ...         self.kb_id = kb_id
-        ...     
+        ...
         ...     async def vector_search(self, embedding, top_k):
-        ...         # SELECT * FROM {schema}.chunks 
+        ...         # SELECT * FROM {schema}.chunks
         ...         # WHERE knowledge_base_id = {kb_id}
         ...         # ORDER BY embedding <=> {embedding}
         ...         # LIMIT {top_k}
         ...         ...
     """
-    
+
     @abstractmethod
     async def vector_search(
         self,
@@ -47,17 +47,17 @@ class KnowledgeStore(ABC):
     ) -> list["RetrievedChunk"]:
         """
         Search for similar chunks using vector similarity.
-        
+
         Args:
             embedding: Query embedding vector
             top_k: Maximum number of results to return
             filter_metadata: Optional metadata filters
-        
+
         Returns:
             List of RetrievedChunk objects, sorted by similarity (highest first)
         """
         ...
-    
+
     @abstractmethod
     async def full_text_search(
         self,
@@ -67,17 +67,17 @@ class KnowledgeStore(ABC):
     ) -> list["RetrievedChunk"]:
         """
         Search for chunks using full-text search.
-        
+
         Args:
             query: Text query string
             top_k: Maximum number of results to return
             filter_metadata: Optional metadata filters
-        
+
         Returns:
             List of RetrievedChunk objects, sorted by relevance
         """
         ...
-    
+
     @abstractmethod
     async def store_chunks(
         self,
@@ -86,16 +86,16 @@ class KnowledgeStore(ABC):
     ) -> int:
         """
         Store indexed chunks in the knowledge base.
-        
+
         Args:
             indexed_source_id: ID of the IndexedSource record
             chunks: List of chunk data dicts with text, embedding, metadata
-        
+
         Returns:
             Number of chunks stored
         """
         ...
-    
+
     @abstractmethod
     async def delete_chunks(
         self,
@@ -103,15 +103,15 @@ class KnowledgeStore(ABC):
     ) -> int:
         """
         Delete all chunks for an indexed source.
-        
+
         Args:
             indexed_source_id: ID of the IndexedSource record
-        
+
         Returns:
             Number of chunks deleted
         """
         ...
-    
+
     @abstractmethod
     async def get_chunk_count(
         self,
@@ -120,11 +120,11 @@ class KnowledgeStore(ABC):
     ) -> int:
         """
         Count chunks in the store.
-        
+
         Args:
             knowledge_base_id: Filter by knowledge base (optional)
             source_id: Filter by source (optional)
-        
+
         Returns:
             Number of chunks matching the filters
         """

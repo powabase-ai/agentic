@@ -25,14 +25,14 @@ Example:
     ...     RecursiveChunking,
     ...     OpenAIEmbedder,
     ... )
-    >>> 
+    >>>
     >>> # Index content
     >>> indexer = ChunkAndEmbedAlgorithm(
     ...     chunker=RecursiveChunking(chunk_size=500),
     ...     embedder=OpenAIEmbedder(),
     ... )
     >>> result = indexer.index("Long document content...")
-    >>> 
+    >>>
     >>> # Retrieve at runtime
     >>> retriever = VectorSearchAlgorithm(embedder=OpenAIEmbedder())
     >>> chunks = await retriever.aretrieve(query, store, config)
@@ -43,30 +43,6 @@ See Also:
 """
 
 # Base classes
-from agentic.knowledge.store import KnowledgeStore
-from agentic.knowledge.models import (
-    IndexResult,
-    RetrievedChunk,
-    IndexingConfig,
-    RetrievalConfig,
-    TextChunk,
-)
-
-# Indexing
-from agentic.knowledge.indexing import (
-    IndexingAlgorithm,
-    ChunkAndEmbedAlgorithm,
-    ChunkData,
-    ChunkEmbedResult,
-)
-
-# Retrieval
-from agentic.knowledge.retrieval import (
-    RetrievalAlgorithm,
-    VectorSearchAlgorithm,
-    HybridSearchAlgorithm,
-)
-
 # Chunking
 from agentic.knowledge.chunking import (
     ChunkingStrategy,
@@ -76,12 +52,35 @@ from agentic.knowledge.chunking import (
 
 # Embedder
 from agentic.knowledge.embedder import (
+    CohereEmbedder,
     Embedder,
     LiteLLMEmbedder,
     OpenAIEmbedder,
-    CohereEmbedder,
     VoyageEmbedder,
 )
+
+# Indexing
+from agentic.knowledge.indexing import (
+    ChunkAndEmbedAlgorithm,
+    ChunkData,
+    ChunkEmbedResult,
+    IndexingAlgorithm,
+)
+from agentic.knowledge.models import (
+    IndexingConfig,
+    IndexResult,
+    RetrievalConfig,
+    RetrievedChunk,
+    TextChunk,
+)
+
+# Retrieval
+from agentic.knowledge.retrieval import (
+    HybridSearchAlgorithm,
+    RetrievalAlgorithm,
+    VectorSearchAlgorithm,
+)
+from agentic.knowledge.store import KnowledgeStore
 
 __all__ = [
     # Store interface

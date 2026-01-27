@@ -4,23 +4,23 @@ TextExtractor - simple passthrough for text-based files.
 Handles plain text, markdown, and other text formats.
 """
 
-from agentic.ingest.extractor.base import Extractor, ExtractionError
-from agentic.ingest.models import RawContent, ExtractionResult, Derivative
+from agentic.ingest.extractor.base import ExtractionError, Extractor
+from agentic.ingest.models import Derivative, ExtractionResult, RawContent
 
 
 class TextExtractor(Extractor):
     """
     Extractor for plain text files.
-    
+
     This is the simplest extractor - it decodes bytes as text with
     optional encoding detection and produces a single text derivative.
-    
+
     Supported types:
         - text/plain (.txt)
         - text/markdown (.md)
         - text/x-python, text/x-java, etc. (source code)
         - text/* (any text type)
-    
+
     Example:
         >>> extractor = TextExtractor()
         >>> raw = RawContent(
@@ -32,7 +32,7 @@ class TextExtractor(Extractor):
         >>> print(result.get_primary_text())
         "Hello, world!"
     """
-    
+
     name = "text"
     supported_types = [
         "text/plain",
@@ -49,23 +49,23 @@ class TextExtractor(Extractor):
         "application/javascript",
         "text/*",  # Wildcard for any text type
     ]
-    
+
     def __init__(self, default_encoding: str = "utf-8"):
         """
         Initialize the text extractor.
-        
+
         Args:
             default_encoding: Encoding to use if detection fails
         """
         self.default_encoding = default_encoding
-    
+
     async def extract(self, raw: RawContent) -> ExtractionResult:
         """
         Extract text content from raw bytes.
-        
+
         Args:
             raw: RawContent with text bytes
-        
+
         Returns:
             ExtractionResult with a single text derivative
         """
@@ -82,8 +82,8 @@ class TextExtractor(Extractor):
                     extractor_name=self.name,
                     source_uri=raw.source_uri,
                     cause=e,
-                )
-        
+                ) from e
+
         # Determine format from MIME type
         if "markdown" in raw.mime_type:
             deriv_type = "markdown"
@@ -91,7 +91,7 @@ class TextExtractor(Extractor):
         else:
             deriv_type = "text"
             format_name = "plain"
-        
+
         return ExtractionResult(
             source_uri=raw.source_uri,
             mime_type=raw.mime_type,

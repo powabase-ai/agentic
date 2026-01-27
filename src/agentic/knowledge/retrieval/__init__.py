@@ -14,7 +14,7 @@ Future algorithms:
 Example:
     >>> from agentic.knowledge.retrieval import VectorSearchAlgorithm
     >>> from agentic.knowledge.embedder import OpenAIEmbedder
-    >>> 
+    >>>
     >>> retriever = VectorSearchAlgorithm(embedder=OpenAIEmbedder())
     >>> chunks = await retriever.aretrieve(
     ...     query="How do I reset my password?",
@@ -25,8 +25,8 @@ Example:
 
 from agentic.knowledge.retrieval.base import RetrievalAlgorithm
 from agentic.knowledge.retrieval.vector_search import (
-    VectorSearchAlgorithm,
     HybridSearchAlgorithm,
+    VectorSearchAlgorithm,
 )
 
 __all__ = [

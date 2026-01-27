@@ -7,10 +7,9 @@ Uses pypandoc to convert DOCX to markdown.
 
 import io
 import logging
-import tempfile
 
-from agentic.ingest.extractor.base import Extractor, ExtractionError
-from agentic.ingest.models import RawContent, ExtractionResult, Derivative
+from agentic.ingest.extractor.base import ExtractionError, Extractor
+from agentic.ingest.models import Derivative, ExtractionResult, RawContent
 
 logger = logging.getLogger(__name__)
 
@@ -18,31 +17,31 @@ logger = logging.getLogger(__name__)
 class DocxExtractor(Extractor):
     """
     Extract text from DOCX files, converting to markdown.
-    
+
     Uses pypandoc for high-quality conversion that preserves structure.
     Falls back to python-docx if pypandoc is not available.
-    
+
     Adapted from proven insurance-demo implementation.
-    
+
     Example:
         >>> extractor = DocxExtractor()
         >>> raw = RawContent(content=docx_bytes, mime_type="application/vnd...", ...)
         >>> result = await extractor.extract(raw)
         >>> print(result.get_primary_text())
     """
-    
+
     name = "docx"
     supported_types = [
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ]
-    
+
     async def extract(self, raw: RawContent) -> ExtractionResult:
         """
         Extract text from DOCX content.
-        
+
         Args:
             raw: RawContent with DOCX bytes
-        
+
         Returns:
             ExtractionResult with markdown derivative
         """
@@ -53,24 +52,20 @@ class DocxExtractor(Extractor):
             logger.warning("pypandoc not available, falling back to python-docx")
         except Exception as e:
             logger.warning(f"pypandoc failed: {e}, falling back to python-docx")
-        
+
         # Fallback to python-docx
         return self._extract_python_docx(raw)
-    
+
     def _extract_pypandoc(self, raw: RawContent) -> ExtractionResult:
         """Extract using pypandoc - converts to markdown with good formatting."""
         try:
             import pypandoc
         except ImportError:
-            raise ImportError("pypandoc not installed")
-        
+            raise ImportError("pypandoc not installed") from None
+
         # pypandoc works best with bytes directly
-        markdown_text = pypandoc.convert_text(
-            raw.content,
-            "md",
-            format="docx"
-        )
-        
+        markdown_text = pypandoc.convert_text(raw.content, "md", format="docx")
+
         return ExtractionResult(
             source_uri=raw.source_uri,
             mime_type=raw.mime_type,
@@ -87,7 +82,7 @@ class DocxExtractor(Extractor):
             extraction_method="pypandoc",
             stats={"bytes_processed": len(raw.content)},
         )
-    
+
     def _extract_python_docx(self, raw: RawContent) -> ExtractionResult:
         """Extract using python-docx as fallback."""
         try:
@@ -98,11 +93,11 @@ class DocxExtractor(Extractor):
                 "Install with: pip install pypandoc  OR  pip install python-docx",
                 extractor_name=self.name,
                 source_uri=raw.source_uri,
-            )
-        
+            ) from None
+
         # Open document from bytes
         doc = Document(io.BytesIO(raw.content))
-        
+
         # Extract paragraphs
         paragraphs = []
         for para in doc.paragraphs:
@@ -110,11 +105,13 @@ class DocxExtractor(Extractor):
             if text:
                 # Try to preserve heading structure
                 if para.style and para.style.name.startswith("Heading"):
-                    level = para.style.name[-1] if para.style.name[-1].isdigit() else "1"
+                    level = (
+                        para.style.name[-1] if para.style.name[-1].isdigit() else "1"
+                    )
                     paragraphs.append(f"{'#' * int(level)} {text}")
                 else:
                     paragraphs.append(text)
-        
+
         # Extract tables as markdown
         for table in doc.tables:
             rows = []
@@ -125,16 +122,16 @@ class DocxExtractor(Extractor):
                     rows.append("|" + "|".join(["---"] * len(cells)) + "|")
             if rows:
                 paragraphs.append("\n".join(rows))
-        
+
         full_text = "\n\n".join(paragraphs)
-        
+
         # Extract document properties
         auto_metadata = {
             "char_count": len(full_text),
             "paragraph_count": len(doc.paragraphs),
             "table_count": len(doc.tables),
         }
-        
+
         try:
             props = doc.core_properties
             if props.title:
@@ -143,7 +140,7 @@ class DocxExtractor(Extractor):
                 auto_metadata["author"] = props.author
         except Exception:
             pass
-        
+
         return ExtractionResult(
             source_uri=raw.source_uri,
             mime_type=raw.mime_type,
