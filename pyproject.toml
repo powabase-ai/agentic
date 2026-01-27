@@ -49,8 +49,6 @@ select = [
 ]
 ignore = [
     "E501",   # line too long (handled by formatter)
-    "W291",   # trailing whitespace (often in SQL/multiline strings)
-    "W293",   # blank line contains whitespace
 ]
 
 [tool.ruff.format]
