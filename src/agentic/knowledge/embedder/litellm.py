@@ -155,24 +155,30 @@ class LiteLLMEmbedder(Embedder):
         except Exception as e:
             logger.error(f"Embedding generation failed with {self.model}: {e}")
             raise
-
+    
     async def aembed(self, text: str) -> list[float]:
         """
-        Async version of embed.
-
+        Async version of embed (implements ABC).
+        
         Uses asyncio to run the sync embedding in a thread pool.
         """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self.embed, text)
-
+    
+    # Alias for backwards compatibility
+    async_embed = aembed
+    
     async def aembed_batch(self, texts: list[str]) -> list[list[float]]:
         """
-        Async version of embed_batch.
-
+        Async version of embed_batch (implements ABC).
+        
         Uses asyncio to run the sync embedding in a thread pool.
         """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self.embed_batch, texts)
+    
+    # Alias for backwards compatibility
+    async_embed_batch = aembed_batch
 
 
 class OpenAIEmbedder(LiteLLMEmbedder):
