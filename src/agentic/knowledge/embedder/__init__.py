@@ -12,20 +12,20 @@ Built-in embedders:
 
 Example:
     >>> from agentic.knowledge.embedder import OpenAIEmbedder
-    >>> 
+    >>>
     >>> embedder = OpenAIEmbedder(model="text-embedding-3-small")
     >>> embedding = embedder.embed("Hello, world!")
     >>> print(len(embedding))  # 1536 dimensions
-    
+
     >>> # Batch embedding
     >>> embeddings = embedder.embed_batch(["Hello", "World"])
 """
 
 from agentic.knowledge.embedder.base import Embedder
 from agentic.knowledge.embedder.litellm import (
+    CohereEmbedder,
     LiteLLMEmbedder,
     OpenAIEmbedder,
-    CohereEmbedder,
     VoyageEmbedder,
 )
 

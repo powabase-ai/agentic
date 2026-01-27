@@ -15,7 +15,7 @@ Future connectors (not yet implemented):
 
 Example:
     >>> from agentic.ingest.connector import FileUploadConnector
-    >>> 
+    >>>
     >>> connector = FileUploadConnector()
     >>> raw = await connector.fetch_bytes(
     ...     content=file_bytes,

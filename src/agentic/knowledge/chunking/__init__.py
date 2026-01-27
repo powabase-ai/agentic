@@ -10,7 +10,7 @@ Built-in strategies:
 
 Example:
     >>> from agentic.knowledge.chunking import RecursiveChunking
-    >>> 
+    >>>
     >>> chunker = RecursiveChunking(chunk_size=500, overlap=50)
     >>> chunks = chunker.chunk("Long document text...")
     >>> for chunk in chunks:

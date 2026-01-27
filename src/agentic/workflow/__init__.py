@@ -12,13 +12,12 @@ complex pipelines that can include:
 Status: Not yet implemented. See docs/CONCEPTS.md for planned features.
 """
 
-from agentic.workflow.workflow import Workflow
 from agentic.workflow.output import WorkflowOutput
 from agentic.workflow.session import WorkflowSession
+from agentic.workflow.workflow import Workflow
 
 __all__ = [
     "Workflow",
     "WorkflowOutput",
     "WorkflowSession",
 ]
-

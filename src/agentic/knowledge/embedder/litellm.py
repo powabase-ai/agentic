@@ -15,7 +15,7 @@ Adapted from proven implementation in agentic/etl/transformers/embedders/litellm
 
 import asyncio
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from agentic.knowledge.embedder.base import Embedder
 
@@ -52,9 +52,9 @@ class LiteLLMEmbedder(Embedder):
     def __init__(
         self,
         model: str = "text-embedding-3-small",
-        api_key: Optional[str] = None,
-        api_base: Optional[str] = None,
-        dimensions: Optional[int] = None,
+        api_key: str | None = None,
+        api_base: str | None = None,
+        dimensions: int | None = None,
         timeout: int = 600,
         **provider_params: Any,
     ):
@@ -118,7 +118,7 @@ class LiteLLMEmbedder(Embedder):
             raise ImportError(
                 "litellm is required for LiteLLMEmbedder. "
                 "Install with: pip install litellm"
-            )
+            ) from None
 
         if not texts:
             return []
@@ -155,28 +155,28 @@ class LiteLLMEmbedder(Embedder):
         except Exception as e:
             logger.error(f"Embedding generation failed with {self.model}: {e}")
             raise
-    
+
     async def aembed(self, text: str) -> list[float]:
         """
         Async version of embed (implements ABC).
-        
+
         Uses asyncio to run the sync embedding in a thread pool.
         """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self.embed, text)
-    
+
     # Alias for backwards compatibility
     async_embed = aembed
-    
+
     async def aembed_batch(self, texts: list[str]) -> list[list[float]]:
         """
         Async version of embed_batch (implements ABC).
-        
+
         Uses asyncio to run the sync embedding in a thread pool.
         """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self.embed_batch, texts)
-    
+
     # Alias for backwards compatibility
     async_embed_batch = aembed_batch
 

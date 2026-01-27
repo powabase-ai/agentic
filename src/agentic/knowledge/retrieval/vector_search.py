@@ -8,13 +8,12 @@ This algorithm:
 """
 
 import logging
-from typing import Optional
 
-from agentic.knowledge.retrieval.base import RetrievalAlgorithm
 from agentic.knowledge.embedder.base import Embedder
 from agentic.knowledge.embedder.litellm import OpenAIEmbedder
-from agentic.knowledge.store import KnowledgeStore
 from agentic.knowledge.models import RetrievalConfig, RetrievedChunk
+from agentic.knowledge.retrieval.base import RetrievalAlgorithm
+from agentic.knowledge.store import KnowledgeStore
 
 logger = logging.getLogger(__name__)
 
@@ -45,14 +44,14 @@ class VectorSearchAlgorithm(RetrievalAlgorithm):
 
     name = "vector_search"
 
-    def __init__(self, embedder: Optional[Embedder] = None):
+    def __init__(self, embedder: Embedder | None = None):
         self.embedder = embedder or OpenAIEmbedder()
 
     def retrieve(
         self,
         query: str,
         store: KnowledgeStore,
-        config: Optional[RetrievalConfig] = None,
+        config: RetrievalConfig | None = None,
     ) -> list[RetrievedChunk]:
         """
         Retrieve relevant chunks using vector similarity search.
@@ -95,7 +94,7 @@ class VectorSearchAlgorithm(RetrievalAlgorithm):
         self,
         query: str,
         store: KnowledgeStore,
-        config: Optional[RetrievalConfig] = None,
+        config: RetrievalConfig | None = None,
     ) -> list[RetrievedChunk]:
         """
         Async version of retrieve.
@@ -138,7 +137,7 @@ class HybridSearchAlgorithm(RetrievalAlgorithm):
 
     def __init__(
         self,
-        embedder: Optional[Embedder] = None,
+        embedder: Embedder | None = None,
         keyword_weight: float = 0.3,
         vector_weight: float = 0.7,
     ):
@@ -150,7 +149,7 @@ class HybridSearchAlgorithm(RetrievalAlgorithm):
         self,
         query: str,
         store: KnowledgeStore,
-        config: Optional[RetrievalConfig] = None,
+        config: RetrievalConfig | None = None,
     ) -> list[RetrievedChunk]:
         """
         Retrieve using hybrid search.
@@ -167,7 +166,7 @@ class HybridSearchAlgorithm(RetrievalAlgorithm):
         self,
         query: str,
         store: KnowledgeStore,
-        config: Optional[RetrievalConfig] = None,
+        config: RetrievalConfig | None = None,
     ) -> list[RetrievedChunk]:
         """Async hybrid search."""
         vector_algo = VectorSearchAlgorithm(embedder=self.embedder)

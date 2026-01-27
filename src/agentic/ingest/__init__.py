@@ -11,16 +11,16 @@ connectors and extractors to handle new content types.
 
 Example:
     >>> from agentic.ingest import FileUploadConnector, ExtractorRegistry
-    >>> 
+    >>>
     >>> # Upload a file
     >>> connector = FileUploadConnector()
     >>> raw = await connector.fetch_bytes(file_bytes, "report.pdf", "application/pdf")
-    >>> 
+    >>>
     >>> # Extract content
     >>> registry = ExtractorRegistry.default()
     >>> extractor = registry.get_extractor(raw.mime_type)
     >>> result = await extractor.extract(raw)
-    >>> 
+    >>>
     >>> print(result.derivatives[0].content)  # Extracted text
 
 See Also:
@@ -28,17 +28,17 @@ See Also:
     - agentic-platform for storage integration
 """
 
-from agentic.ingest.models import RawContent, Derivative, ExtractionResult, ContentItem
 from agentic.ingest.connector import Connector, FileUploadConnector
 from agentic.ingest.extractor import (
-    Extractor,
+    DocxExtractor,
     ExtractionError,
+    Extractor,
     ExtractorRegistry,
-    TextExtractor,
     HTMLExtractor,
     PDFExtractor,
-    DocxExtractor,
+    TextExtractor,
 )
+from agentic.ingest.models import ContentItem, Derivative, ExtractionResult, RawContent
 
 __all__ = [
     # Models

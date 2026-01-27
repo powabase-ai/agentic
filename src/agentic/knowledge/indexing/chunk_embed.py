@@ -9,7 +9,6 @@ This algorithm:
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
 
 from agentic.knowledge.chunking.base import ChunkingStrategy
 from agentic.knowledge.chunking.recursive import RecursiveChunking
@@ -24,7 +23,7 @@ logger = logging.getLogger(__name__)
 class ChunkData(TextChunk):
     """
     Extended chunk with embedding data.
-    
+
     Inherits from TextChunk (Pydantic model) and adds the embedding vector.
     """
 
@@ -41,11 +40,12 @@ class ChunkEmbedResult:
     Implements the same interface as IndexResult but standalone to avoid
     dataclass inheritance issues.
     """
+
     chunks: list[ChunkData] = field(default_factory=list)
     source_id: str | None = None
     strategy_name: str = "chunk_embed"
     stats: dict = field(default_factory=dict)
-    
+
     @property
     def artifact_count(self) -> int:
         """Number of chunks created."""
@@ -80,8 +80,8 @@ class ChunkAndEmbedAlgorithm(IndexingAlgorithm):
 
     def __init__(
         self,
-        chunker: Optional[ChunkingStrategy] = None,
-        embedder: Optional[Embedder] = None,
+        chunker: ChunkingStrategy | None = None,
+        embedder: Embedder | None = None,
     ):
         self.chunker = chunker or RecursiveChunking()
         self.embedder = embedder or OpenAIEmbedder()
@@ -89,8 +89,8 @@ class ChunkAndEmbedAlgorithm(IndexingAlgorithm):
     def index(
         self,
         content: str,
-        config: Optional[IndexingConfig] = None,
-        source_id: Optional[str] = None,
+        config: IndexingConfig | None = None,
+        source_id: str | None = None,
     ) -> ChunkEmbedResult:
         """
         Index content by chunking and embedding.
@@ -126,7 +126,7 @@ class ChunkAndEmbedAlgorithm(IndexingAlgorithm):
 
         # Step 3: Combine chunks with embeddings
         chunk_data_list: list[ChunkData] = []
-        for chunk, embedding in zip(text_chunks, embeddings):
+        for chunk, embedding in zip(text_chunks, embeddings, strict=True):
             chunk_data = ChunkData(
                 text=chunk.text,
                 index=chunk.index,
@@ -151,8 +151,8 @@ class ChunkAndEmbedAlgorithm(IndexingAlgorithm):
     async def aindex(
         self,
         content: str,
-        config: Optional[IndexingConfig] = None,
-        source_id: Optional[str] = None,
+        config: IndexingConfig | None = None,
+        source_id: str | None = None,
     ) -> ChunkEmbedResult:
         """
         Async version of index.
@@ -179,7 +179,7 @@ class ChunkAndEmbedAlgorithm(IndexingAlgorithm):
 
         # Step 3: Combine
         chunk_data_list: list[ChunkData] = []
-        for chunk, embedding in zip(text_chunks, embeddings):
+        for chunk, embedding in zip(text_chunks, embeddings, strict=True):
             chunk_data = ChunkData(
                 text=chunk.text,
                 index=chunk.index,

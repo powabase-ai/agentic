@@ -15,24 +15,24 @@ MIME type, and allows custom extractors to be registered.
 
 Example:
     >>> from agentic.ingest.extractor import ExtractorRegistry
-    >>> 
+    >>>
     >>> # Get default registry with built-in extractors
     >>> registry = ExtractorRegistry.default()
-    >>> 
+    >>>
     >>> # Auto-select extractor based on MIME type
     >>> extractor = registry.get_extractor("application/pdf")
     >>> result = await extractor.extract(raw_content)
-    >>> 
+    >>>
     >>> # Register custom extractor
     >>> registry.register(MyCustomExtractor())
 """
 
-from agentic.ingest.extractor.base import Extractor, ExtractionError
-from agentic.ingest.extractor.registry import ExtractorRegistry
-from agentic.ingest.extractor.text import TextExtractor
+from agentic.ingest.extractor.base import ExtractionError, Extractor
+from agentic.ingest.extractor.docx import DocxExtractor
 from agentic.ingest.extractor.html import HTMLExtractor
 from agentic.ingest.extractor.pdf import PDFExtractor
-from agentic.ingest.extractor.docx import DocxExtractor
+from agentic.ingest.extractor.registry import ExtractorRegistry
+from agentic.ingest.extractor.text import TextExtractor
 
 __all__ = [
     "Extractor",
