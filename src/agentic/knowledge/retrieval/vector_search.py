@@ -104,7 +104,7 @@ class VectorSearchAlgorithm(RetrievalAlgorithm):
         config = config or RetrievalConfig()
 
         # Step 1: Async embed the query
-        query_embedding = await self.embedder.async_embed(query)
+        query_embedding = await self.embedder.aembed(query)
 
         # Step 2: Async vector search
         raw_results = await store.avector_search(

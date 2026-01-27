@@ -15,7 +15,7 @@ from agentic.knowledge.chunking.recursive import RecursiveChunking
 from agentic.knowledge.embedder.base import Embedder
 from agentic.knowledge.embedder.litellm import OpenAIEmbedder
 from agentic.knowledge.indexing.base import IndexingAlgorithm
-from agentic.knowledge.models import IndexingConfig, TextChunk
+from agentic.knowledge.models import IndexingConfig, IndexResult, TextChunk
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +27,8 @@ class ChunkData(TextChunk):
     Inherits from TextChunk (Pydantic model) and adds the embedding vector.
     """
 
-    embedding: list[float] | None = None
-    tokens: int | None = None
+    embedding: Optional[list[float]] = None
+    tokens: Optional[int] = None
 
 
 @dataclass
@@ -175,7 +175,7 @@ class ChunkAndEmbedAlgorithm(IndexingAlgorithm):
 
         # Step 2: Async embed
         chunk_texts = [chunk.text for chunk in text_chunks]
-        embeddings = await self.embedder.async_embed_batch(chunk_texts)
+        embeddings = await self.embedder.aembed_batch(chunk_texts)
 
         # Step 3: Combine
         chunk_data_list: list[ChunkData] = []
