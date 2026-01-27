@@ -394,7 +394,7 @@ class VectorSearchAlgorithm(RetrievalAlgorithm):
         config: RetrievalConfig
     ) -> list[RetrievedChunk]:
         # 1. Embed query
-        query_embedding = await self.embedder.async_embed(query)
+        query_embedding = await self.embedder.aembed(query)
         # 2. Query store (platform-specific)
         raw_results = await store.vector_search(query_embedding, top_k=config.top_k)
         # 3. Post-process (filtering, reranking)
