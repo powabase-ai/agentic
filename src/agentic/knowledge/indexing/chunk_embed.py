@@ -8,6 +8,7 @@ This algorithm:
 """
 
 import logging
+from dataclasses import dataclass, field
 from typing import Optional
 
 from agentic.knowledge.indexing.base import IndexingAlgorithm
@@ -24,20 +25,25 @@ class ChunkData(TextChunk):
     """
     Extended chunk with embedding data.
     
-    Inherits from TextChunk and adds the embedding vector.
+    Inherits from TextChunk (Pydantic model) and adds the embedding vector.
     """
     embedding: Optional[list[float]] = None
     tokens: Optional[int] = None
 
 
-class ChunkEmbedResult(IndexResult):
+@dataclass
+class ChunkEmbedResult:
     """
     Result of ChunkAndEmbed indexing.
     
     Contains the list of chunks with their embeddings.
+    Implements the same interface as IndexResult but standalone to avoid
+    dataclass inheritance issues.
     """
+    chunks: list[ChunkData] = field(default_factory=list)
+    source_id: str | None = None
     strategy_name: str = "chunk_embed"
-    chunks: list[ChunkData] = []
+    stats: dict = field(default_factory=dict)
     
     @property
     def artifact_count(self) -> int:
