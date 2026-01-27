@@ -8,13 +8,14 @@ This algorithm:
 """
 
 import logging
+from dataclasses import dataclass, field
 from typing import Optional
 
-from agentic.knowledge.indexing.base import IndexingAlgorithm
 from agentic.knowledge.chunking.base import ChunkingStrategy
 from agentic.knowledge.chunking.recursive import RecursiveChunking
 from agentic.knowledge.embedder.base import Embedder
 from agentic.knowledge.embedder.litellm import OpenAIEmbedder
+from agentic.knowledge.indexing.base import IndexingAlgorithm
 from agentic.knowledge.models import IndexingConfig, IndexResult, TextChunk
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ class ChunkData(TextChunk):
     tokens: Optional[int] = None
 
 
+@dataclass
 class ChunkEmbedResult(IndexResult):
     """
     Result of ChunkAndEmbed indexing.
@@ -39,7 +41,7 @@ class ChunkEmbedResult(IndexResult):
     """
 
     strategy_name: str = "chunk_embed"
-    chunks: list[ChunkData] = []
+    chunks: list[ChunkData] = field(default_factory=list)
 
     @property
     def artifact_count(self) -> int:
