@@ -147,7 +147,10 @@ class ExtractorRegistry:
 
         This includes extractors for:
         - text/* (TextExtractor)
-        - HTML, PDF, DOCX (when implemented)
+        - HTML, PDF, DOCX
+
+        Environment variables used:
+        - MISTRAL_API_KEY: If set, enables Mistral OCR for PDF extraction
 
         Returns:
             ExtractorRegistry with built-ins registered
@@ -156,10 +159,11 @@ class ExtractorRegistry:
             >>> registry = ExtractorRegistry.default()
             >>> extractor = registry.get_extractor("text/plain")
         """
+        import os
+
         registry = cls()
 
         # Import and register built-in extractors
-        # These will be implemented in Task 1.8
         try:
             from agentic.ingest.extractor.text import TextExtractor
 
@@ -177,7 +181,9 @@ class ExtractorRegistry:
         try:
             from agentic.ingest.extractor.pdf import PDFExtractor
 
-            registry.register(PDFExtractor())
+            # Use Mistral OCR if API key is available
+            mistral_api_key = os.getenv("MISTRAL_API_KEY")
+            registry.register(PDFExtractor(mistral_api_key=mistral_api_key))
         except ImportError:
             pass  # Not yet implemented
 
