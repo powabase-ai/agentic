@@ -1,2 +1,0 @@
-"""Transformers for ETL pipeline"""
-

@@ -1,20 +1,113 @@
-from celery import Celery, Task
-from flask import Flask
+"""
+agentic - A minimal, well-documented agent framework.
 
+agentic provides a clean interface for building LLM-powered agents,
+multi-agent orchestrations, and complex workflows.
 
-def celery_init_app(app: Flask) -> Celery:
-    """allow Celery to access Flask application
+Quick Start:
+    >>> from agentic import Agent
+    >>>
+    >>> agent = Agent(
+    ...     model="gpt-4o-mini",
+    ...     system_prompt="You are a helpful assistant.",
+    ... )
+    >>> output = agent.run("Hello!")
+    >>> print(output.content)
 
-    e.g. Flask's db connection
-    """
+Core Components:
+    - Agent: Single LLM-powered agent
+    - AgentOutput: Result of agent execution
+    - AgentSession: Conversation history container
 
-    class FlaskTask(Task):
-        def __call__(self, *args: object, **kwargs: object) -> object:
-            with app.app_context():
-                return self.run(*args, **kwargs)
+    - Orchestration: Multi-agent coordination (not yet implemented)
+    - Workflow: Pipeline execution (not yet implemented)
 
-    celery_app = Celery(app.name, task_cls=FlaskTask)
-    celery_app.config_from_object(app.config["CELERY"])
-    celery_app.set_default()
-    app.extensions["celery"] = celery_app
-    return celery_app
+    - ExecutionContext: Runtime context for executions
+    - ExecutionStatus: Status enum (PENDING, RUNNING, COMPLETED, etc.)
+
+    - Knowledge: Indexing and retrieval for RAG applications
+
+See Also:
+    - README.md for installation and quickstart
+    - docs/CONCEPTS.md for detailed concept explanations
+"""
+
+# Agent module - fully implemented
+from agentic.agent import Agent, AgentOutput, AgentSession
+
+# Execution infrastructure
+from agentic.execution import ExecutionContext, ExecutionStatus
+
+# Ingest module - content ingestion (connectors & extractors)
+from agentic.ingest import (
+    Connector,
+    ContentItem,
+    Derivative,
+    ExtractionResult,
+    Extractor,
+    ExtractorRegistry,
+    FileUploadConnector,
+    RawContent,
+)
+
+# Knowledge module - base classes and interfaces
+from agentic.knowledge import (
+    ChunkingStrategy,
+    Embedder,
+    IndexingAlgorithm,
+    IndexingConfig,
+    IndexResult,
+    KnowledgeStore,
+    RetrievalAlgorithm,
+    RetrievalConfig,
+    RetrievedChunk,
+)
+
+# Orchestration module - placeholder
+from agentic.orchestration import (
+    Orchestration,
+    OrchestrationOutput,
+    OrchestrationSession,
+)
+
+# Workflow module - placeholder
+from agentic.workflow import Workflow, WorkflowOutput, WorkflowSession
+
+__version__ = "0.1.0"
+
+__all__ = [
+    # Agent (implemented)
+    "Agent",
+    "AgentOutput",
+    "AgentSession",
+    # Orchestration (placeholder)
+    "Orchestration",
+    "OrchestrationOutput",
+    "OrchestrationSession",
+    # Workflow (placeholder)
+    "Workflow",
+    "WorkflowOutput",
+    "WorkflowSession",
+    # Execution infrastructure
+    "ExecutionContext",
+    "ExecutionStatus",
+    # Knowledge (base classes)
+    "KnowledgeStore",
+    "IndexingAlgorithm",
+    "RetrievalAlgorithm",
+    "ChunkingStrategy",
+    "Embedder",
+    "IndexResult",
+    "RetrievedChunk",
+    "IndexingConfig",
+    "RetrievalConfig",
+    # Ingest (connectors & extractors)
+    "RawContent",
+    "Derivative",
+    "ExtractionResult",
+    "ContentItem",
+    "Connector",
+    "FileUploadConnector",
+    "Extractor",
+    "ExtractorRegistry",
+]
