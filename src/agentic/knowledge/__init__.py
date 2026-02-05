@@ -16,6 +16,7 @@ Built-in Implementations:
     - ChunkAndEmbedAlgorithm: Standard RAG indexing
     - VectorSearchAlgorithm: Semantic similarity retrieval
     - RecursiveChunking: Smart text chunking
+    - MarkdownHeaderChunking: Markdown header + length chunking
     - OpenAIEmbedder: OpenAI embeddings via LiteLLM
 
 Example:
@@ -47,6 +48,7 @@ See Also:
 from agentic.knowledge.chunking import (
     ChunkingStrategy,
     FixedSizeChunking,
+    MarkdownHeaderChunking,
     RecursiveChunking,
 )
 
@@ -103,6 +105,7 @@ __all__ = [
     # Chunking
     "ChunkingStrategy",
     "FixedSizeChunking",
+    "MarkdownHeaderChunking",
     "RecursiveChunking",
     # Embedders
     "Embedder",

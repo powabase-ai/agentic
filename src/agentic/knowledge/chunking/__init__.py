@@ -7,6 +7,7 @@ pieces suitable for embedding and retrieval.
 Built-in strategies:
 - FixedSizeChunking: Simple character-based chunking with overlap
 - RecursiveChunking: Smart chunking at natural boundaries (recommended)
+- MarkdownHeaderChunking: Split by Markdown headers, then by length
 
 Example:
     >>> from agentic.knowledge.chunking import RecursiveChunking
@@ -19,6 +20,7 @@ Example:
 
 from agentic.knowledge.chunking.base import ChunkingStrategy
 from agentic.knowledge.chunking.fixed import FixedSizeChunking
+from agentic.knowledge.chunking.markdown_header import MarkdownHeaderChunking
 from agentic.knowledge.chunking.recursive import RecursiveChunking
 from agentic.knowledge.models import TextChunk
 
@@ -26,5 +28,6 @@ __all__ = [
     "ChunkingStrategy",
     "TextChunk",
     "FixedSizeChunking",
+    "MarkdownHeaderChunking",
     "RecursiveChunking",
 ]

@@ -11,6 +11,7 @@ from agentic.knowledge import (
     IndexingConfig,
     IndexResult,
     KnowledgeStore,
+    MarkdownHeaderChunking,
     RetrievalAlgorithm,
     RetrievalConfig,
     RetrievedChunk,
@@ -160,6 +161,109 @@ class TestChunkingStrategy:
         assert "TestChunker" in repr_str
         assert "500" in repr_str
         assert "50" in repr_str
+
+
+class TestMarkdownHeaderChunking:
+    """Tests for MarkdownHeaderChunking strategy."""
+
+    def test_markdown_with_headers_and_paragraphs(self):
+        """Markdown with headers and paragraphs should be split by header then length."""
+        markdown = """# Introduction
+
+This is the introduction paragraph. It explains what this document is about.
+
+## Getting Started
+
+Here are the first steps to get started with the project.
+
+### Installation
+
+Run the following command to install the package.
+"""
+
+        chunker = MarkdownHeaderChunking(chunk_size=200, overlap=20)
+        chunks = chunker.chunk(markdown, source_id="doc-1")
+
+        assert len(chunks) >= 1
+        # Each chunk should have header prepended
+        for chunk in chunks:
+            assert chunk.source_id == "doc-1"
+            assert chunk.metadata["strategy"] == "markdown_header"
+            # Chunks under headers should have header metadata
+            assert "Header" in str(chunk.metadata) or chunk.text.startswith("#")
+
+        # First chunk should contain Introduction content with header
+        intro_chunks = [c for c in chunks if "Introduction" in c.text or "introduction" in c.text.lower()]
+        assert len(intro_chunks) >= 1
+        assert "introduction" in intro_chunks[0].text.lower() or "Introduction" in intro_chunks[0].text
+
+    def test_markdown_empty_input(self):
+        """Empty or whitespace-only input should return empty list."""
+        chunker = MarkdownHeaderChunking(chunk_size=500, overlap=50)
+
+        assert chunker.chunk("") == []
+        assert chunker.chunk("   \n\n  ") == []
+
+    def test_markdown_single_section(self):
+        """Single section without nested headers should produce one or more chunks."""
+        markdown = """# Overview
+
+This is a single section with some content.
+"""
+
+        chunker = MarkdownHeaderChunking(chunk_size=500, overlap=50)
+        chunks = chunker.chunk(markdown)
+
+        assert len(chunks) >= 1
+        assert chunks[0].text.startswith("# ")
+        assert "Overview" in chunks[0].text
+        assert "single section" in chunks[0].text
+
+    def test_markdown_nested_headers(self):
+        """Nested headers (h1, h2, h3) should preserve hierarchy in chunk metadata."""
+        markdown = """# Main Title
+
+Main content here.
+
+## Section One
+
+Section one content.
+
+### Subsection
+
+Subsection content.
+"""
+
+        chunker = MarkdownHeaderChunking(chunk_size=500, overlap=50)
+        chunks = chunker.chunk(markdown)
+
+        assert len(chunks) >= 2
+        # Subsection chunk should have "Subsection" as most specific header
+        subsection_chunks = [c for c in chunks if "Subsection" in c.text]
+        assert len(subsection_chunks) >= 1
+        assert subsection_chunks[0].metadata.get("Header 3") == "Subsection"
+
+    def test_markdown_long_content_splits_by_length(self):
+        """Long paragraphs under a header should be split by length."""
+        long_paragraph = "word " * 100  # ~500 chars
+        markdown = f"""# Long Section
+
+{long_paragraph}
+"""
+
+        chunker = MarkdownHeaderChunking(chunk_size=150, overlap=20)
+        chunks = chunker.chunk(markdown)
+
+        # Should produce multiple chunks due to length limit
+        assert len(chunks) >= 2
+        for chunk in chunks:
+            assert chunk.text.startswith("# Long Section")
+            assert chunk.metadata["strategy"] == "markdown_header"
+
+    def test_markdown_header_chunking_init_validation(self):
+        """MarkdownHeaderChunking should validate overlap < chunk_size."""
+        with pytest.raises(ValueError, match="Overlap.*must be less than chunk_size"):
+            MarkdownHeaderChunking(chunk_size=100, overlap=100)
 
 
 class TestEmbedder:
@@ -320,6 +424,11 @@ class TestModuleImports:
         assert hasattr(knowledge, "RetrievalAlgorithm")
         assert hasattr(knowledge, "ChunkingStrategy")
         assert hasattr(knowledge, "Embedder")
+
+        # Check chunking strategies
+        assert hasattr(knowledge, "RecursiveChunking")
+        assert hasattr(knowledge, "MarkdownHeaderChunking")
+        assert hasattr(knowledge, "FixedSizeChunking")
 
         # Check models
         assert hasattr(knowledge, "IndexResult")
