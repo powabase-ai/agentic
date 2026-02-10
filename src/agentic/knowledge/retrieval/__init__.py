@@ -24,6 +24,7 @@ Example:
 """
 
 from agentic.knowledge.retrieval.base import RetrievalAlgorithm
+from agentic.knowledge.retrieval.tree_search import TreeSearchAlgorithm
 from agentic.knowledge.retrieval.vector_search import (
     HybridSearchAlgorithm,
     VectorSearchAlgorithm,
@@ -33,4 +34,5 @@ __all__ = [
     "RetrievalAlgorithm",
     "VectorSearchAlgorithm",
     "HybridSearchAlgorithm",
+    "TreeSearchAlgorithm",
 ]
