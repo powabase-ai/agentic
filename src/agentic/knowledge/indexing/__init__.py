@@ -33,6 +33,7 @@ from agentic.knowledge.indexing.chunk_embed import (
 from agentic.knowledge.indexing.page_index import (
     PageIndexAlgorithm,
     PageIndexResult,
+    SectionData,
 )
 
 __all__ = [
@@ -42,4 +43,5 @@ __all__ = [
     "ChunkEmbedResult",
     "PageIndexAlgorithm",
     "PageIndexResult",
+    "SectionData",
 ]
