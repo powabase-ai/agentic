@@ -35,6 +35,7 @@ Agentic-specific additions (not in the reference PageIndex library):
 
 import asyncio
 import json
+import logging
 import re
 import os
 try:
@@ -42,12 +43,14 @@ try:
 except:
     from utils import *
 
+logger = logging.getLogger(__name__)
+
 
 # =============================================================================
 # Summary Generation
 # =============================================================================
 
-async def get_node_summary(node, summary_token_threshold=200, model=None):
+async def get_node_summary(node, summary_token_threshold=PAGEINDEX_SUMMARY_TOKEN_THRESHOLD, model=None):
     """Generate a summary for a single tree node.
 
     Optimization: if the node's text is already short enough (below
@@ -504,7 +507,9 @@ async def _infer_section_structure(node, model=None):
         with at least 2 items, or empty list if no structure was found.
     """
     text = node.get("text", "")
+    title = node.get("title", "Untitled")
     lines = text.split("\n")
+    logger.info(f"[_infer_section_structure] '{title}': {len(lines)} lines, asking LLM for structure")
 
     # Tag each line with markers so the LLM can reference positions.
     # Format: <line_1>actual content here<line_1>
@@ -513,7 +518,6 @@ async def _infer_section_structure(node, model=None):
         tagged_lines.append(f"<line_{i+1}>{line}<line_{i+1}>")
     tagged_text = "\n".join(tagged_lines)
 
-    title = node.get("title", "Untitled")
     prompt = f"""You are an expert in extracting hierarchical tree structure. Your task is to generate the tree structure for the document section titled "{title}".
 
 The structure variable is the numeric system which represents the index of the hierarchy section in the table of contents. For example, the first section has structure index 1, the first subsection has structure index 1.1, the second subsection has structure index 1.2, etc.
@@ -527,7 +531,12 @@ For the start_line, identify the line number where each section begins using the
 Rules:
 - The first entry MUST have start_line 1
 - Generate 2-8 top-level sections with subsections where content clearly has distinct sub-topics
-- Only add subsections where there are clear topic boundaries
+- Add subsections where there are clear section separators or topic boundaries
+- Avoid grouping multiple subsections together that should have been split
+- Be particularly sharp about where a section or subsection should start and end; apply the following sense checks when determining the range of a section or subsection
+  - Section start_lines should be monotonically increasing: the next section's start line should be >= the start line of all previous sections
+  - Ranges should never overlap between sections or subsections (they can start on the same page, but later sections should never start before previous sections)
+  - The overall range covered by child sections of a root section should not extend beyond the start_line of the next root section (see the previous overlap rule)
 - Prefer splitting at paragraph boundaries
 - Titles should be concise and descriptive
 
@@ -568,8 +577,10 @@ Text:
         valid_items.append(item)
 
     if len(valid_items) < 2:
+        logger.info(f"[_infer_section_structure] '{title}': LLM returned {len(valid_items)} valid sections (not enough to split)")
         return []
 
+    logger.info(f"[_infer_section_structure] '{title}': LLM returned {len(valid_items)} valid sections")
     # Sort by position and force the first entry to start at line 1
     # (the LLM sometimes starts at a later line, losing the beginning)
     valid_items.sort(key=lambda x: x["start_line"])
@@ -699,7 +710,7 @@ def _apply_inferred_structure(node, structure_list):
         node["text"] = lines[0] if lines else ""
 
 
-async def split_large_sections(tree_nodes, model=None, max_node_tokens=1500, min_split_tokens=500, min_paragraph_count=4):
+async def split_large_sections(tree_nodes, model=None, max_node_tokens=PAGEINDEX_MAX_NODE_TOKENS, min_split_tokens=PAGEINDEX_MIN_SPLIT_TOKENS, min_paragraph_count=PAGEINDEX_MIN_PARAGRAPH_COUNT):
     """Recursively walk the tree and split oversized leaf nodes via LLM inference.
 
     This is the main orchestrator for section splitting. It checks each leaf
@@ -731,6 +742,7 @@ async def split_large_sections(tree_nodes, model=None, max_node_tokens=1500, min
         min_split_tokens: Lower token threshold for structural-signal splitting.
         min_paragraph_count: Minimum paragraph blocks to trigger tier-2 split.
     """
+    logger.info(f"[split_large_sections] Processing {len(tree_nodes)} nodes")
     for node in tree_nodes:
         text = node.get("text", "")
         token_count = count_tokens(text, model=model)
@@ -748,7 +760,12 @@ async def split_large_sections(tree_nodes, model=None, max_node_tokens=1500, min
             if should_split:
                 structure_list = await _infer_section_structure(node, model=model)
                 if structure_list and len(structure_list) >= 2:
+                    logger.info(f"[split_large_sections] Splitting '{node.get('title', '')}' ({token_count} tokens): "
+                                f"LLM returned {len(structure_list)} sub-sections")
                     _apply_inferred_structure(node, structure_list)
+                else:
+                    logger.info(f"[split_large_sections] No split for '{node.get('title', '')}' ({token_count} tokens): "
+                                f"LLM found no meaningful sub-structure")
 
         # Recurse into children — including any newly created ones from
         # the splitting above. This enables multi-level splitting.
@@ -801,7 +818,7 @@ def clean_tree_for_output(tree_nodes):
 # Main Entry Point: Markdown Pipeline
 # =============================================================================
 
-async def md_to_tree(md_path, if_thinning=False, min_token_threshold=None, if_add_node_summary='no', summary_token_threshold=None, model=None, if_add_doc_description='no', if_add_node_text='no', if_add_node_id='yes', if_split_large_sections=True, max_node_tokens=1500, min_split_tokens=500, min_paragraph_count=4):
+async def md_to_tree(md_path, if_thinning=False, min_token_threshold=PAGEINDEX_MIN_TOKEN_THRESHOLD, if_add_node_summary='no', summary_token_threshold=PAGEINDEX_SUMMARY_TOKEN_THRESHOLD, model=None, if_add_doc_description='no', if_add_node_text='no', if_add_node_id='yes', if_split_large_sections=True, max_node_tokens=PAGEINDEX_MAX_NODE_TOKENS, min_split_tokens=PAGEINDEX_MIN_SPLIT_TOKENS, min_paragraph_count=PAGEINDEX_MIN_PARAGRAPH_COUNT):
     """Build a hierarchical tree from a markdown file.
 
     This is the main entry point for the markdown pipeline. It orchestrates
@@ -996,7 +1013,7 @@ def _trim_parent_text(tree_nodes, page_list):
         _trim_parent_text(children, page_list)
 
 
-def _merge_small_siblings(tree_nodes, model=None, min_merge_tokens=200):
+def _merge_small_siblings(tree_nodes, model=None, min_merge_tokens=PAGEINDEX_MIN_MERGE_TOKENS):
     """Merge tiny leaf nodes into an adjacent sibling or parent.
 
     **Problem**: The tree may contain very small leaf sections (e.g. a one-line
@@ -1087,6 +1104,10 @@ def _merge_small_siblings(tree_nodes, model=None, min_merge_tokens=200):
             _merge_small_siblings(children, model=model, min_merge_tokens=min_merge_tokens)
 
 
+def _count_tree_nodes(nodes):
+    return sum(1 + _count_tree_nodes(n.get('nodes', [])) for n in nodes)
+
+
 # =============================================================================
 # Main Entry Point: Page-Aware Pipeline
 # =============================================================================
@@ -1100,13 +1121,13 @@ async def md_to_tree_from_pages(
     if_add_node_text="no",
     if_add_node_id="yes",
     if_split_large_sections=True,
-    max_node_tokens=1500,
-    min_split_tokens=500,
-    min_paragraph_count=4,
+    max_node_tokens=PAGEINDEX_MAX_NODE_TOKENS,
+    min_split_tokens=PAGEINDEX_MIN_SPLIT_TOKENS,
+    min_paragraph_count=PAGEINDEX_MIN_PARAGRAPH_COUNT,
     # Parameters for the reference PageIndex tree_parser:
-    toc_check_page_num=20,
-    max_page_num_each_node=10,
-    max_token_num_each_node=20000,
+    toc_check_page_num=PAGEINDEX_TOC_CHECK_PAGE_NUM,
+    max_page_num_each_node=PAGEINDEX_MAX_PAGE_NUM_EACH_NODE,
+    max_token_num_each_node=PAGEINDEX_MAX_TOKEN_NUM_EACH_NODE,
 ):
     """Build a hierarchical tree from per-page text using the full ToC pipeline.
 
@@ -1173,7 +1194,7 @@ async def md_to_tree_from_pages(
     # tree_parser expects an "opt" namespace with configuration attributes.
     # We wrap our parameters in a SimpleNamespace for compatibility.
     opt = SimpleNamespace(
-        model=model or "gpt-4o-2024-11-20",
+        model=model or DEFAULT_MODEL,
         toc_check_page_num=toc_check_page_num,
         max_page_num_each_node=max_page_num_each_node,
         max_token_num_each_node=max_token_num_each_node,
@@ -1193,25 +1214,30 @@ async def md_to_tree_from_pages(
     # title, start_index, end_index, and nested nodes — but NO text yet.
     # The start_index/end_index are 1-based page numbers.
     tree_structure = await tree_parser(page_list, opt)
+    _logger.info(f"[md_to_tree_from_pages] tree_parser complete: {_count_tree_nodes(tree_structure)} nodes, {len(tree_structure)} roots")
 
     # --- Step 4: Assign node IDs ---
     # write_node_id() walks in pre-order and assigns "0001", "0002", etc.
     if if_add_node_id == "yes":
         write_node_id(tree_structure)
+    _logger.info(f"[md_to_tree_from_pages] Node IDs assigned")
 
     # --- Step 5: Add text from page ranges ---
     # add_node_text() (from utils) concatenates page_list[start-1..end-1]
     # text for each node. After this, every node has a "text" field.
     add_node_text(tree_structure, page_list)
+    _logger.info(f"[md_to_tree_from_pages] Text assigned to all nodes from page ranges")
 
     # --- Step 6: Agentic post-processing ---
     # _trim_parent_text: Prevents parent/child text duplication by trimming
     # parent text to only the intro pages before the first child.
     _trim_parent_text(tree_structure, page_list)
+    _logger.info(f"[md_to_tree_from_pages] Parent text trimmed")
 
     # _merge_small_siblings: Absorbs tiny leaf nodes (<200 tokens) into
     # adjacent siblings to reduce ToC noise.
     _merge_small_siblings(tree_structure, model=model)
+    _logger.info(f"[md_to_tree_from_pages] Small siblings merged. Tree now: {_count_tree_nodes(tree_structure)} nodes")
 
     # --- Step 7: Generate summaries and format output ---
     if if_add_node_summary == "yes":
@@ -1229,6 +1255,7 @@ async def md_to_tree_from_pages(
             summary_token_threshold=summary_token_threshold,
             model=model,
         )
+        _logger.info(f"[md_to_tree_from_pages] Summaries generated")
         if if_add_node_text == "no":
             # Strip text after summary generation if not requested
             tree_structure = format_structure(

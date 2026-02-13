@@ -12,6 +12,8 @@ import yaml
 from pathlib import Path
 from types import SimpleNamespace as config
 
+logger = logging.getLogger(__name__)
+
 # Lazy imports for PDF-only dependencies (not needed for md_to_tree path)
 PyPDF2 = None
 pymupdf = None
@@ -452,8 +454,11 @@ def add_preface_if_needed(data):
 
 
 
-def get_page_tokens(pdf_path, model="gpt-4o-2024-11-20", pdf_parser="PyPDF2"):
-    enc = tiktoken.encoding_for_model(model)
+def get_page_tokens(pdf_path, model=None, pdf_parser="PyPDF2"):
+    try:
+        enc = tiktoken.encoding_for_model(model or DEFAULT_MODEL)
+    except KeyError:
+        enc = tiktoken.get_encoding("cl100k_base")
     if pdf_parser == "PyPDF2":
         pdf_reader = _ensure_pypdf2().PdfReader(pdf_path)
         page_list = []
@@ -500,6 +505,7 @@ def get_number_of_pages(pdf_path):
 
 
 def post_processing(structure, end_physical_index):
+    logger.info(f"[post_processing] Converting {len(structure)} flat items to tree (end_physical_index={end_physical_index})")
     # First convert page_number to start_index in flat list
     for i, item in enumerate(structure):
         item['start_index'] = item.get('physical_index')
@@ -512,9 +518,11 @@ def post_processing(structure, end_physical_index):
             item['end_index'] = end_physical_index
     tree = list_to_tree(structure)
     if len(tree)!=0:
+        logger.info(f"[post_processing] Tree built: {len(tree)} root nodes")
         return tree
     else:
-        ### remove appear_start 
+        logger.info(f"[post_processing] list_to_tree returned empty — returning flat structure")
+        ### remove appear_start
         for node in structure:
             node.pop('appear_start', None)
             node.pop('physical_index', None)
@@ -645,12 +653,35 @@ def add_node_text_with_labels(node, pdf_pages):
 
 
 async def generate_node_summary(node, model=None):
-    prompt = f"""You are given a part of a document, your task is to generate a description of the partial document about what are main points covered in the partial document.
+    """Generate a summary for a single node, scoped to its title.
 
-    Partial Document Text: {node['text']}
-    
-    Directly return the description, do not include any other text.
+    The prompt uses the node's title as a topical guide so that the LLM
+    ignores bleed-over text from neighboring sections (which can appear
+    due to page-level text assignment in the page-aware pipeline).
+
+    Works for both:
+    - ToC-detected titles (literal headings from the document)
+    - LLM-inferred titles (descriptive labels from process_no_toc)
     """
+    title = node.get('title', '')
+    text = node.get('text', '')
+
+    prompt = f"""You are summarizing one section of a larger document.
+
+Section title: "{title}"
+This title may be a literal heading from the document or a descriptive label
+assigned to this section. Either way, use it as a topical guide.
+
+The text below may include content that belongs to neighboring sections
+(before or after this one). Summarize ONLY the content that is relevant to
+the topic described by the title above. Ignore any content that clearly
+belongs to a different section or topic.
+
+Section text:
+{text}
+
+Return ONLY the summary. Do not include any other text."""
+
     response = await ChatGPT_API_async(model, prompt)
     return response
 
@@ -752,3 +783,20 @@ class ConfigLoader:
         self._validate_keys(user_dict)
         merged = {**self._default_dict, **user_dict}
         return config(**merged)
+
+
+from agentic.knowledge.model_config import (
+    PAGEINDEX_INDEXING_MODEL,
+    PAGEINDEX_TOC_CHECK_PAGE_NUM,
+    PAGEINDEX_TOC_MAX_TOKENS_PER_CHUNK,
+    PAGEINDEX_MAX_PAGE_NUM_EACH_NODE,
+    PAGEINDEX_MAX_TOKEN_NUM_EACH_NODE,
+    PAGEINDEX_MAX_NODE_TOKENS,
+    PAGEINDEX_MIN_SPLIT_TOKENS,
+    PAGEINDEX_MIN_PARAGRAPH_COUNT,
+    PAGEINDEX_MIN_TOKEN_THRESHOLD,
+    PAGEINDEX_SUMMARY_TOKEN_THRESHOLD,
+    PAGEINDEX_MIN_MERGE_TOKENS,
+)
+
+DEFAULT_MODEL = PAGEINDEX_INDEXING_MODEL

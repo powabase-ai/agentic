@@ -286,7 +286,7 @@ class PageIndexAlgorithm(IndexingAlgorithm):
             content: The full markdown text content of the document.
             config: IndexingConfig with extra options dict:
                 - source_name (str): Display name for the document
-                - model (str): LLM model for tree building (default: "gpt-5-mini")
+                - model (str): LLM model for tree building
                 - if_add_node_summary ("yes"/"no"): Generate per-node summaries
                 - if_thinning (bool): Merge small subtrees (markdown pipeline)
                 - min_token_threshold (int): Thinning threshold in tokens
@@ -310,26 +310,35 @@ class PageIndexAlgorithm(IndexingAlgorithm):
             md_to_tree,
             md_to_tree_from_pages,
         )
+        from agentic.knowledge.model_config import (
+            PAGEINDEX_INDEXING_MODEL,
+            PAGEINDEX_TOC_CHECK_PAGE_NUM,
+            PAGEINDEX_MAX_PAGE_NUM_EACH_NODE,
+            PAGEINDEX_MAX_TOKEN_NUM_EACH_NODE,
+            PAGEINDEX_MAX_NODE_TOKENS,
+            PAGEINDEX_MIN_TOKEN_THRESHOLD,
+            PAGEINDEX_SUMMARY_TOKEN_THRESHOLD,
+        )
 
         # --- Extract configuration from the extra dict ---
         extra = config.extra or {}
         source_name = extra.get("source_name")
-        model = extra.get("model", "gpt-5-mini")
+        model = extra.get("model", PAGEINDEX_INDEXING_MODEL)
         if_add_node_summary = extra.get("if_add_node_summary", "yes")
         if_thinning = extra.get("if_thinning", False)
-        min_token_threshold = extra.get("min_token_threshold", 5000)
-        summary_token_threshold = extra.get("summary_token_threshold", 200)
+        min_token_threshold = extra.get("min_token_threshold", PAGEINDEX_MIN_TOKEN_THRESHOLD)
+        summary_token_threshold = extra.get("summary_token_threshold", PAGEINDEX_SUMMARY_TOKEN_THRESHOLD)
         split_large_sections = extra.get("split_large_sections", True)
-        max_node_tokens = extra.get("max_node_tokens", 1500)
+        max_node_tokens = extra.get("max_node_tokens", PAGEINDEX_MAX_NODE_TOKENS)
 
         # page_texts: if provided by PDF extractors, triggers the page-aware pipeline.
         # This is a list of strings where each element is the extracted text of one page.
         page_texts = extra.get("page_texts")
 
         # Page-aware pipeline config (only used when page_texts is provided)
-        toc_check_page_num = extra.get("toc_check_page_num", 20)
-        max_page_num_each_node = extra.get("max_page_num_each_node", 10)
-        max_token_num_each_node = extra.get("max_token_num_each_node", 20000)
+        toc_check_page_num = extra.get("toc_check_page_num", PAGEINDEX_TOC_CHECK_PAGE_NUM)
+        max_page_num_each_node = extra.get("max_page_num_each_node", PAGEINDEX_MAX_PAGE_NUM_EACH_NODE)
+        max_token_num_each_node = extra.get("max_token_num_each_node", PAGEINDEX_MAX_TOKEN_NUM_EACH_NODE)
 
         # --- Route to the correct pipeline ---
         if page_texts and len(page_texts) >= 2:

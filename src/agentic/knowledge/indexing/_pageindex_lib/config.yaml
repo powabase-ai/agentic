@@ -1,4 +1,6 @@
-model: "gpt-4o-2024-11-20"
+# NOTE: Authoritative defaults live in agentic/knowledge/model_config.py.
+# This file is only used when ConfigLoader is invoked directly (standalone).
+model: "gpt-4.1-nano"
 toc_check_page_num: 20
 max_page_num_each_node: 10
 max_token_num_each_node: 20000

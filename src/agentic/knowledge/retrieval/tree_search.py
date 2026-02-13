@@ -13,6 +13,8 @@ import logging
 import re
 from dataclasses import dataclass
 
+from agentic.knowledge.model_config import PAGEINDEX_RETRIEVAL_MODEL
+
 logger = logging.getLogger(__name__)
 
 
@@ -193,7 +195,7 @@ class TreeSearchAlgorithm:
             ordered by relevance.
         """
         config = config or {}
-        retrieval_model = config.get("retrieval_model", "gpt-4o-mini")
+        retrieval_model = config.get("retrieval_model", PAGEINDEX_RETRIEVAL_MODEL)
 
         # Build compact summaries
         summaries = []
@@ -265,7 +267,7 @@ If all documents seem relevant, include all of them. If none seem relevant, retu
                 - structure: JSONB tree hierarchy (metadata only)
                 - doc_name, doc_description, source_id, knowledge_base_id
             config: Optional config dict with:
-                - retrieval_model: LLM model (default: "gpt-4o-mini")
+                - retrieval_model: LLM model (default: PAGEINDEX_RETRIEVAL_MODEL)
                 - top_k: Max nodes to select (default: 5)
 
         Returns:
@@ -276,7 +278,7 @@ If all documents seem relevant, include all of them. If none seem relevant, retu
             return []
 
         config = config or {}
-        retrieval_model = config.get("retrieval_model", "gpt-4o-mini")
+        retrieval_model = config.get("retrieval_model", PAGEINDEX_RETRIEVAL_MODEL)
         top_k = config.get("top_k", 5)
 
         # Build condensed views with document-scoped node ID prefixes.
@@ -308,13 +310,17 @@ Return the most relevant node IDs as a JSON array:"""
 
         import litellm
 
-        response = await litellm.acompletion(
-            model=retrieval_model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-        )
+        try:
+            response = await litellm.acompletion(
+                model=retrieval_model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+            )
+            response_text = response.choices[0].message.content or ""
+        except Exception as e:
+            logger.warning(f"Node selection LLM call failed: {e}")
+            return []
 
-        response_text = response.choices[0].message.content or ""
         selected_ids = _extract_node_ids_from_response(response_text)
 
         logger.info(
