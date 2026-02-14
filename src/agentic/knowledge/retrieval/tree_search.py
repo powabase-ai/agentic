@@ -23,8 +23,8 @@ class SelectedNode:
     """A node selected by the LLM during tree-search reasoning.
 
     Contains enough metadata for the search service to fetch the
-    corresponding section text from page_index_sections and build
-    RetrievedChunk objects.
+    corresponding section text from page_index_nodes and build
+    RetrievedItem objects.
     """
 
     toc_id: str  # UUID of the page_index_toc record
@@ -168,7 +168,7 @@ class TreeSearchAlgorithm:
     3. Returns SelectedNode references (no text lookup)
 
     The search service handles fetching actual section text from the DB
-    and building RetrievedChunk objects.
+    and building RetrievedItem objects.
 
     Supports multiple documents per knowledge base by prefixing node IDs
     with a document index (e.g. "d0:0001", "d1:0003") so the LLM can

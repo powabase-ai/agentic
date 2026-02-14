@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from agentic.knowledge.models import RetrievalConfig, RetrievedChunk
+    from agentic.knowledge.models import RetrievalConfig, RetrievedItem
     from agentic.knowledge.store import KnowledgeStore
 
 
@@ -53,7 +53,7 @@ class RetrievalAlgorithm(ABC):
         query: str,
         store: "KnowledgeStore",
         config: "RetrievalConfig",
-    ) -> list["RetrievedChunk"]:
+    ) -> list["RetrievedItem"]:
         """
         Retrieve relevant chunks for a query.
 
@@ -63,7 +63,7 @@ class RetrievalAlgorithm(ABC):
             config: Configuration for the retrieval operation
 
         Returns:
-            List of RetrievedChunk objects, sorted by relevance
+            List of RetrievedItem objects, sorted by relevance
 
         Example:
             >>> chunks = await retriever.retrieve(
@@ -78,9 +78,9 @@ class RetrievalAlgorithm(ABC):
 
     def _apply_threshold(
         self,
-        chunks: list["RetrievedChunk"],
+        chunks: list["RetrievedItem"],
         threshold: float,
-    ) -> list["RetrievedChunk"]:
+    ) -> list["RetrievedItem"]:
         """
         Filter chunks below similarity threshold.
 

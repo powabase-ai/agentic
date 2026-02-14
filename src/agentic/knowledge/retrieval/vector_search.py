@@ -11,7 +11,7 @@ import logging
 
 from agentic.knowledge.embedder.base import Embedder
 from agentic.knowledge.embedder.litellm import OpenAIEmbedder
-from agentic.knowledge.models import RetrievalConfig, RetrievedChunk
+from agentic.knowledge.models import RetrievalConfig, RetrievedItem
 from agentic.knowledge.retrieval.base import RetrievalAlgorithm
 from agentic.knowledge.store import KnowledgeStore
 
@@ -52,7 +52,7 @@ class VectorSearchAlgorithm(RetrievalAlgorithm):
         query: str,
         store: KnowledgeStore,
         config: RetrievalConfig | None = None,
-    ) -> list[RetrievedChunk]:
+    ) -> list[RetrievedItem]:
         """
         Retrieve relevant chunks using vector similarity search.
 
@@ -95,7 +95,7 @@ class VectorSearchAlgorithm(RetrievalAlgorithm):
         query: str,
         store: KnowledgeStore,
         config: RetrievalConfig | None = None,
-    ) -> list[RetrievedChunk]:
+    ) -> list[RetrievedItem]:
         """
         Async version of retrieve.
 
@@ -150,7 +150,7 @@ class HybridSearchAlgorithm(RetrievalAlgorithm):
         query: str,
         store: KnowledgeStore,
         config: RetrievalConfig | None = None,
-    ) -> list[RetrievedChunk]:
+    ) -> list[RetrievedItem]:
         """
         Retrieve using hybrid search.
 
@@ -167,7 +167,7 @@ class HybridSearchAlgorithm(RetrievalAlgorithm):
         query: str,
         store: KnowledgeStore,
         config: RetrievalConfig | None = None,
-    ) -> list[RetrievedChunk]:
+    ) -> list[RetrievedItem]:
         """Async hybrid search."""
         vector_algo = VectorSearchAlgorithm(embedder=self.embedder)
         return await vector_algo.aretrieve(query, store, config)

@@ -43,15 +43,15 @@ class ChunkingStrategy(ABC):
 
     def __init__(
         self,
-        chunk_size: int = 500,
+        chunk_size: int = 2000,
         overlap: int = 50,
     ) -> None:
         """
         Initialize the chunking strategy.
 
         Args:
-            chunk_size: Target size for chunks (in characters)
-            overlap: Overlap between consecutive chunks
+            chunk_size: Target size for chunks (in tokens)
+            overlap: Overlap between consecutive chunks (in tokens)
         """
         if chunk_size <= 0:
             raise ValueError("chunk_size must be positive")

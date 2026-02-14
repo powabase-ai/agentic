@@ -184,19 +184,17 @@ async def extract_toc_content(content, model=None):
     response = response + new_response
     if_complete = await check_if_toc_transformation_is_complete(content, response, model)
 
+    iteration_count = 0
     while not (if_complete == "yes" and finish_reason == "finished"):
-        chat_history = [
-            {"role": "user", "content": prompt},
-            {"role": "assistant", "content": response},
-        ]
-        prompt = f"""please continue the generation of table of contents , directly output the remaining part of the structure"""
+        iteration_count += 1
+        chat_history.append({"role": "user", "content": prompt})
         new_response, finish_reason = await ChatGPT_API_async_with_finish_reason(model=model, prompt=prompt, chat_history=chat_history)
+        chat_history.append({"role": "assistant", "content": new_response})
         response = response + new_response
         if_complete = await check_if_toc_transformation_is_complete(content, response, model)
-        logger.info(f"[extract_toc_content] Continuation round {len(chat_history)//2}: complete={if_complete}, finish_reason={finish_reason}")
+        logger.info(f"[extract_toc_content] Continuation round {iteration_count}: complete={if_complete}, finish_reason={finish_reason}")
 
-        # Optional: Add a maximum retry limit to prevent infinite loops
-        if len(chat_history) > 5:  # Arbitrary limit of 10 attempts
+        if iteration_count >= 5:
             raise Exception('Failed to complete table of contents after maximum retries')
 
     return response

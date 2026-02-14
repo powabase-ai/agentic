@@ -72,7 +72,7 @@ from agentic.knowledge.models import (
     IndexingConfig,
     IndexResult,
     RetrievalConfig,
-    RetrievedChunk,
+    RetrievedItem,
     TextChunk,
 )
 
@@ -89,7 +89,7 @@ __all__ = [
     "KnowledgeStore",
     # Models
     "IndexResult",
-    "RetrievedChunk",
+    "RetrievedItem",
     "IndexingConfig",
     "RetrievalConfig",
     "TextChunk",

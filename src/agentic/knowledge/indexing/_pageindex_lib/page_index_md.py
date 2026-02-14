@@ -40,7 +40,7 @@ import re
 import os
 try:
     from .utils import *
-except:
+except ImportError:
     from utils import *
 
 logger = logging.getLogger(__name__)
@@ -216,7 +216,7 @@ def extract_node_text_content(node_list, markdown_lines):
             line_content = markdown_lines[node['line_num'] - 1]
             header_match = re.match(r'^(#{1,6})', line_content)
             if header_match is None:
-                print(f"Warning: Line {node['line_num']} does not contain a valid header: '{line_content}'")
+                logger.warning(f"Line {node['line_num']} does not contain a valid header: '{line_content}'")
                 continue
             level = len(header_match.group(1))
 
@@ -870,12 +870,12 @@ async def md_to_tree(md_path, if_thinning=False, min_token_threshold=PAGEINDEX_M
     doc_name = os.path.splitext(os.path.basename(md_path))[0]
 
     # --- Step 1: Extract headers ---
-    print(f"Extracting nodes from markdown...")
+    logger.info("Extracting nodes from markdown...")
     node_list, markdown_lines = extract_nodes_from_markdown(markdown_content)
 
     if node_list:
         # --- Step 2: Assign text slices ---
-        print(f"Extracting text content from nodes...")
+        logger.info("Extracting text content from nodes...")
         nodes_with_content = extract_node_text_content(node_list, markdown_lines)
 
         # --- Optional: Thinning ---
@@ -883,18 +883,18 @@ async def md_to_tree(md_path, if_thinning=False, min_token_threshold=PAGEINDEX_M
         # Requires two passes: first compute cumulative token counts, then merge.
         if if_thinning:
             nodes_with_content = update_node_list_with_text_token_count(nodes_with_content, model=model)
-            print(f"Thinning nodes...")
+            logger.info("Thinning nodes...")
             nodes_with_content = tree_thinning_for_index(nodes_with_content, min_token_threshold, model=model)
 
         # --- Step 3: Build nested tree ---
-        print(f"Building tree from nodes...")
+        logger.info("Building tree from nodes...")
         tree_structure = build_tree_from_nodes(nodes_with_content)
     else:
         # FALLBACK: No markdown headers found.
         # Wrap the entire document as a single root node so the LLM splitting
         # step can still break it into logical sections. Without this, a
         # plain-text document would produce no tree at all.
-        print(f"No markdown headers found, creating root node for splitting...")
+        logger.info("No markdown headers found, creating root node for splitting...")
         tree_structure = [{
             'title': doc_name,
             'text': markdown_content.strip(),
@@ -907,7 +907,7 @@ async def md_to_tree(md_path, if_thinning=False, min_token_threshold=PAGEINDEX_M
     # This is especially important for the no-header fallback (single root node)
     # where the entire document text is in one leaf.
     if if_split_large_sections:
-        print(f"Splitting large sections (threshold: {max_node_tokens} tokens)...")
+        logger.info(f"Splitting large sections (threshold: {max_node_tokens} tokens)...")
         await split_large_sections(tree_structure, model=model, max_node_tokens=max_node_tokens, min_split_tokens=min_split_tokens, min_paragraph_count=min_paragraph_count)
 
     # --- Step 5: Assign final node IDs ---
@@ -918,7 +918,7 @@ async def md_to_tree(md_path, if_thinning=False, min_token_threshold=PAGEINDEX_M
         write_node_id(tree_structure)
 
     # --- Steps 6-7: Format and generate summaries ---
-    print(f"Formatting tree structure...")
+    logger.info("Formatting tree structure...")
 
     if if_add_node_summary == 'yes':
         # Include text in the formatted structure because summaries are
@@ -927,7 +927,7 @@ async def md_to_tree(md_path, if_thinning=False, min_token_threshold=PAGEINDEX_M
 
         # Generate summaries for every node concurrently.
         # Leaf nodes get "summary", parent nodes get "prefix_summary".
-        print(f"Generating summaries for each node...")
+        logger.info("Generating summaries for each node...")
         tree_structure = await generate_summaries_for_structure_md(tree_structure, summary_token_threshold=summary_token_threshold, model=model)
 
         if if_add_node_text == 'no':
@@ -937,7 +937,7 @@ async def md_to_tree(md_path, if_thinning=False, min_token_threshold=PAGEINDEX_M
             tree_structure = format_structure(tree_structure, order = ['title', 'node_id', 'summary', 'prefix_summary', 'line_num', 'nodes'])
 
         if if_add_doc_description == 'yes':
-            print(f"Generating document description...")
+            logger.info("Generating document description...")
             clean_structure = create_clean_structure_for_description(tree_structure)
             doc_description = generate_doc_description(clean_structure, model=model)
             return {

@@ -392,7 +392,7 @@ class VectorSearchAlgorithm(RetrievalAlgorithm):
         query: str, 
         store: KnowledgeStore,  # Abstract interface
         config: RetrievalConfig
-    ) -> list[RetrievedChunk]:
+    ) -> list[RetrievedItem]:
         # 1. Embed query
         query_embedding = await self.embedder.aembed(query)
         # 2. Query store (platform-specific)

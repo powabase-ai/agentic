@@ -27,12 +27,12 @@ class RecursiveChunking(ChunkingStrategy):
     This is the recommended strategy for most RAG applications.
 
     Args:
-        chunk_size: Maximum characters per chunk (default: 1000)
-        overlap: Number of overlapping characters between chunks (default: 200)
+        chunk_size: Maximum tokens per chunk (default: 2000)
+        overlap: Number of overlapping tokens between chunks (default: 50)
         separators: List of separators to try, in order of preference
 
     Example:
-        >>> chunker = RecursiveChunking(chunk_size=500, overlap=50)
+        >>> chunker = RecursiveChunking(chunk_size=2000, overlap=50)
         >>> chunks = chunker.chunk("Long document with paragraphs...")
         >>> for chunk in chunks:
         ...     print(f"Chunk {chunk.index}: {len(chunk.text)} chars")
@@ -55,8 +55,8 @@ class RecursiveChunking(ChunkingStrategy):
 
     def __init__(
         self,
-        chunk_size: int = 1000,
-        overlap: int = 200,
+        chunk_size: int = 2000,
+        overlap: int = 50,
         separators: list[str] | None = None,
     ):
         if overlap >= chunk_size:
@@ -83,6 +83,10 @@ class RecursiveChunking(ChunkingStrategy):
         """
         Split text into chunks using recursive splitting at natural boundaries.
 
+        Chunk size and overlap are measured in tokens. Natural break points
+        (paragraph, sentence, word boundaries) are found in character space
+        and snapped back to the nearest token boundary.
+
         Args:
             text: The text content to chunk
             source_id: Optional source identifier for chunk metadata
@@ -91,60 +95,73 @@ class RecursiveChunking(ChunkingStrategy):
             List of TextChunk objects
         """
         content = self._clean_text(text)
-        content_length = len(content)
-
-        if content_length == 0:
+        if not content:
             return []
 
-        if content_length <= self.chunk_size:
+        from agentic.knowledge.chunking.token_utils import (
+            build_token_char_map,
+            char_to_token_pos,
+        )
+
+        char_map = build_token_char_map(content)
+        total_tokens = len(char_map) - 1
+
+        if total_tokens <= self.chunk_size:
             return [
                 TextChunk(
                     text=content,
                     index=0,
                     start_char=0,
-                    end_char=content_length,
+                    end_char=len(content),
                     source_id=source_id,
-                    metadata={"strategy": self.name},
+                    metadata={"strategy": self.name, "chunk_size": total_tokens},
                 )
             ]
 
         chunks: list[TextChunk] = []
         chunk_index = 0
-        start = 0
+        token_start = 0
 
-        while start < content_length:
-            end = min(start + self.chunk_size, content_length)
+        while token_start < total_tokens:
+            token_end = min(token_start + self.chunk_size, total_tokens)
+            char_start = char_map[token_start]
+            char_end = char_map[token_end]
 
-            # If not at end, find best break point
-            if end < content_length:
-                end = self._find_break_point(content, start, end)
+            # Find natural break point in character space
+            if token_end < total_tokens:
+                break_char = self._find_break_point(content, char_start, char_end)
+                # Snap to nearest token boundary (<= break_char)
+                token_end = char_to_token_pos(char_map, break_char)
+                if token_end <= token_start:
+                    token_end = min(
+                        token_start + max(1, self.chunk_size // 10), total_tokens
+                    )
+                char_end = char_map[token_end]
 
-            chunk_text = content[start:end].strip()
-
+            chunk_text = content[char_start:char_end].strip()
             if chunk_text:
                 chunks.append(
                     TextChunk(
                         text=chunk_text,
                         index=chunk_index,
-                        start_char=start,
-                        end_char=end,
+                        start_char=char_start,
+                        end_char=char_end,
                         source_id=source_id,
                         metadata={
                             "strategy": self.name,
-                            "chunk_size": len(chunk_text),
+                            "chunk_size": token_end - token_start,
                         },
                     )
                 )
                 chunk_index += 1
 
             # Calculate next start position with overlap
-            new_start = end - self.overlap
-
-            # Prevent infinite loop
-            if new_start <= start:
-                new_start = min(content_length, start + max(1, self.chunk_size // 10))
-
-            start = new_start
+            new_token_start = token_end - self.overlap
+            if new_token_start <= token_start:
+                new_token_start = min(
+                    total_tokens, token_start + max(1, self.chunk_size // 10)
+                )
+            token_start = new_token_start
 
         return chunks
 

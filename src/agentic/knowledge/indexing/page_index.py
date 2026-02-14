@@ -51,7 +51,7 @@ class SectionData:
     """Data for a single section/node extracted from the tree.
 
     Each SectionData corresponds to one node in the hierarchical tree and is
-    stored as an individual row in the `page_index_sections` database table.
+    stored as an individual row in the `page_index_nodes` database table.
     During retrieval, only the sections whose node_ids were selected by the
     LLM (from the toc_structure) are fetched.
 

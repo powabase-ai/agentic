@@ -60,7 +60,7 @@ from agentic.knowledge import (
     KnowledgeStore,
     RetrievalAlgorithm,
     RetrievalConfig,
-    RetrievedChunk,
+    RetrievedItem,
 )
 
 # Orchestration module - placeholder
@@ -98,7 +98,7 @@ __all__ = [
     "ChunkingStrategy",
     "Embedder",
     "IndexResult",
-    "RetrievedChunk",
+    "RetrievedItem",
     "IndexingConfig",
     "RetrievalConfig",
     # Ingest (connectors & extractors)
