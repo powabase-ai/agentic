@@ -61,6 +61,17 @@ from agentic.knowledge.embedder import (
     VoyageEmbedder,
 )
 
+# Reranker
+from agentic.knowledge.reranker import (
+    CohereReranker,
+    JinaReranker,
+    LiteLLMReranker,
+    Reranker,
+    RerankResult,
+    VoyageReranker,
+    ZeroEntropyReranker,
+)
+
 # Indexing
 from agentic.knowledge.indexing import (
     ChunkAndEmbedAlgorithm,
@@ -71,6 +82,7 @@ from agentic.knowledge.indexing import (
 from agentic.knowledge.models import (
     IndexingConfig,
     IndexResult,
+    RerankerConfig,
     RetrievalConfig,
     RetrievedItem,
     TextChunk,
@@ -92,6 +104,7 @@ __all__ = [
     "RetrievedItem",
     "IndexingConfig",
     "RetrievalConfig",
+    "RerankerConfig",
     "TextChunk",
     # Indexing
     "IndexingAlgorithm",
@@ -113,4 +126,12 @@ __all__ = [
     "OpenAIEmbedder",
     "CohereEmbedder",
     "VoyageEmbedder",
+    # Rerankers
+    "Reranker",
+    "RerankResult",
+    "LiteLLMReranker",
+    "CohereReranker",
+    "VoyageReranker",
+    "JinaReranker",
+    "ZeroEntropyReranker",
 ]

@@ -1,12 +1,12 @@
 """
-PageIndex LLM model & pipeline configuration.
+Knowledge module model & pipeline configuration.
 
-Central defaults for all LLM models used in the PageIndex pipeline.
-To change the default model for indexing or retrieval, update the
-constants below — all Python code references these.
+Central defaults for all models used in knowledge pipelines.
+To change the default model for indexing, retrieval, or reranking,
+update the constants below — all Python code references these.
 
-Frontend defaults (knowledge-bases/page.tsx, [kb_id]/page.tsx) must
-be updated separately to match.
+Frontend defaults (knowledge-bases/page.tsx, [kb_id]/page.tsx,
+constants.ts) must be updated separately to match.
 """
 
 # Indexing: tree building, ToC detection, summary generation, section splitting
@@ -70,3 +70,32 @@ PAGEINDEX_SUMMARY_TOKEN_THRESHOLD = 200
 # or absorbed into their parent to reduce ToC noise.
 # Used in: _pageindex_lib/page_index_md.py → _merge_small_siblings()
 PAGEINDEX_MIN_MERGE_TOKENS = 200
+
+
+# =============================================================================
+# Reranker defaults
+# =============================================================================
+# When reranking is enabled, the retrieval pipeline uses a two-stage approach:
+#
+#   Stage 1 (initial retrieval): Fetch `RERANKER_CANDIDATE_COUNT` candidate
+#            chunks using the configured retrieval method (vector, hybrid,
+#            full_text). This is a wider net to give the reranker enough
+#            candidates to work with.
+#
+#   Stage 2 (reranking): The reranker model re-scores all candidates by
+#            semantic relevance to the query. The top `top_k` results are
+#            then returned to the caller.
+#
+# The user-facing `top_k` parameter controls how many chunks are ultimately
+# returned — this stays the same whether reranking is on or off. The only
+# thing that changes internally is that Stage 1 fetches more candidates
+# (RERANKER_CANDIDATE_COUNT) to feed the reranker.
+#
+# These defaults can be overridden per-KB via retrieval_config.reranker.
+
+RERANKER_DEFAULT_MODEL = "cohere/rerank-english-v3.0"
+
+# Number of candidate chunks to retrieve in Stage 1 (before reranking).
+# Higher values give the reranker more candidates to choose from, improving
+# recall, but increase latency and cost. 20 is a good default balance.
+RERANKER_CANDIDATE_COUNT = 20

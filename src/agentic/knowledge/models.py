@@ -60,6 +60,25 @@ class IndexingConfig:
 
 
 @dataclass
+class RerankerConfig:
+    """Configuration for a reranking step after initial retrieval.
+
+    Attributes:
+        model: Reranker model identifier (e.g., "cohere/rerank-english-v3.0")
+        candidate_count: Number of candidates to fetch in Stage 1 before reranking
+        api_key: Optional API key override
+        api_base: Optional custom API endpoint (for self-hosted VLLM, etc.)
+        provider_params: Additional provider-specific parameters
+    """
+
+    model: str = "cohere/rerank-english-v3.0"
+    candidate_count: int = 20
+    api_key: str | None = None
+    api_base: str | None = None
+    provider_params: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class RetrievalConfig:
     """Configuration for retrieval operations.
 
@@ -68,6 +87,7 @@ class RetrievalConfig:
         top_k: Maximum number of results to return
         similarity_threshold: Minimum similarity score (0.0 to 1.0)
         filter_metadata: Optional metadata filters for narrowing results
+        reranker: Optional reranker config for post-retrieval re-scoring
         extra: Additional method-specific configuration
     """
 
@@ -75,6 +95,7 @@ class RetrievalConfig:
     top_k: int = 5
     similarity_threshold: float = 0.0
     filter_metadata: dict[str, Any] | None = None
+    reranker: RerankerConfig | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 

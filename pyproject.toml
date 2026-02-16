@@ -24,6 +24,11 @@ dependencies = [
     "pyyaml>=6.0.0",
 ]
 
+[project.optional-dependencies]
+rerankers = [
+    "zeroentropy>=0.1.0a1",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",
