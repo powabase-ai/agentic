@@ -23,6 +23,11 @@ dependencies = [
     { name = "tiktoken" },
 ]
 
+[package.optional-dependencies]
+rerankers = [
+    { name = "zeroentropy" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
@@ -46,7 +51,9 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.0" },
     { name = "sqlalchemy", specifier = ">=2.0.0" },
     { name = "tiktoken", specifier = ">=0.7.0" },
+    { name = "zeroentropy", marker = "extra == 'rerankers'", specifier = ">=0.1.0a1" },
 ]
+provides-extras = ["rerankers"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2249,6 +2256,23 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/f9/86/0f0dccb6e59a9e7f122c5afd43568b1d31b8ab7dda5f1b01fb5c7025c9a9/yarl-1.22.0-cp314-cp314t-win_amd64.whl", hash = "sha256:9fb17ea16e972c63d25d4a97f016d235c78dd2344820eb35bc034bc32012ee27", size = 96292, upload-time = "2025-10-06T14:12:15.398Z" },
     { url = "https://files.pythonhosted.org/packages/48/b7/503c98092fb3b344a179579f55814b613c1fbb1c23b3ec14a7b008a66a6e/yarl-1.22.0-cp314-cp314t-win_arm64.whl", hash = "sha256:9f6d73c1436b934e3f01df1e1b21ff765cd1d28c77dfb9ace207f746d4610ee1", size = 85171, upload-time = "2025-10-06T14:12:16.935Z" },
     { url = "https://files.pythonhosted.org/packages/73/ae/b48f95715333080afb75a4504487cbe142cae1268afc482d06692d605ae6/yarl-1.22.0-py3-none-any.whl", hash = "sha256:1380560bdba02b6b6c90de54133c81c9f2a453dee9912fe58c1dcced1edb7cff", size = 46814, upload-time = "2025-10-06T14:12:53.872Z" },
+]
+
+[[package]]
+name = "zeroentropy"
+version = "0.1.0a8"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ce/8d/967301f79ab84093be97b97133f35468e3da6148176b5f220d78fbf6a50c/zeroentropy-0.1.0a8.tar.gz", hash = "sha256:3e7cdbff3a754e4cd38f1dc738f05f6fe8020758a27a41e23db165e20d6562cb", size = 123475, upload-time = "2026-01-21T06:23:39.62Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3f/e3/6aa48e1ab6b74b2f0aa2ce3d10059fbe2d0a3f13ecec8ade92303ca7c456/zeroentropy-0.1.0a8-py3-none-any.whl", hash = "sha256:cece690f6459d272b8b6a530853ce152da472b74d42b4490a77aae05a410d8eb", size = 107939, upload-time = "2026-01-21T06:23:38.16Z" },
 ]
 
 [[package]]

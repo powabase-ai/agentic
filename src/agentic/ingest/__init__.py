@@ -35,6 +35,7 @@ from agentic.ingest.extractor import (
     Extractor,
     ExtractorRegistry,
     HTMLExtractor,
+    ImageExtractor,
     PDFExtractor,
     TextExtractor,
 )
@@ -57,4 +58,5 @@ __all__ = [
     "HTMLExtractor",
     "PDFExtractor",
     "DocxExtractor",
+    "ImageExtractor",
 ]

@@ -194,6 +194,14 @@ class ExtractorRegistry:
         except ImportError:
             pass  # Not yet implemented
 
+        try:
+            from agentic.ingest.extractor.image import ImageExtractor
+
+            mistral_api_key = os.getenv("MISTRAL_API_KEY")
+            registry.register(ImageExtractor(mistral_api_key=mistral_api_key))
+        except ImportError:
+            pass
+
         return registry
 
     def __len__(self) -> int:

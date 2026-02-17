@@ -30,6 +30,7 @@ Example:
 from agentic.ingest.extractor.base import ExtractionError, Extractor
 from agentic.ingest.extractor.docx import DocxExtractor
 from agentic.ingest.extractor.html import HTMLExtractor
+from agentic.ingest.extractor.image import ImageExtractor
 from agentic.ingest.extractor.pdf import PDFExtractor
 from agentic.ingest.extractor.registry import ExtractorRegistry
 from agentic.ingest.extractor.text import TextExtractor
@@ -43,4 +44,5 @@ __all__ = [
     "HTMLExtractor",
     "PDFExtractor",
     "DocxExtractor",
+    "ImageExtractor",
 ]
