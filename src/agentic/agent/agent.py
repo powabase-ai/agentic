@@ -2,11 +2,14 @@
 Agent - single LLM-powered agent definition and execution.
 """
 
+import logging
 from collections.abc import AsyncGenerator, Generator
 from datetime import datetime
 from typing import Any
 
 import litellm
+
+logger = logging.getLogger(__name__)
 
 from agentic.agent.output import AgentOutput
 from agentic.agent.session import AgentSession
@@ -140,6 +143,7 @@ class Agent:
             )
 
         except Exception as e:
+            logger.error("Agent execution failed: %s", e, exc_info=True)
             return AgentOutput(
                 execution_id=context.execution_id,
                 status=ExecutionStatus.FAILED,
@@ -216,6 +220,7 @@ class Agent:
             )
 
         except Exception as e:
+            logger.error("Agent async execution failed: %s", e, exc_info=True)
             return AgentOutput(
                 execution_id=context.execution_id,
                 status=ExecutionStatus.FAILED,
@@ -306,6 +311,7 @@ class Agent:
             )
 
         except Exception as e:
+            logger.error("Agent streaming failed: %s", e, exc_info=True)
             return AgentOutput(
                 execution_id=context.execution_id,
                 status=ExecutionStatus.FAILED,

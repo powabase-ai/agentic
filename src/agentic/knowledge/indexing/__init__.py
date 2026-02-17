@@ -30,10 +30,18 @@ from agentic.knowledge.indexing.chunk_embed import (
     ChunkData,
     ChunkEmbedResult,
 )
+from agentic.knowledge.indexing.page_index import (
+    PageIndexAlgorithm,
+    PageIndexResult,
+    SectionData,
+)
 
 __all__ = [
     "IndexingAlgorithm",
     "ChunkAndEmbedAlgorithm",
     "ChunkData",
     "ChunkEmbedResult",
+    "PageIndexAlgorithm",
+    "PageIndexResult",
+    "SectionData",
 ]

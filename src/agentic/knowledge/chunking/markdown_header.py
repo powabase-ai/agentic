@@ -25,11 +25,11 @@ class MarkdownHeaderChunking(ChunkingStrategy):
     - Prepends header context to each chunk for embedding
 
     Args:
-        chunk_size: Maximum characters per chunk (default: 1000)
-        overlap: Number of overlapping characters between chunks (default: 200)
+        chunk_size: Maximum tokens per chunk (default: 2000)
+        overlap: Number of overlapping tokens between chunks (default: 50)
 
     Example:
-        >>> chunker = MarkdownHeaderChunking(chunk_size=500, overlap=50)
+        >>> chunker = MarkdownHeaderChunking(chunk_size=2000, overlap=50)
         >>> chunks = chunker.chunk("# Intro\\n\\nSome text...")
         >>> for chunk in chunks:
         ...     print(f"Chunk {chunk.index}: {chunk.text[:50]}...")
@@ -39,8 +39,8 @@ class MarkdownHeaderChunking(ChunkingStrategy):
 
     def __init__(
         self,
-        chunk_size: int = 1000,
-        overlap: int = 200,
+        chunk_size: int = 2000,
+        overlap: int = 50,
     ):
         if overlap >= chunk_size:
             raise ValueError(
@@ -77,11 +77,22 @@ class MarkdownHeaderChunking(ChunkingStrategy):
 
         chunks: list[TextChunk] = []
         chunk_index = 0
+        search_start = 0
 
         for section in sections:
             section_content = section.page_content.strip()
             if not section_content:
                 continue
+
+            # Find this section's offset in the original text so sub-chunk
+            # offsets can be converted from section-relative to document-relative.
+            section_offset = text.find(section_content, search_start)
+            if section_offset < 0:
+                section_offset = text.find(section_content)  # fallback
+            if section_offset >= 0:
+                search_start = section_offset + len(section_content)
+            else:
+                section_offset = 0  # last resort
 
             # Further divide by length using RecursiveChunking
             sub_chunks = self._length_splitter.chunk(
@@ -118,8 +129,8 @@ class MarkdownHeaderChunking(ChunkingStrategy):
                     TextChunk(
                         text=chunk_text,
                         index=chunk_index,
-                        start_char=sub_chunk.start_char,
-                        end_char=sub_chunk.end_char,
+                        start_char=section_offset + sub_chunk.start_char,
+                        end_char=section_offset + sub_chunk.end_char,
                         source_id=source_id,
                         metadata=metadata,
                     )

@@ -53,10 +53,29 @@ class IndexingConfig:
     """
 
     strategy: str = "chunk_embed"
-    chunk_size: int = 500
+    chunk_size: int = 2000
     overlap: int = 50
     embedding_model: str = "text-embedding-3-small"
     extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class RerankerConfig:
+    """Configuration for a reranking step after initial retrieval.
+
+    Attributes:
+        model: Reranker model identifier (e.g., "cohere/rerank-english-v3.0")
+        candidate_count: Number of candidates to fetch in Stage 1 before reranking
+        api_key: Optional API key override
+        api_base: Optional custom API endpoint (for self-hosted VLLM, etc.)
+        provider_params: Additional provider-specific parameters
+    """
+
+    model: str = "cohere/rerank-english-v3.0"
+    candidate_count: int = 20
+    api_key: str | None = None
+    api_base: str | None = None
+    provider_params: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -68,6 +87,7 @@ class RetrievalConfig:
         top_k: Maximum number of results to return
         similarity_threshold: Minimum similarity score (0.0 to 1.0)
         filter_metadata: Optional metadata filters for narrowing results
+        reranker: Optional reranker config for post-retrieval re-scoring
         extra: Additional method-specific configuration
     """
 
@@ -75,6 +95,7 @@ class RetrievalConfig:
     top_k: int = 5
     similarity_threshold: float = 0.0
     filter_metadata: dict[str, Any] | None = None
+    reranker: RerankerConfig | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -99,19 +120,19 @@ class IndexResult:
 
 
 @dataclass
-class RetrievedChunk:
-    """A chunk retrieved from a knowledge base.
+class RetrievedItem:
+    """An item retrieved from a knowledge base.
 
     Attributes:
-        chunk_id: Unique identifier for this chunk
-        text: The text content of the chunk
+        item_id: Unique identifier for this item
+        text: The text content of the item
         score: Relevance/similarity score (higher is better)
-        source_id: Identifier of the source this chunk came from
+        source_id: Identifier of the source this item came from
         knowledge_base_id: Identifier of the knowledge base
         meta: Additional metadata (page number, section, etc.)
     """
 
-    chunk_id: str
+    item_id: str
     text: str
     score: float
     source_id: str | None = None
@@ -120,4 +141,4 @@ class RetrievedChunk:
 
     def __repr__(self) -> str:
         text_preview = self.text[:50] + "..." if len(self.text) > 50 else self.text
-        return f"RetrievedChunk(score={self.score:.3f}, text={text_preview!r})"
+        return f"RetrievedItem(score={self.score:.3f}, text={text_preview!r})"

@@ -11,7 +11,7 @@ import logging
 
 from agentic.knowledge.embedder.base import Embedder
 from agentic.knowledge.embedder.litellm import OpenAIEmbedder
-from agentic.knowledge.models import RetrievalConfig, RetrievedChunk
+from agentic.knowledge.models import RetrievalConfig, RetrievedItem
 from agentic.knowledge.retrieval.base import RetrievalAlgorithm
 from agentic.knowledge.store import KnowledgeStore
 
@@ -47,12 +47,12 @@ class VectorSearchAlgorithm(RetrievalAlgorithm):
     def __init__(self, embedder: Embedder | None = None):
         self.embedder = embedder or OpenAIEmbedder()
 
-    def retrieve(
+    async def retrieve(
         self,
         query: str,
         store: KnowledgeStore,
         config: RetrievalConfig | None = None,
-    ) -> list[RetrievedChunk]:
+    ) -> list[RetrievedItem]:
         """
         Retrieve relevant chunks using vector similarity search.
 
@@ -72,8 +72,8 @@ class VectorSearchAlgorithm(RetrievalAlgorithm):
         logger.debug(f"Query embedded, searching with top_k={config.top_k}")
 
         # Step 2: Vector search in store
-        raw_results = store.vector_search(
-            query_embedding=query_embedding,
+        raw_results = await store.vector_search(
+            embedding=query_embedding,
             top_k=config.top_k,
             filter_metadata=config.filter_metadata,
         )
@@ -95,7 +95,7 @@ class VectorSearchAlgorithm(RetrievalAlgorithm):
         query: str,
         store: KnowledgeStore,
         config: RetrievalConfig | None = None,
-    ) -> list[RetrievedChunk]:
+    ) -> list[RetrievedItem]:
         """
         Async version of retrieve.
 
@@ -107,8 +107,8 @@ class VectorSearchAlgorithm(RetrievalAlgorithm):
         query_embedding = await self.embedder.aembed(query)
 
         # Step 2: Async vector search
-        raw_results = await store.avector_search(
-            query_embedding=query_embedding,
+        raw_results = await store.vector_search(
+            embedding=query_embedding,
             top_k=config.top_k,
             filter_metadata=config.filter_metadata,
         )
@@ -145,12 +145,12 @@ class HybridSearchAlgorithm(RetrievalAlgorithm):
         self.keyword_weight = keyword_weight
         self.vector_weight = vector_weight
 
-    def retrieve(
+    async def retrieve(
         self,
         query: str,
         store: KnowledgeStore,
         config: RetrievalConfig | None = None,
-    ) -> list[RetrievedChunk]:
+    ) -> list[RetrievedItem]:
         """
         Retrieve using hybrid search.
 
@@ -160,14 +160,14 @@ class HybridSearchAlgorithm(RetrievalAlgorithm):
         # TODO: Implement true hybrid search when stores support it
         # For now, fall back to vector search
         vector_algo = VectorSearchAlgorithm(embedder=self.embedder)
-        return vector_algo.retrieve(query, store, config)
+        return await vector_algo.retrieve(query, store, config)
 
     async def aretrieve(
         self,
         query: str,
         store: KnowledgeStore,
         config: RetrievalConfig | None = None,
-    ) -> list[RetrievedChunk]:
+    ) -> list[RetrievedItem]:
         """Async hybrid search."""
         vector_algo = VectorSearchAlgorithm(embedder=self.embedder)
         return await vector_algo.aretrieve(query, store, config)

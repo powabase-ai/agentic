@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from agentic.knowledge.models import RetrievedChunk
+    from agentic.knowledge.models import RetrievedItem
 
 
 class KnowledgeStore(ABC):
@@ -44,7 +44,7 @@ class KnowledgeStore(ABC):
         embedding: list[float],
         top_k: int = 5,
         filter_metadata: dict | None = None,
-    ) -> list["RetrievedChunk"]:
+    ) -> list["RetrievedItem"]:
         """
         Search for similar chunks using vector similarity.
 
@@ -54,7 +54,7 @@ class KnowledgeStore(ABC):
             filter_metadata: Optional metadata filters
 
         Returns:
-            List of RetrievedChunk objects, sorted by similarity (highest first)
+            List of RetrievedItem objects, sorted by similarity (highest first)
         """
         ...
 
@@ -64,7 +64,7 @@ class KnowledgeStore(ABC):
         query: str,
         top_k: int = 5,
         filter_metadata: dict | None = None,
-    ) -> list["RetrievedChunk"]:
+    ) -> list["RetrievedItem"]:
         """
         Search for chunks using full-text search.
 
@@ -74,7 +74,7 @@ class KnowledgeStore(ABC):
             filter_metadata: Optional metadata filters
 
         Returns:
-            List of RetrievedChunk objects, sorted by relevance
+            List of RetrievedItem objects, sorted by relevance
         """
         ...
 

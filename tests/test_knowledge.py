@@ -14,7 +14,7 @@ from agentic.knowledge import (
     MarkdownHeaderChunking,
     RetrievalAlgorithm,
     RetrievalConfig,
-    RetrievedChunk,
+    RetrievedItem,
 )
 from agentic.knowledge.chunking import TextChunk
 
@@ -27,7 +27,7 @@ class TestModels:
         config = IndexingConfig()
 
         assert config.strategy == "chunk_embed"
-        assert config.chunk_size == 500
+        assert config.chunk_size == 2000
         assert config.overlap == 50
         assert config.embedding_model == "text-embedding-3-small"
         assert config.extra == {}
@@ -68,10 +68,10 @@ class TestModels:
         assert result.stats["chunk_count"] == 10
         assert result.indexed_at is not None
 
-    def test_retrieved_chunk(self):
-        """RetrievedChunk should represent a search result."""
-        chunk = RetrievedChunk(
-            chunk_id="chunk-123",
+    def test_retrieved_item(self):
+        """RetrievedItem should represent a search result."""
+        item = RetrievedItem(
+            item_id="chunk-123",
             text="This is the chunk content",
             score=0.95,
             source_id="source-456",
@@ -79,20 +79,20 @@ class TestModels:
             meta={"page": 5},
         )
 
-        assert chunk.chunk_id == "chunk-123"
-        assert chunk.text == "This is the chunk content"
-        assert chunk.score == 0.95
-        assert chunk.meta["page"] == 5
+        assert item.item_id == "chunk-123"
+        assert item.text == "This is the chunk content"
+        assert item.score == 0.95
+        assert item.meta["page"] == 5
 
-    def test_retrieved_chunk_repr(self):
-        """RetrievedChunk should have a useful repr."""
-        chunk = RetrievedChunk(
-            chunk_id="chunk-123",
+    def test_retrieved_item_repr(self):
+        """RetrievedItem should have a useful repr."""
+        item = RetrievedItem(
+            item_id="chunk-123",
             text="Short text",
             score=0.85,
         )
 
-        repr_str = repr(chunk)
+        repr_str = repr(item)
         assert "0.85" in repr_str
         assert "Short text" in repr_str
 
@@ -245,13 +245,13 @@ Subsection content.
 
     def test_markdown_long_content_splits_by_length(self):
         """Long paragraphs under a header should be split by length."""
-        long_paragraph = "word " * 100  # ~500 chars
+        long_paragraph = "word " * 300  # ~300 tokens
         markdown = f"""# Long Section
 
 {long_paragraph}
 """
 
-        chunker = MarkdownHeaderChunking(chunk_size=150, overlap=20)
+        chunker = MarkdownHeaderChunking(chunk_size=50, overlap=5)
         chunks = chunker.chunk(markdown)
 
         # Should produce multiple chunks due to length limit
@@ -373,9 +373,9 @@ class TestRetrievalAlgorithm:
         retriever = TestRetriever()
 
         chunks = [
-            RetrievedChunk(chunk_id="1", text="a", score=0.9),
-            RetrievedChunk(chunk_id="2", text="b", score=0.5),
-            RetrievedChunk(chunk_id="3", text="c", score=0.3),
+            RetrievedItem(item_id="1", text="a", score=0.9),
+            RetrievedItem(item_id="2", text="b", score=0.5),
+            RetrievedItem(item_id="3", text="c", score=0.3),
         ]
 
         # No filtering with 0 threshold
@@ -432,6 +432,6 @@ class TestModuleImports:
 
         # Check models
         assert hasattr(knowledge, "IndexResult")
-        assert hasattr(knowledge, "RetrievedChunk")
+        assert hasattr(knowledge, "RetrievedItem")
         assert hasattr(knowledge, "IndexingConfig")
         assert hasattr(knowledge, "RetrievalConfig")

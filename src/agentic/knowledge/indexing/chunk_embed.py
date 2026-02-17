@@ -125,6 +125,8 @@ class ChunkAndEmbedAlgorithm(IndexingAlgorithm):
         embeddings = self.embedder.embed_batch(chunk_texts)
 
         # Step 3: Combine chunks with embeddings
+        from agentic.knowledge.chunking.token_utils import count_tokens
+
         chunk_data_list: list[ChunkData] = []
         for chunk, embedding in zip(text_chunks, embeddings, strict=True):
             chunk_data = ChunkData(
@@ -135,6 +137,7 @@ class ChunkAndEmbedAlgorithm(IndexingAlgorithm):
                 source_id=source_id,
                 metadata=chunk.metadata,
                 embedding=embedding,
+                tokens=count_tokens(chunk.text),
             )
             chunk_data_list.append(chunk_data)
 
@@ -178,6 +181,8 @@ class ChunkAndEmbedAlgorithm(IndexingAlgorithm):
         embeddings = await self.embedder.aembed_batch(chunk_texts)
 
         # Step 3: Combine
+        from agentic.knowledge.chunking.token_utils import count_tokens
+
         chunk_data_list: list[ChunkData] = []
         for chunk, embedding in zip(text_chunks, embeddings, strict=True):
             chunk_data = ChunkData(
@@ -188,6 +193,7 @@ class ChunkAndEmbedAlgorithm(IndexingAlgorithm):
                 source_id=source_id,
                 metadata=chunk.metadata,
                 embedding=embedding,
+                tokens=count_tokens(chunk.text),
             )
             chunk_data_list.append(chunk_data)
 

@@ -58,6 +58,44 @@ class PDFExtractor(Extractor):
         self.mistral_api_key = mistral_api_key
         self.max_pages = max_pages
 
+    def _render_page_images(self, raw: RawContent, dpi: int = 150) -> list[Derivative]:
+        """Render each PDF page as a PNG image derivative using PyMuPDF.
+
+        Args:
+            raw: RawContent with PDF bytes
+            dpi: Resolution for rendering (default 150)
+
+        Returns:
+            List of image Derivative objects, one per page.
+        """
+        try:
+            import fitz
+        except ImportError:
+            logger.warning("PyMuPDF not available for page image rendering")
+            return []
+
+        try:
+            doc = fitz.open(stream=raw.content, filetype="pdf")
+            image_derivs = []
+            zoom = dpi / 72
+            mat = fitz.Matrix(zoom, zoom)
+            for page in doc:
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                image_derivs.append(
+                    Derivative(
+                        type="image",
+                        content=pix.tobytes("png"),
+                        format="png",
+                        page=page.number + 1,  # 1-indexed
+                        metadata={"width": pix.width, "height": pix.height, "dpi": dpi},
+                    )
+                )
+            doc.close()
+            return image_derivs
+        except Exception as e:
+            logger.warning(f"Failed to render page images: {e}")
+            return []
+
     async def extract(self, raw: RawContent) -> ExtractionResult:
         """
         Extract text from PDF with fallback strategy.
@@ -123,17 +161,23 @@ class PDFExtractor(Extractor):
         fulltext = "\n".join(page_texts)
         doc.close()
 
+        derivatives = [
+            Derivative(
+                type="text",
+                content=fulltext,
+                format="plain",
+                metadata={"page_texts": page_texts, "page_metas": page_metas},
+            ),
+        ]
+
+        # Render page images for image-mode retrieval
+        image_derivs = self._render_page_images(raw)
+        derivatives.extend(image_derivs)
+
         return ExtractionResult(
             source_uri=raw.source_uri,
             mime_type=raw.mime_type,
-            derivatives=[
-                Derivative(
-                    type="text",
-                    content=fulltext,
-                    format="plain",
-                    metadata={"page_texts": page_texts, "page_metas": page_metas},
-                ),
-            ],
+            derivatives=derivatives,
             auto_metadata={
                 "page_count": len(page_texts),
                 "char_count": len(fulltext),
@@ -229,20 +273,26 @@ class PDFExtractor(Extractor):
 
             fulltext = "\n\n".join(page_markdowns)
 
+            derivatives = [
+                Derivative(
+                    type="markdown",
+                    content=fulltext,
+                    format="markdown",
+                    metadata={
+                        "page_texts": page_markdowns,
+                        "page_metas": page_metas,
+                    },
+                ),
+            ]
+
+            # Render page images for image-mode retrieval
+            image_derivs = self._render_page_images(raw)
+            derivatives.extend(image_derivs)
+
             return ExtractionResult(
                 source_uri=raw.source_uri,
                 mime_type=raw.mime_type,
-                derivatives=[
-                    Derivative(
-                        type="markdown",
-                        content=fulltext,
-                        format="markdown",
-                        metadata={
-                            "page_texts": page_markdowns,
-                            "page_metas": page_metas,
-                        },
-                    ),
-                ],
+                derivatives=derivatives,
                 auto_metadata={
                     "page_count": len(page_markdowns),
                     "char_count": len(fulltext),
@@ -280,17 +330,23 @@ class PDFExtractor(Extractor):
 
         fulltext = "\n\n".join(text_parts)
 
+        derivatives = [
+            Derivative(
+                type="text",
+                content=fulltext,
+                format="plain",
+                metadata={"page_texts": page_texts, "page_metas": page_metas},
+            ),
+        ]
+
+        # Render page images for image-mode retrieval
+        image_derivs = self._render_page_images(raw)
+        derivatives.extend(image_derivs)
+
         return ExtractionResult(
             source_uri=raw.source_uri,
             mime_type=raw.mime_type,
-            derivatives=[
-                Derivative(
-                    type="text",
-                    content=fulltext,
-                    format="plain",
-                    metadata={"page_texts": page_texts, "page_metas": page_metas},
-                ),
-            ],
+            derivatives=derivatives,
             auto_metadata={
                 "page_count": len(page_texts),
                 "char_count": len(fulltext),
