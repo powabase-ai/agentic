@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import copy
@@ -37,8 +38,7 @@ async def check_title_appearance(item, page_list, start_index=1, model=None):
     }}
     Directly return the final JSON structure. Do not output anything else."""
 
-    response = await ChatGPT_API_async(model=model, prompt=prompt)
-    response = extract_json(response)
+    response = await _llm_json(model=model, prompt=prompt)
     if 'answer' in response:
         answer = response['answer']
     else:
@@ -65,8 +65,7 @@ async def check_title_appearance_in_start(title, page_text, model=None, _logger=
     }}
     Directly return the final JSON structure. Do not output anything else."""
 
-    response = await ChatGPT_API_async(model=model, prompt=prompt)
-    response = extract_json(response)
+    response = await _llm_json(model=model, prompt=prompt)
     log = _logger or logger
     log.debug(f"check_title_appearance_in_start response: {response}")
     return response.get("start_begin", "no")
@@ -119,8 +118,7 @@ async def toc_detector_single_page(content, model=None):
     Directly return the final JSON structure. Do not output anything else.
     Please note: abstract,summary, notation list, figure list, table list, etc. are not table of contents."""
 
-    response = await ChatGPT_API_async(model=model, prompt=prompt)
-    json_content = extract_json(response)
+    json_content = await _llm_json(model=model, prompt=prompt)
     logger.info(f"[toc_detector] Page content_len={len(content)} => {json_content.get('toc_detected', 'no')}")
     return json_content.get('toc_detected', 'no')
 
@@ -138,8 +136,7 @@ async def check_if_toc_extraction_is_complete(content, toc, model=None):
     Directly return the final JSON structure. Do not output anything else."""
 
     prompt = prompt + '\n Document:\n' + content + '\n Table of contents:\n' + toc
-    response = await ChatGPT_API_async(model=model, prompt=prompt)
-    json_content = extract_json(response)
+    json_content = await _llm_json(model=model, prompt=prompt)
     return json_content.get('completed', 'no')
 
 
@@ -156,8 +153,7 @@ async def check_if_toc_transformation_is_complete(content, toc, model=None):
     Directly return the final JSON structure. Do not output anything else."""
 
     prompt = prompt + '\n Raw Table of contents:\n' + content + '\n Cleaned Table of contents:\n' + toc
-    response = await ChatGPT_API_async(model=model, prompt=prompt)
-    json_content = extract_json(response)
+    json_content = await _llm_json(model=model, prompt=prompt)
     return json_content.get('completed', 'no')
 
 async def extract_toc_content(content, model=None):
@@ -168,7 +164,7 @@ async def extract_toc_content(content, model=None):
 
     Directly return the full table of contents content. Do not output anything else."""
 
-    response, finish_reason = await ChatGPT_API_async_with_finish_reason(model=model, prompt=prompt)
+    response, finish_reason = await _llm_completion(model=model, prompt=prompt)
 
     if_complete = await check_if_toc_transformation_is_complete(content, response, model)
     logger.info(f"[extract_toc_content] Initial extraction: content_len={len(content)}, finish_reason={finish_reason}, complete={if_complete}")
@@ -180,7 +176,7 @@ async def extract_toc_content(content, model=None):
         {"role": "assistant", "content": response},
     ]
     prompt = f"""please continue the generation of table of contents , directly output the remaining part of the structure"""
-    new_response, finish_reason = await ChatGPT_API_async_with_finish_reason(model=model, prompt=prompt, chat_history=chat_history)
+    new_response, finish_reason = await _llm_completion(model=model, prompt=prompt, chat_history=chat_history)
     response = response + new_response
     if_complete = await check_if_toc_transformation_is_complete(content, response, model)
 
@@ -188,7 +184,7 @@ async def extract_toc_content(content, model=None):
     while not (if_complete == "yes" and finish_reason == "finished"):
         iteration_count += 1
         chat_history.append({"role": "user", "content": prompt})
-        new_response, finish_reason = await ChatGPT_API_async_with_finish_reason(model=model, prompt=prompt, chat_history=chat_history)
+        new_response, finish_reason = await _llm_completion(model=model, prompt=prompt, chat_history=chat_history)
         chat_history.append({"role": "assistant", "content": new_response})
         response = response + new_response
         if_complete = await check_if_toc_transformation_is_complete(content, response, model)
@@ -215,8 +211,7 @@ async def detect_page_index(toc_content, model=None):
     }}
     Directly return the final JSON structure. Do not output anything else."""
 
-    response = await ChatGPT_API_async(model=model, prompt=prompt)
-    json_content = extract_json(response)
+    json_content = await _llm_json(model=model, prompt=prompt)
     logger.info(f"[detect_page_index] Result: {json_content.get('page_index_given_in_toc', 'no')}")
     return json_content.get('page_index_given_in_toc', 'no')
 
@@ -267,8 +262,7 @@ async def toc_index_extractor(toc, content, model=None):
     Directly return the final JSON structure. Do not output anything else."""
 
     prompt = tob_extractor_prompt + '\nTable of contents:\n' + str(toc) + '\nDocument pages:\n' + content
-    response = await ChatGPT_API_async(model=model, prompt=prompt)
-    json_content = extract_json(response)
+    json_content = await _llm_json(model=model, prompt=prompt)
     logger.info(f"[toc_index_extractor] Result: {len(json_content) if isinstance(json_content, list) else 'N/A'} items returned")
     return json_content
 
@@ -298,7 +292,7 @@ async def toc_transformer(toc_content, model=None):
     Directly return the final JSON structure, do not output anything else. """
 
     prompt = init_prompt + '\n Given table of contents\n:' + toc_content
-    last_complete, finish_reason = await ChatGPT_API_async_with_finish_reason(model=model, prompt=prompt)
+    last_complete, finish_reason = await _llm_completion(model=model, prompt=prompt)
     if_complete = await check_if_toc_transformation_is_complete(toc_content, last_complete, model)
     logger.info(f"[toc_transformer] First attempt: complete={if_complete}, finish_reason={finish_reason}")
     if if_complete == "yes" and finish_reason == "finished":
@@ -309,7 +303,12 @@ async def toc_transformer(toc_content, model=None):
         return cleaned_response
 
     last_complete = get_json_content(last_complete)
+    iteration_count = 0
     while not (if_complete == "yes" and finish_reason == "finished"):
+        iteration_count += 1
+        if iteration_count > 10:
+            logger.warning("[toc_transformer] Max iterations reached, returning best result so far")
+            break
         position = last_complete.rfind('}')
         if position != -1:
             last_complete = last_complete[:position+2]
@@ -325,14 +324,14 @@ async def toc_transformer(toc_content, model=None):
 
         Please continue the json structure, directly output the remaining part of the json structure."""
 
-        new_complete, finish_reason = await ChatGPT_API_async_with_finish_reason(model=model, prompt=prompt)
+        new_complete, finish_reason = await _llm_completion(model=model, prompt=prompt)
 
         if new_complete.startswith('```json'):
             new_complete =  get_json_content(new_complete)
             last_complete = last_complete+new_complete
 
         if_complete = await check_if_toc_transformation_is_complete(toc_content, last_complete, model)
-        logger.info(f"[toc_transformer] Continuation round: complete={if_complete}, finish_reason={finish_reason}")
+        logger.info(f"[toc_transformer] Continuation round {iteration_count}: complete={if_complete}, finish_reason={finish_reason}")
 
 
     last_complete = json.loads(last_complete)
@@ -490,8 +489,7 @@ async def add_page_number_to_toc(part, structure, model=None):
 
     logger.info(f"[add_page_number_to_toc] Matching {len(structure)} items against text ({len(part) if isinstance(part, str) else sum(len(p) for p in part)} chars)")
     prompt = fill_prompt_seq + f"\n\nCurrent Partial Document:\n{part}\n\nGiven Structure\n{json.dumps(structure, indent=2)}\n"
-    current_json_raw = await ChatGPT_API_async(model=model, prompt=prompt)
-    json_result = extract_json(current_json_raw)
+    json_result = await _llm_json(model=model, prompt=prompt)
 
     for item in json_result:
         if 'start' in item:
@@ -541,7 +539,7 @@ async def generate_toc_continue(toc_content, part, model=None):
     Directly return the additional part of the final JSON structure. Do not output anything else."""
 
     prompt = prompt + '\nGiven text\n:' + part + '\nPrevious tree structure\n:' + json.dumps(toc_content, indent=2)
-    response, finish_reason = await ChatGPT_API_async_with_finish_reason(model=model, prompt=prompt)
+    response, finish_reason = await _llm_completion(model=model, prompt=prompt)
     if finish_reason == 'finished':
         result = extract_json(response)
         logger.info(f"[generate_toc_continue] finish_reason={finish_reason}, extracted {len(result) if isinstance(result, list) else 'N/A'} new items")
@@ -577,7 +575,7 @@ async def generate_toc_init(part, model=None):
     Directly return the final JSON structure. Do not output anything else."""
 
     prompt = prompt + '\nGiven text\n:' + part
-    response, finish_reason = await ChatGPT_API_async_with_finish_reason(model=model, prompt=prompt)
+    response, finish_reason = await _llm_completion(model=model, prompt=prompt)
 
     if finish_reason == 'finished':
         result = extract_json(response)
@@ -781,8 +779,7 @@ async def single_toc_item_index_fixer(section_title, content, model=None):
     Directly return the final JSON structure. Do not output anything else."""
 
     prompt = tob_extractor_prompt + '\nSection Title:\n' + str(section_title) + '\nDocument pages:\n' + content
-    response = await ChatGPT_API_async(model=model, prompt=prompt)
-    json_content = extract_json(response)
+    json_content = await _llm_json(model=model, prompt=prompt)
     physical_index = json_content.get('physical_index')
     if physical_index is None:
         return None
@@ -1322,7 +1319,7 @@ def page_index_main(doc, opt=None):
             if opt.if_add_doc_description == 'yes':
                 # Create a clean structure without unnecessary fields for description generation
                 clean_structure = create_clean_structure_for_description(structure)
-                doc_description = generate_doc_description(clean_structure, model=opt.model)
+                doc_description = await generate_doc_description(clean_structure, model=opt.model)
                 return {
                     'doc_name': get_pdf_name(doc),
                     'doc_description': doc_description,

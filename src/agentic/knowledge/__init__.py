@@ -90,9 +90,11 @@ from agentic.knowledge.models import (
 
 # Retrieval
 from agentic.knowledge.retrieval import (
+    FullTextSearchAlgorithm,
     HybridSearchAlgorithm,
     RetrievalAlgorithm,
     VectorSearchAlgorithm,
+    reciprocal_rank_fusion,
 )
 from agentic.knowledge.store import KnowledgeStore
 
@@ -114,7 +116,9 @@ __all__ = [
     # Retrieval
     "RetrievalAlgorithm",
     "VectorSearchAlgorithm",
+    "FullTextSearchAlgorithm",
     "HybridSearchAlgorithm",
+    "reciprocal_rank_fusion",
     # Chunking
     "ChunkingStrategy",
     "FixedSizeChunking",

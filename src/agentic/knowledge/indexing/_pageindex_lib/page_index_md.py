@@ -553,8 +553,7 @@ Directly return the final JSON structure. Do not output anything else.
 Text:
 {tagged_text}"""
 
-    response = await ChatGPT_API_async(model, prompt)
-    result = extract_json(response)
+    result = await _llm_json(model, prompt)
 
     # --- Validation ---
     # Must be a list with at least 2 sections (splitting into 1 is pointless)
@@ -818,8 +817,8 @@ def clean_tree_for_output(tree_nodes):
 # Main Entry Point: Markdown Pipeline
 # =============================================================================
 
-async def md_to_tree(md_path, if_thinning=False, min_token_threshold=PAGEINDEX_MIN_TOKEN_THRESHOLD, if_add_node_summary='no', summary_token_threshold=PAGEINDEX_SUMMARY_TOKEN_THRESHOLD, model=None, if_add_doc_description='no', if_add_node_text='no', if_add_node_id='yes', if_split_large_sections=True, max_node_tokens=PAGEINDEX_MAX_NODE_TOKENS, min_split_tokens=PAGEINDEX_MIN_SPLIT_TOKENS, min_paragraph_count=PAGEINDEX_MIN_PARAGRAPH_COUNT):
-    """Build a hierarchical tree from a markdown file.
+async def md_to_tree(md_path=None, if_thinning=False, min_token_threshold=PAGEINDEX_MIN_TOKEN_THRESHOLD, if_add_node_summary='no', summary_token_threshold=PAGEINDEX_SUMMARY_TOKEN_THRESHOLD, model=None, if_add_doc_description='no', if_add_node_text='no', if_add_node_id='yes', if_split_large_sections=True, max_node_tokens=PAGEINDEX_MAX_NODE_TOKENS, min_split_tokens=PAGEINDEX_MIN_SPLIT_TOKENS, min_paragraph_count=PAGEINDEX_MIN_PARAGRAPH_COUNT, md_content=None, doc_name=None):
+    """Build a hierarchical tree from a markdown file or string.
 
     This is the main entry point for the markdown pipeline. It orchestrates
     the full sequence:
@@ -838,7 +837,8 @@ async def md_to_tree(md_path, if_thinning=False, min_token_threshold=PAGEINDEX_M
     meaningful sections via LLM inference.
 
     Args:
-        md_path: Path to the markdown file to index.
+        md_path: Path to the markdown file to index. Either md_path or
+            md_content must be provided.
         if_thinning: If True, merge subtrees below min_token_threshold tokens.
             This reduces granularity for documents with many tiny sections.
         min_token_threshold: Token threshold for thinning (only if if_thinning).
@@ -855,19 +855,29 @@ async def md_to_tree(md_path, if_thinning=False, min_token_threshold=PAGEINDEX_M
         max_node_tokens: Token threshold above which a leaf always gets split.
         min_split_tokens: Lower token threshold for structural-signal splitting.
         min_paragraph_count: Minimum paragraph blocks for tier-2 splitting.
+        md_content: Markdown content string. If provided, used directly instead
+            of reading from md_path.
+        doc_name: Document name override. If not provided, derived from md_path
+            filename or defaults to "Untitled".
 
     Returns:
         Dict with:
-        - "doc_name": Filename without extension
+        - "doc_name": Filename without extension (or provided doc_name)
         - "structure": List of root tree nodes with title, node_id, text,
           line_num, summary/prefix_summary, and nested nodes.
         - "doc_description": (optional) LLM-generated document description.
     """
-    with open(md_path, 'r', encoding='utf-8') as f:
-        markdown_content = f.read()
-
-    # Use filename (without extension) as the document name
-    doc_name = os.path.splitext(os.path.basename(md_path))[0]
+    if md_content is not None:
+        markdown_content = md_content
+        if doc_name is None:
+            doc_name = "Untitled"
+    elif md_path is not None:
+        with open(md_path, 'r', encoding='utf-8') as f:
+            markdown_content = f.read()
+        if doc_name is None:
+            doc_name = os.path.splitext(os.path.basename(md_path))[0]
+    else:
+        raise ValueError("Either md_path or md_content must be provided")
 
     # --- Step 1: Extract headers ---
     logger.info("Extracting nodes from markdown...")
@@ -939,7 +949,7 @@ async def md_to_tree(md_path, if_thinning=False, min_token_threshold=PAGEINDEX_M
         if if_add_doc_description == 'yes':
             logger.info("Generating document description...")
             clean_structure = create_clean_structure_for_description(tree_structure)
-            doc_description = generate_doc_description(clean_structure, model=model)
+            doc_description = await generate_doc_description(clean_structure, model=model)
             return {
                 'doc_name': doc_name,
                 'doc_description': doc_description,
@@ -953,7 +963,7 @@ async def md_to_tree(md_path, if_thinning=False, min_token_threshold=PAGEINDEX_M
             tree_structure = format_structure(tree_structure, order = ['title', 'node_id', 'summary', 'prefix_summary', 'line_num', 'nodes'])
 
     return {
-        'doc_name': os.path.splitext(os.path.basename(md_path))[0],
+        'doc_name': doc_name,
         'structure': tree_structure,
     }
 
@@ -1267,7 +1277,7 @@ async def md_to_tree_from_pages(
             )
         # Generate overall document description from the tree structure
         clean_structure = create_clean_structure_for_description(tree_structure)
-        doc_description = generate_doc_description(clean_structure, model=model)
+        doc_description = await generate_doc_description(clean_structure, model=model)
         return {
             "doc_name": doc_name,
             "doc_description": doc_description,

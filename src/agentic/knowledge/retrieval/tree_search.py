@@ -115,29 +115,77 @@ def _build_condensed_view(toc_record: dict, id_prefix: str = "") -> str:
     return "\n".join(lines)
 
 
-def _extract_node_ids_from_response(response_text: str) -> list[str]:
+def _collect_valid_node_ids(toc_map: dict[str, dict]) -> set[str]:
+    """Walk all ToC structures and collect valid node IDs (both prefixed and plain).
+
+    Returns a set containing both "d0:0001" prefixed forms and plain "0001"
+    forms so that either format from the LLM response can be validated.
+    """
+    valid: set[str] = set()
+
+    def _walk(nodes: list, prefix: str) -> None:
+        if not isinstance(nodes, list):
+            return
+        for node in nodes:
+            nid = node.get("node_id")
+            if nid:
+                valid.add(f"{prefix}:{nid}")
+                valid.add(nid)
+            children = node.get("nodes")
+            if children:
+                _walk(children, prefix)
+
+    for doc_prefix, toc_record in toc_map.items():
+        _walk(toc_record.get("structure", []), doc_prefix)
+
+    return valid
+
+
+def _extract_node_ids_from_response(
+    response_text: str,
+    valid_ids: set[str] | None = None,
+) -> list[str]:
     """Parse LLM response to extract node IDs.
 
     Supports both prefixed IDs (e.g. "d0:0001") for multi-document KBs
     and plain IDs (e.g. "0001") for single-document KBs.
+
+    Args:
+        response_text: Raw LLM response text.
+        valid_ids: Optional set of known-valid node IDs. When provided,
+            results are filtered to only include IDs present in this set.
+            This prevents the plain 4-digit regex from matching years,
+            page numbers, or other numbers in the LLM response.
     """
     # Try JSON parsing first
     try:
         data = json.loads(response_text)
         if isinstance(data, list):
-            return [str(nid) for nid in data]
+            result = [str(nid) for nid in data]
+            if valid_ids is not None:
+                result = [nid for nid in result if nid in valid_ids]
+            return result
         if isinstance(data, dict) and "node_ids" in data:
-            return [str(nid) for nid in data["node_ids"]]
+            result = [str(nid) for nid in data["node_ids"]]
+            if valid_ids is not None:
+                result = [nid for nid in result if nid in valid_ids]
+            return result
     except (json.JSONDecodeError, TypeError):
         pass
 
     # Fallback: find prefixed IDs first (d0:0001), then plain 4-digit IDs
     prefixed = re.findall(r"\b(d\d+:\d{4})\b", response_text)
     if prefixed:
-        return list(dict.fromkeys(prefixed))
+        result = list(dict.fromkeys(prefixed))
+        if valid_ids is not None:
+            result = [nid for nid in result if nid in valid_ids]
+        return result
 
     plain = re.findall(r"\b(\d{4})\b", response_text)
-    return list(dict.fromkeys(plain))  # Deduplicate preserving order
+    result = list(dict.fromkeys(plain))  # Deduplicate preserving order
+    if valid_ids is not None:
+        result = [nid for nid in result if nid in valid_ids]
+    return result
 
 
 def _get_node_title(structure: list, node_id: str) -> str:
@@ -321,7 +369,8 @@ Return the most relevant node IDs as a JSON array:"""
             logger.warning(f"Node selection LLM call failed: {e}")
             return []
 
-        selected_ids = _extract_node_ids_from_response(response_text)
+        valid_ids = _collect_valid_node_ids(toc_map)
+        selected_ids = _extract_node_ids_from_response(response_text, valid_ids=valid_ids)
 
         logger.info(
             f"TreeSearch selected {len(selected_ids)} nodes: {selected_ids}"

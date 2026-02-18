@@ -3,7 +3,6 @@ import litellm
 import logging
 import os
 from datetime import datetime
-import time
 import json
 import copy
 import asyncio
@@ -13,6 +12,79 @@ from pathlib import Path
 from types import SimpleNamespace as config
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    # Underscore-prefixed helpers used by page_index_md.py / page_index.py via star import
+    "_ensure_pypdf2",
+    "_ensure_pymupdf",
+    "_llm_completion",
+    "_llm_json",
+    # Token counting
+    "count_tokens",
+    # JSON extraction
+    "get_json_content",
+    "extract_json",
+    # Tree utilities
+    "write_node_id",
+    "get_nodes",
+    "structure_to_list",
+    "get_leaf_nodes",
+    "is_leaf_node",
+    "get_last_node",
+    # PDF utilities
+    "extract_text_from_pdf",
+    "get_pdf_title",
+    "get_text_of_pages",
+    "get_first_start_page_from_text",
+    "get_last_start_page_from_text",
+    "sanitize_filename",
+    "get_pdf_name",
+    "get_page_tokens",
+    "get_text_of_pdf_pages",
+    "get_text_of_pdf_pages_with_labels",
+    "get_number_of_pages",
+    # Post-processing
+    "post_processing",
+    "clean_structure_post",
+    "remove_fields",
+    "print_toc",
+    "print_json",
+    "remove_structure_text",
+    "check_token_limit",
+    "convert_physical_index_to_int",
+    "convert_page_to_int",
+    # Node text assignment
+    "add_node_text",
+    "add_node_text_with_labels",
+    # LLM-powered helpers
+    "generate_node_summary",
+    "generate_summaries_for_structure",
+    "create_clean_structure_for_description",
+    "generate_doc_description",
+    # Formatting
+    "reorder_dict",
+    "format_structure",
+    # Preface
+    "add_preface_if_needed",
+    "list_to_tree",
+    # Classes
+    "JsonLogger",
+    "ConfigLoader",
+    # Constants
+    "DEFAULT_MODEL",
+    # Model config constants (re-exported from agentic.knowledge.model_config)
+    "PAGEINDEX_INDEXING_MODEL",
+    "PAGEINDEX_TOC_CHECK_PAGE_NUM",
+    "PAGEINDEX_TOC_MAX_TOKENS_PER_CHUNK",
+    "PAGEINDEX_MAX_PAGE_NUM_EACH_NODE",
+    "PAGEINDEX_MAX_TOKEN_NUM_EACH_NODE",
+    "PAGEINDEX_MAX_NODE_TOKENS",
+    "PAGEINDEX_MIN_SPLIT_TOKENS",
+    "PAGEINDEX_MIN_PARAGRAPH_COUNT",
+    "PAGEINDEX_MIN_TOKEN_THRESHOLD",
+    "PAGEINDEX_SUMMARY_TOKEN_THRESHOLD",
+    "PAGEINDEX_MIN_MERGE_TOKENS",
+]
 
 # Lazy imports for PDF-only dependencies (not needed for md_to_tree path)
 PyPDF2 = None
@@ -42,114 +114,35 @@ def count_tokens(text, model=None):
     tokens = enc.encode(text)
     return len(tokens)
 
-def ChatGPT_API_with_finish_reason(model, prompt, chat_history=None):
-    max_retries = 10
-    for i in range(max_retries):
-        try:
-            if chat_history:
-                messages = list(chat_history)
-                messages.append({"role": "user", "content": prompt})
-            else:
-                messages = [{"role": "user", "content": prompt}]
-
-            response = litellm.completion(
-                model=model,
-                messages=messages,
-                temperature=0,
-                num_retries=3,
-                drop_params=True,
-            )
-            if response.choices[0].finish_reason == "length":
-                return response.choices[0].message.content, "max_output_reached"
-            else:
-                return response.choices[0].message.content, "finished"
-
-        except Exception as e:
-            logging.error(f"Error: {e}")
-            if i < max_retries - 1:
-                time.sleep(1)
-            else:
-                logging.error('Max retries reached for prompt: ' + prompt)
-                return "Error", "error"
+async def _llm_completion(
+    model: str,
+    prompt: str,
+    chat_history: list[dict] | None = None,
+    temperature: float = 0,
+) -> tuple[str, str]:
+    """Call LLM, return (content, finish_reason). Raises on failure."""
+    messages = list(chat_history) if chat_history else []
+    messages.append({"role": "user", "content": prompt})
+    response = await litellm.acompletion(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        num_retries=3,
+        drop_params=True,
+    )
+    content = response.choices[0].message.content or ""
+    finish_reason = response.choices[0].finish_reason
+    return content, ("max_output_reached" if finish_reason == "length" else "finished")
 
 
-def ChatGPT_API(model, prompt, chat_history=None):
-    max_retries = 10
-    for i in range(max_retries):
-        try:
-            if chat_history:
-                messages = list(chat_history)
-                messages.append({"role": "user", "content": prompt})
-            else:
-                messages = [{"role": "user", "content": prompt}]
-
-            response = litellm.completion(
-                model=model,
-                messages=messages,
-                temperature=0,
-                num_retries=3,
-                drop_params=True,
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            logging.error(f"Error: {e}")
-            if i < max_retries - 1:
-                time.sleep(1)
-            else:
-                logging.error('Max retries reached for prompt: ' + prompt)
-                return "Error"
-
-
-async def ChatGPT_API_async(model, prompt):
-    max_retries = 10
-    messages = [{"role": "user", "content": prompt}]
-    for i in range(max_retries):
-        try:
-            response = await litellm.acompletion(
-                model=model,
-                messages=messages,
-                temperature=0,
-                num_retries=3,
-                drop_params=True,
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            logging.error(f"Error: {e}")
-            if i < max_retries - 1:
-                await asyncio.sleep(1)
-            else:
-                logging.error('Max retries reached for prompt: ' + prompt)
-                return "Error"
-
-
-async def ChatGPT_API_async_with_finish_reason(model, prompt, chat_history=None):
-    max_retries = 10
-    for i in range(max_retries):
-        try:
-            if chat_history:
-                messages = list(chat_history)
-                messages.append({"role": "user", "content": prompt})
-            else:
-                messages = [{"role": "user", "content": prompt}]
-
-            response = await litellm.acompletion(
-                model=model,
-                messages=messages,
-                temperature=0,
-                num_retries=3,
-                drop_params=True,
-            )
-            if response.choices[0].finish_reason == "length":
-                return response.choices[0].message.content, "max_output_reached"
-            else:
-                return response.choices[0].message.content, "finished"
-        except Exception as e:
-            logging.error(f"Error: {e}")
-            if i < max_retries - 1:
-                await asyncio.sleep(1)
-            else:
-                logging.error('Max retries reached')
-                return "Error", "error"
+async def _llm_json(
+    model: str,
+    prompt: str,
+    temperature: float = 0,
+) -> dict | list:
+    """Call LLM, extract JSON from response. Raises on LLM failure."""
+    content, _ = await _llm_completion(model, prompt, temperature=temperature)
+    return extract_json(content)
 
 
 def get_json_content(response):
@@ -192,7 +185,7 @@ def extract_json(content):
             # Remove any trailing commas before closing brackets/braces
             json_content = json_content.replace(',]', ']').replace(',}', '}')
             return json.loads(json_content)
-        except:
+        except Exception:
             logging.error("Failed to parse JSON even after cleanup")
             return {}
     except Exception as e:
@@ -354,12 +347,12 @@ class JsonLogger:
     def __init__(self, file_path):
         # Extract PDF name for logger name
         pdf_name = get_pdf_name(file_path)
-            
+
         current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.filename = f"{pdf_name}_{current_time}.json"
-        os.makedirs("./logs", exist_ok=True)
         # Initialize empty list to store all messages
         self.log_data = []
+        self._dir_created = False
 
     def log(self, level, message, **kwargs):
         if isinstance(message, dict):
@@ -367,7 +360,12 @@ class JsonLogger:
         else:
             self.log_data.append({'message': message})
         # Add new message to the log data
-        
+
+        # Lazily create logs directory on first write
+        if not self._dir_created:
+            os.makedirs("./logs", exist_ok=True)
+            self._dir_created = True
+
         # Write entire log data to file
         with open(self._filepath(), "w") as f:
             json.dump(self.log_data, f, indent=2)
@@ -682,8 +680,8 @@ Section text:
 
 Return ONLY the summary. Do not include any other text."""
 
-    response = await ChatGPT_API_async(model, prompt)
-    return response
+    content, _ = await _llm_completion(model, prompt)
+    return content
 
 
 async def generate_summaries_for_structure(structure, model=None):
@@ -719,16 +717,17 @@ def create_clean_structure_for_description(structure):
         return structure
 
 
-def generate_doc_description(structure, model=None):
+async def generate_doc_description(structure, model=None):
+    model = model or DEFAULT_MODEL
     prompt = f"""Your are an expert in generating descriptions for a document.
     You are given a structure of a document. Your task is to generate a one-sentence description for the document, which makes it easy to distinguish the document from other documents.
-        
+
     Document Structure: {structure}
-    
+
     Directly return the description, do not include any other text.
     """
-    response = ChatGPT_API(model, prompt)
-    return response
+    content, _ = await _llm_completion(model, prompt)
+    return content
 
 
 def reorder_dict(data, key_order):

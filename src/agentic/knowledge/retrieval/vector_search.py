@@ -123,14 +123,65 @@ class VectorSearchAlgorithm(RetrievalAlgorithm):
         return filtered_results
 
 
+class FullTextSearchAlgorithm(RetrievalAlgorithm):
+    """
+    Full-text keyword search retrieval.
+
+    Delegates to the store's full_text_search() implementation (e.g., BM25-scored
+    PostgreSQL full-text search in PgVectorKnowledgeStore).
+
+    Example:
+        >>> from agentic.knowledge.retrieval import FullTextSearchAlgorithm
+        >>>
+        >>> algo = FullTextSearchAlgorithm()
+        >>> results = await algo.retrieve(
+        ...     query="machine learning algorithms",
+        ...     store=my_knowledge_store,
+        ...     config=RetrievalConfig(top_k=5),
+        ... )
+    """
+
+    name = "full_text_search"
+
+    async def retrieve(
+        self,
+        query: str,
+        store: KnowledgeStore,
+        config: RetrievalConfig | None = None,
+    ) -> list[RetrievedItem]:
+        """Retrieve relevant chunks using full-text keyword search."""
+        config = config or RetrievalConfig()
+
+        raw_results = await store.full_text_search(
+            query=query,
+            top_k=config.top_k,
+            filter_metadata=config.filter_metadata,
+        )
+
+        logger.info(f"Full-text search returned {len(raw_results)} chunks")
+        return raw_results
+
+    async def aretrieve(
+        self,
+        query: str,
+        store: KnowledgeStore,
+        config: RetrievalConfig | None = None,
+    ) -> list[RetrievedItem]:
+        """Async version — identical since store calls are already async."""
+        return await self.retrieve(query, store, config)
+
+
 class HybridSearchAlgorithm(RetrievalAlgorithm):
     """
-    Hybrid search combining vector similarity with keyword matching.
+    Hybrid search combining vector similarity with keyword matching via RRF.
 
-    This provides better results when queries contain specific keywords
-    that should be matched exactly.
+    Uses the store's hybrid_search() method, which by default runs both
+    vector_search() and full_text_search() then fuses results with
+    Reciprocal Rank Fusion (RRF).
 
-    Note: This is a placeholder for future implementation.
+    Args:
+        embedder: Embedder to use for query embedding (should match indexing embedder)
+        vector_weight: Weight for vector results in RRF fusion (default 0.7)
     """
 
     name = "hybrid_search"
@@ -138,11 +189,9 @@ class HybridSearchAlgorithm(RetrievalAlgorithm):
     def __init__(
         self,
         embedder: Embedder | None = None,
-        keyword_weight: float = 0.3,
         vector_weight: float = 0.7,
     ):
         self.embedder = embedder or OpenAIEmbedder()
-        self.keyword_weight = keyword_weight
         self.vector_weight = vector_weight
 
     async def retrieve(
@@ -151,16 +200,21 @@ class HybridSearchAlgorithm(RetrievalAlgorithm):
         store: KnowledgeStore,
         config: RetrievalConfig | None = None,
     ) -> list[RetrievedItem]:
-        """
-        Retrieve using hybrid search.
+        """Retrieve using hybrid search (vector + keyword with RRF fusion)."""
+        config = config or RetrievalConfig()
 
-        Currently falls back to pure vector search.
-        Full hybrid implementation requires store support for BM25/FTS.
-        """
-        # TODO: Implement true hybrid search when stores support it
-        # For now, fall back to vector search
-        vector_algo = VectorSearchAlgorithm(embedder=self.embedder)
-        return await vector_algo.retrieve(query, store, config)
+        query_embedding = self.embedder.embed(query)
+
+        raw_results = await store.hybrid_search(
+            query=query,
+            embedding=query_embedding,
+            top_k=config.top_k,
+            vector_weight=self.vector_weight,
+            filter_metadata=config.filter_metadata,
+        )
+
+        logger.info(f"Hybrid search returned {len(raw_results)} chunks")
+        return raw_results
 
     async def aretrieve(
         self,
@@ -168,6 +222,18 @@ class HybridSearchAlgorithm(RetrievalAlgorithm):
         store: KnowledgeStore,
         config: RetrievalConfig | None = None,
     ) -> list[RetrievedItem]:
-        """Async hybrid search."""
-        vector_algo = VectorSearchAlgorithm(embedder=self.embedder)
-        return await vector_algo.aretrieve(query, store, config)
+        """Async hybrid search using async embedding."""
+        config = config or RetrievalConfig()
+
+        query_embedding = await self.embedder.aembed(query)
+
+        raw_results = await store.hybrid_search(
+            query=query,
+            embedding=query_embedding,
+            top_k=config.top_k,
+            vector_weight=self.vector_weight,
+            filter_metadata=config.filter_metadata,
+        )
+
+        logger.info(f"Hybrid search returned {len(raw_results)} chunks")
+        return raw_results
