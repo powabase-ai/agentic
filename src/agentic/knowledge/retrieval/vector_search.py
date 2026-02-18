@@ -11,6 +11,7 @@ import logging
 
 from agentic.knowledge.embedder.base import Embedder
 from agentic.knowledge.embedder.litellm import OpenAIEmbedder
+from agentic.knowledge.model_config import HYBRID_DEFAULT_VECTOR_WEIGHT
 from agentic.knowledge.models import RetrievalConfig, RetrievedItem
 from agentic.knowledge.retrieval.base import RetrievalAlgorithm
 from agentic.knowledge.store import KnowledgeStore
@@ -189,7 +190,7 @@ class HybridSearchAlgorithm(RetrievalAlgorithm):
     def __init__(
         self,
         embedder: Embedder | None = None,
-        vector_weight: float = 0.7,
+        vector_weight: float = HYBRID_DEFAULT_VECTOR_WEIGHT,
     ):
         self.embedder = embedder or OpenAIEmbedder()
         self.vector_weight = vector_weight

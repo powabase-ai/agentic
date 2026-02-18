@@ -8,6 +8,8 @@ The agentic framework defines the contract; platforms provide the implementation
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
+from agentic.knowledge.model_config import HYBRID_DEFAULT_VECTOR_WEIGHT
+
 if TYPE_CHECKING:
     from agentic.knowledge.models import RetrievedItem
 
@@ -83,7 +85,7 @@ class KnowledgeStore(ABC):
         query: str,
         embedding: list[float],
         top_k: int = 5,
-        vector_weight: float = 0.7,
+        vector_weight: float = HYBRID_DEFAULT_VECTOR_WEIGHT,
         filter_metadata: dict | None = None,
     ) -> list["RetrievedItem"]:
         """

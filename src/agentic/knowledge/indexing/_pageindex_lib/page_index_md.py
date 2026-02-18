@@ -1014,10 +1014,12 @@ def _trim_parent_text(tree_nodes, page_list):
                 node["text"] = get_text_of_pdf_pages(
                     page_list, node_start, first_child_start - 1
                 )
+                node["end_index"] = first_child_start - 1
             else:
                 # First child starts on the same page as parent.
                 # No intro text — parent gets empty string.
                 node["text"] = ""
+                node["end_index"] = node_start
 
         # Recurse into children (they may also be parents)
         _trim_parent_text(children, page_list)

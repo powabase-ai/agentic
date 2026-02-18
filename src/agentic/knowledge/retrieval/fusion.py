@@ -92,6 +92,13 @@ def reciprocal_rank_fusion(
     # Sort by fused score descending
     sorted_ids = sorted(scores, key=scores.__getitem__, reverse=True)
 
+    # Normalize to [0, 1] so the top result has score 1.0.
+    # This is purely cosmetic — ranking is unchanged.
+    max_score = scores[sorted_ids[0]] if sorted_ids else 1.0
+    if max_score > 0:
+        for item_id in sorted_ids:
+            scores[item_id] /= max_score
+
     return [
         replace(items[item_id], score=scores[item_id])
         for item_id in sorted_ids[:top_k]

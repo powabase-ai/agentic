@@ -99,3 +99,17 @@ RERANKER_DEFAULT_MODEL = "cohere/rerank-english-v3.0"
 # Higher values give the reranker more candidates to choose from, improving
 # recall, but increase latency and cost. 20 is a good default balance.
 RERANKER_CANDIDATE_COUNT = 20
+
+
+# =============================================================================
+# Query Enrichment defaults
+# =============================================================================
+QUERY_ENRICHMENT_DEFAULT_MODEL = "gpt-4.1-mini"
+
+
+# =============================================================================
+# Hybrid search defaults
+# =============================================================================
+# Default weight for vector similarity in hybrid RRF fusion.
+# keyword_weight = 1.0 - HYBRID_DEFAULT_VECTOR_WEIGHT.
+HYBRID_DEFAULT_VECTOR_WEIGHT = 0.5
