@@ -118,7 +118,7 @@ class LiteLLMReranker(Reranker):
         top_n: int | None = None,
     ) -> list[RerankResult]:
         """Async version of rerank (via run_in_executor)."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None, self.rerank, query, documents, top_n
         )

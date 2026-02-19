@@ -5,6 +5,7 @@ Adapted from proven implementation in agentic/etl/transformers/extractors/pdf.py
 Uses fallback strategy: Mistral OCR → PyMuPDF (fitz) → pdfplumber
 """
 
+import asyncio
 import io
 import logging
 import re
@@ -106,12 +107,25 @@ class PDFExtractor(Extractor):
         Returns:
             ExtractionResult with text derivative
         """
-        # Try Mistral OCR first (if configured)
+        # Try Mistral OCR first (if configured) with retry
         if self.mistral_api_key:
-            try:
-                return await self._extract_mistral(raw)
-            except Exception as e:
-                logger.warning(f"Mistral OCR failed: {e}, falling back to Fitz")
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    return await self._extract_mistral(raw)
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        wait = 2 ** attempt  # 1s, 2s
+                        logger.warning(
+                            f"Mistral OCR attempt {attempt + 1}/{max_retries} failed: {e}, "
+                            f"retrying in {wait}s"
+                        )
+                        await asyncio.sleep(wait)
+                    else:
+                        logger.warning(
+                            f"Mistral OCR failed after {max_retries} attempts: {e}, "
+                            f"falling back to Fitz"
+                        )
 
         # Fallback to Fitz (PyMuPDF)
         try:

@@ -14,6 +14,20 @@ from agentic.knowledge.chunking.recursive import RecursiveChunking
 from agentic.knowledge.models import TextChunk
 from langchain_text_splitters.markdown import ExperimentalMarkdownSyntaxTextSplitter
 
+# Markdown header symbol → metadata key produced by the splitter.
+# Defined locally to decouple from langchain internals — the class attribute
+# ExperimentalMarkdownSyntaxTextSplitter.DEFAULT_HEADER_KEYS was removed
+# in langchain-text-splitters 1.1.1.
+_HEADER_MAP = {
+    "#": "Header 1",
+    "##": "Header 2",
+    "###": "Header 3",
+    "####": "Header 4",
+    "#####": "Header 5",
+    "######": "Header 6",
+}
+_HEADER_VALUES = frozenset(_HEADER_MAP.values())
+
 
 class MarkdownHeaderChunking(ChunkingStrategy):
     """
@@ -107,14 +121,12 @@ class MarkdownHeaderChunking(ChunkingStrategy):
                 header_keys = sorted(
                     k
                     for k in section.metadata.keys()
-                    if k in self._header_splitter.DEFAULT_HEADER_KEYS.values()
+                    if k in _HEADER_VALUES
                 )
                 if header_keys:
                     key = header_keys[-1]  # Most specific (deepest) header
                     markdown_symbol = next(
-                        sym
-                        for sym, val in self._header_splitter.DEFAULT_HEADER_KEYS.items()
-                        if val == key
+                        sym for sym, val in _HEADER_MAP.items() if val == key
                     )
                     header_text = section.metadata[key].strip()
                     markdown_header = f"{markdown_symbol} {header_text}"

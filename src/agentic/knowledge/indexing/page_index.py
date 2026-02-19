@@ -34,8 +34,6 @@ Two pipelines are supported, selected automatically based on input:
 
 import asyncio
 import logging
-import os
-import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -260,10 +258,18 @@ class PageIndexAlgorithm(IndexingAlgorithm):
     ) -> PageIndexResult:
         """Synchronous entry point — wraps aindex() with asyncio.run().
 
-        Provided for callers that don't have an async event loop. The actual
-        indexing work is fully async (LLM calls, concurrent summaries).
+        Raises RuntimeError if called from within an async event loop.
+        Use 'await aindex(...)' in async contexts instead.
         """
-        return asyncio.run(self.aindex(content, config, source_id))
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # No event loop running — safe to create one
+            return asyncio.run(self.aindex(content, config, source_id))
+        raise RuntimeError(
+            "PageIndexAlgorithm.index() cannot be called from an async context "
+            "(an event loop is already running). Use 'await aindex(...)' instead."
+        )
 
     async def aindex(
         self,
@@ -380,36 +386,26 @@ class PageIndexAlgorithm(IndexingAlgorithm):
             #   3. Build nested tree from header levels (stack-based)
             #   4. LLM-split oversized leaf nodes into sub-sections
             #   5. Generate per-node summaries via concurrent LLM calls
-            #
-            # md_to_tree() expects a file path, so we write to a temp file.
-            tmp_fd, tmp_path = tempfile.mkstemp(suffix=".md")
-            try:
-                with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-                    f.write(content)
+            logger.info(
+                f"Running PageIndex md_to_tree: model={model}, "
+                f"summary={if_add_node_summary}"
+            )
 
-                logger.info(
-                    f"Running PageIndex md_to_tree: model={model}, "
-                    f"summary={if_add_node_summary}"
-                )
-
-                # Always request text (if_add_node_text="yes") because we need
-                # section text for the SectionData objects. Summaries are
-                # generated from the text before we split them apart.
-                tree_result = await md_to_tree(
-                    md_path=tmp_path,
-                    model=model,
-                    if_add_node_summary=if_add_node_summary,
-                    if_add_node_text="yes",
-                    if_thinning=if_thinning,
-                    min_token_threshold=min_token_threshold,
-                    summary_token_threshold=summary_token_threshold,
-                    if_split_large_sections=split_large_sections,
-                    max_node_tokens=max_node_tokens,
-                )
-            finally:
-                # Clean up the temp file regardless of success/failure
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
+            # Always request text (if_add_node_text="yes") because we need
+            # section text for the SectionData objects. Summaries are
+            # generated from the text before we split them apart.
+            tree_result = await md_to_tree(
+                md_content=content,
+                doc_name=source_name or "Untitled",
+                model=model,
+                if_add_node_summary=if_add_node_summary,
+                if_add_node_text="yes",
+                if_thinning=if_thinning,
+                min_token_threshold=min_token_threshold,
+                summary_token_threshold=summary_token_threshold,
+                if_split_large_sections=split_large_sections,
+                max_node_tokens=max_node_tokens,
+            )
 
         # --- Post-pipeline: split tree into toc_structure + sections ---
 
