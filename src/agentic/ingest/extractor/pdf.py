@@ -11,7 +11,11 @@ import logging
 import re
 import tempfile
 
-from agentic.ingest.extractor.base import ExtractionError, Extractor
+from agentic.ingest.extractor.base import (
+    ExtractionError,
+    Extractor,
+    replace_image_annotations,
+)
 from agentic.ingest.models import Derivative, ExtractionResult, RawContent
 
 logger = logging.getLogger(__name__)
@@ -264,11 +268,12 @@ class PDFExtractor(Extractor):
             page_markdowns = []
             page_metas = []
             for page in ocr_response.pages:
-                for img in page.images:
-                    page.markdown = page.markdown.replace(
-                        f"![{img.id}]({img.id})",
-                        f"![{img.id}]\n**{img.image_annotation}**",
-                    )
+                annotations = [
+                    (img.id, img.image_annotation) for img in page.images
+                ]
+                page.markdown = replace_image_annotations(
+                    page.markdown, annotations
+                )
                 page_markdowns.append(page.markdown)
                 page_metas.append(
                     {

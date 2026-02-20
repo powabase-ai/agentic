@@ -8,7 +8,11 @@ the original image as a derivative for image-mode retrieval.
 import base64
 import logging
 
-from agentic.ingest.extractor.base import ExtractionError, Extractor
+from agentic.ingest.extractor.base import (
+    ExtractionError,
+    Extractor,
+    replace_image_annotations,
+)
 from agentic.ingest.models import Derivative, ExtractionResult, RawContent
 
 logger = logging.getLogger(__name__)
@@ -69,7 +73,10 @@ class ImageExtractor(Extractor):
     async def _extract_mistral(self, raw: RawContent) -> ExtractionResult:
         """Extract text from image using Mistral OCR (pixtral vision)."""
         try:
+            from enum import Enum
+
             from mistralai import Mistral
+            from pydantic import BaseModel, Field
         except ImportError:
             raise ExtractionError(
                 "mistralai is required for Mistral OCR. "
@@ -84,20 +91,39 @@ class ImageExtractor(Extractor):
 
         client = Mistral(api_key=self.mistral_api_key)
 
+        # Define image annotation model
+        class ImageType(str, Enum):
+            GRAPH = "graph"
+            TEXT = "text"
+            TABLE = "table"
+            IMAGE = "image"
+
+        class Image(BaseModel):
+            image_type: ImageType = Field(
+                ..., description="The type of the image."
+            )
+            description: str = Field(
+                ..., description="A description of the image."
+            )
+
+        from mistralai.extra import response_format_from_pydantic_model
+
         ocr_response = client.ocr.process(
             model="mistral-ocr-latest",
             document={"type": "image_url", "image_url": data_uri},
+            bbox_annotation_format=response_format_from_pydantic_model(Image),
             include_image_base64=False,
         )
 
         # Collect OCR text from all pages (typically one for a single image)
         page_markdowns = []
         for page in ocr_response.pages:
-            for img in page.images:
-                page.markdown = page.markdown.replace(
-                    f"![{img.id}]({img.id})",
-                    f"![{img.id}]\n**{img.image_annotation}**",
-                )
+            annotations = [
+                (img.id, img.image_annotation) for img in page.images
+            ]
+            page.markdown = replace_image_annotations(
+                page.markdown, annotations
+            )
             page_markdowns.append(page.markdown)
 
         ocr_text = "\n\n".join(page_markdowns)
