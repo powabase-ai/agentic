@@ -4,9 +4,13 @@ Extractor - base class for content extractors.
 Extractors process raw content into derivatives (text, images, etc.)
 """
 
+import logging
+import re
 from abc import ABC, abstractmethod
 
 from agentic.ingest.models import ExtractionResult, RawContent
+
+_logger = logging.getLogger(__name__)
 
 
 class Extractor(ABC):
@@ -129,3 +133,46 @@ class ExtractionError(Exception):
         if self.source_uri:
             parts.append(f"source={self.source_uri}")
         return " | ".join(parts)
+
+
+def replace_image_annotations(
+    markdown: str,
+    annotations: list[tuple[str, str | None]],
+) -> str:
+    """Replace image placeholders in markdown with annotation text.
+
+    Provider-agnostic: any OCR extractor can call this with a list of
+    (image_id, annotation_text) pairs extracted from its response.
+
+    Handles multiple placeholder patterns:
+      - ![id](id)       — bare id as URL (Mistral default)
+      - ![id](https://) — full URL variant
+
+    Args:
+        markdown: The OCR markdown containing image placeholders.
+        annotations: List of (image_id, annotation_text) tuples.
+
+    Returns:
+        Markdown with image placeholders replaced by annotations.
+    """
+    for image_id, annotation in annotations:
+        if not annotation:
+            _logger.debug(
+                "Image %s has no annotation, skipping replacement", image_id
+            )
+            continue
+
+        # Try exact id-as-URL match first (fast path): ![id](id)
+        exact = f"![{image_id}]({image_id})"
+        if exact in markdown:
+            markdown = markdown.replace(
+                exact, f"![{image_id}]\n**{annotation}**"
+            )
+            continue
+
+        # Fallback: match ![id](anything) via regex
+        pattern = re.escape(f"![{image_id}]") + r"\([^)]*\)"
+        replacement = f"![{image_id}]\n**{annotation}**"
+        markdown = re.sub(pattern, lambda _: replacement, markdown)
+
+    return markdown

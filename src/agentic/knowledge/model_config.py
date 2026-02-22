@@ -108,6 +108,15 @@ QUERY_ENRICHMENT_DEFAULT_MODEL = "gpt-4.1-mini"
 
 
 # =============================================================================
+# Full Document strategy defaults
+# =============================================================================
+FULLDOC_SUMMARY_MODEL = "gpt-4.1-mini"
+FULLDOC_SUMMARY_INPUT_CHARS = 128_000  # ~32K tokens at ~4 chars/token
+FULLDOC_SUMMARY_MAX_TOKENS = 8000
+FULLDOC_EMBEDDING_MODEL = "text-embedding-3-large"
+
+
+# =============================================================================
 # Hybrid search defaults
 # =============================================================================
 # Default weight for vector similarity in hybrid RRF fusion.
