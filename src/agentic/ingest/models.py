@@ -75,7 +75,7 @@ class RawContent:
 
 
 # Derivative types - what extractors produce
-DerivativeType = Literal["text", "markdown", "html", "image", "table", "metadata"]
+DerivativeType = Literal["text", "markdown", "html", "image", "page_text", "table", "metadata"]
 
 
 @dataclass
@@ -122,7 +122,7 @@ class Derivative:
 
     def is_text(self) -> bool:
         """Check if this is a text-based derivative."""
-        return self.type in ("text", "markdown", "html")
+        return self.type in ("text", "markdown", "html", "page_text")
 
     def get_text(self) -> str:
         """Get content as string, decoding bytes if needed."""
@@ -189,12 +189,15 @@ class ExtractionResult:
         """
         Concatenate all text content from derivatives.
 
+        Excludes page_text derivatives to avoid duplicating content
+        already present in the combined text/markdown derivative.
+
         Returns:
             All text content joined with newlines
         """
         texts = []
         for deriv in self.derivatives:
-            if deriv.is_text():
+            if deriv.is_text() and deriv.type != "page_text":
                 texts.append(deriv.get_text())
         return "\n\n".join(texts)
 

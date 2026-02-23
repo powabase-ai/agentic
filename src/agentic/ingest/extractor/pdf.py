@@ -153,8 +153,8 @@ class PDFExtractor(Extractor):
             ) from None
 
         doc = fitz.open(stream=raw.content, filetype="pdf")
-        page_texts = []
-        page_metas = []
+        page_text_strings = []
+        page_text_derivs = []
 
         for page in doc:
             blocks = page.get_text("blocks")
@@ -167,16 +167,18 @@ class PDFExtractor(Extractor):
                         block_text = block_text.replace("\n", " ").strip()
                         if block_text:
                             block_texts.append(block_text)
-            page_texts.append("\n".join(block_texts))
+            page_text = "\n".join(block_texts)
+            page_text_strings.append(page_text)
+            page_text_derivs.append(
+                Derivative(
+                    type="page_text",
+                    content=page_text,
+                    format="plain",
+                    page=page.number + 1,
+                )
+            )
 
-            # Prefer logical page numbers; fall back to physical
-            try:
-                page_number = page.get_label()
-            except Exception:
-                page_number = page.number + 1
-            page_metas.append({"page": page_number})
-
-        fulltext = "\n".join(page_texts)
+        fulltext = "\n".join(page_text_strings)
         doc.close()
 
         derivatives = [
@@ -184,9 +186,9 @@ class PDFExtractor(Extractor):
                 type="text",
                 content=fulltext,
                 format="plain",
-                metadata={"page_texts": page_texts, "page_metas": page_metas},
             ),
         ]
+        derivatives.extend(page_text_derivs)
 
         # Render page images for image-mode retrieval
         image_derivs = self._render_page_images(raw)
@@ -197,11 +199,11 @@ class PDFExtractor(Extractor):
             mime_type=raw.mime_type,
             derivatives=derivatives,
             auto_metadata={
-                "page_count": len(page_texts),
+                "page_count": len(page_text_strings),
                 "char_count": len(fulltext),
             },
             extraction_method="fitz",
-            stats={"pages_processed": len(page_texts)},
+            stats={"pages_processed": len(page_text_strings)},
         )
 
     async def _extract_mistral(self, raw: RawContent) -> ExtractionResult:
@@ -266,7 +268,7 @@ class PDFExtractor(Extractor):
 
             # Process pages with image annotations
             page_markdowns = []
-            page_metas = []
+            page_text_derivs = []
             for page in ocr_response.pages:
                 annotations = [
                     (img.id, img.image_annotation) for img in page.images
@@ -275,19 +277,13 @@ class PDFExtractor(Extractor):
                     page.markdown, annotations
                 )
                 page_markdowns.append(page.markdown)
-                page_metas.append(
-                    {
-                        "page_number": page.index,
-                        "dimensions": {
-                            "width_px": page.dimensions.width
-                            if page.dimensions
-                            else None,
-                            "height_px": page.dimensions.height
-                            if page.dimensions
-                            else None,
-                            "dpi": page.dimensions.dpi if page.dimensions else None,
-                        },
-                    }
+                page_text_derivs.append(
+                    Derivative(
+                        type="page_text",
+                        content=page.markdown,
+                        format="plain",
+                        page=page.index + 1,
+                    )
                 )
 
             fulltext = "\n\n".join(page_markdowns)
@@ -297,12 +293,9 @@ class PDFExtractor(Extractor):
                     type="markdown",
                     content=fulltext,
                     format="markdown",
-                    metadata={
-                        "page_texts": page_markdowns,
-                        "page_metas": page_metas,
-                    },
                 ),
             ]
+            derivatives.extend(page_text_derivs)
 
             # Render page images for image-mode retrieval
             image_derivs = self._render_page_images(raw)
@@ -337,15 +330,20 @@ class PDFExtractor(Extractor):
             ) from None
 
         text_parts = []
-        page_texts = []
-        page_metas = []
+        page_text_derivs = []
 
         with pdfplumber.open(io.BytesIO(raw.content)) as pdf:
             for i, page in enumerate(pdf.pages):
                 page_text = page.extract_text() or ""
                 text_parts.append(page_text)
-                page_texts.append(page_text)
-                page_metas.append({"page": i + 1})
+                page_text_derivs.append(
+                    Derivative(
+                        type="page_text",
+                        content=page_text,
+                        format="plain",
+                        page=i + 1,
+                    )
+                )
 
         fulltext = "\n\n".join(text_parts)
 
@@ -354,9 +352,9 @@ class PDFExtractor(Extractor):
                 type="text",
                 content=fulltext,
                 format="plain",
-                metadata={"page_texts": page_texts, "page_metas": page_metas},
             ),
         ]
+        derivatives.extend(page_text_derivs)
 
         # Render page images for image-mode retrieval
         image_derivs = self._render_page_images(raw)
@@ -367,9 +365,9 @@ class PDFExtractor(Extractor):
             mime_type=raw.mime_type,
             derivatives=derivatives,
             auto_metadata={
-                "page_count": len(page_texts),
+                "page_count": len(text_parts),
                 "char_count": len(fulltext),
             },
             extraction_method="pdfplumber",
-            stats={"pages_processed": len(page_texts)},
+            stats={"pages_processed": len(text_parts)},
         )

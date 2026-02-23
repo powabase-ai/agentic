@@ -134,14 +134,11 @@ class ImageExtractor(Extractor):
             fmt = "jpg"
 
         derivatives = [
-            # Text derivative with page_texts for chunk-to-page mapping
+            # Text derivative
             Derivative(
                 type="markdown",
                 content=ocr_text,
                 format="markdown",
-                metadata={
-                    "page_texts": page_markdowns,
-                },
             ),
             # Original image as derivative for image-mode retrieval
             Derivative(
@@ -156,6 +153,16 @@ class ImageExtractor(Extractor):
                 },
             ),
         ]
+        # Per-page text derivatives
+        for i, page_md in enumerate(page_markdowns):
+            derivatives.append(
+                Derivative(
+                    type="page_text",
+                    content=page_md,
+                    format="plain",
+                    page=i + 1,
+                )
+            )
 
         return ExtractionResult(
             source_uri=raw.source_uri,
