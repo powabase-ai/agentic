@@ -277,12 +277,18 @@ class PDFExtractor(Extractor):
                     page.markdown, annotations
                 )
                 page_markdowns.append(page.markdown)
+                page_meta = {}
+                if page.dimensions is not None:
+                    page_meta["width"] = page.dimensions.width
+                    page_meta["height"] = page.dimensions.height
+                    page_meta["dpi"] = page.dimensions.dpi
                 page_text_derivs.append(
                     Derivative(
                         type="page_text",
                         content=page.markdown,
                         format="plain",
                         page=page.index + 1,
+                        metadata=page_meta,
                     )
                 )
 
