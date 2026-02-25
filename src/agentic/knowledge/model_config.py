@@ -108,6 +108,13 @@ QUERY_ENRICHMENT_DEFAULT_MODEL = "gpt-4.1-mini"
 
 
 # =============================================================================
+# Metadata Enrichment defaults
+# =============================================================================
+# Default LLM model for metadata field extraction during enrichment.
+METADATA_ENRICHMENT_DEFAULT_MODEL = "gpt-4.1-mini"
+
+
+# =============================================================================
 # Full Document strategy defaults
 # =============================================================================
 FULLDOC_SUMMARY_MODEL = "gpt-4.1-mini"
