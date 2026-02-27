@@ -297,7 +297,12 @@ async def toc_transformer(toc_content, model=None):
     logger.info(f"[toc_transformer] First attempt: complete={if_complete}, finish_reason={finish_reason}")
     if if_complete == "yes" and finish_reason == "finished":
         last_complete = extract_json(last_complete)
-        toc_list = last_complete.get('table_of_contents', last_complete if isinstance(last_complete, list) else [])
+        if isinstance(last_complete, list):
+            toc_list = last_complete
+        elif isinstance(last_complete, dict):
+            toc_list = last_complete.get('table_of_contents', [])
+        else:
+            toc_list = []
         cleaned_response=convert_page_to_int(toc_list)
         logger.info(f"[toc_transformer] Output: {len(cleaned_response)} items")
         return cleaned_response
@@ -311,7 +316,7 @@ async def toc_transformer(toc_content, model=None):
             break
         position = last_complete.rfind('}')
         if position != -1:
-            last_complete = last_complete[:position+2]
+            last_complete = last_complete[:position+1]
         prompt = f"""
         Your task is to continue the table of contents json structure, directly output the remaining part of the json structure.
         The response should be in the following JSON format:
@@ -327,16 +332,21 @@ async def toc_transformer(toc_content, model=None):
         new_complete, finish_reason = await _llm_completion(model=model, prompt=prompt)
 
         if new_complete.startswith('```json'):
-            new_complete =  get_json_content(new_complete)
-            last_complete = last_complete+new_complete
+            new_complete = get_json_content(new_complete)
+        last_complete = last_complete + new_complete
 
         if_complete = await check_if_toc_transformation_is_complete(toc_content, last_complete, model)
         logger.info(f"[toc_transformer] Continuation round {iteration_count}: complete={if_complete}, finish_reason={finish_reason}")
 
 
-    last_complete = json.loads(last_complete)
+    last_complete = extract_json(last_complete)
 
-    toc_list = last_complete.get('table_of_contents', last_complete if isinstance(last_complete, list) else [])
+    if isinstance(last_complete, list):
+        toc_list = last_complete
+    elif isinstance(last_complete, dict):
+        toc_list = last_complete.get('table_of_contents', [])
+    else:
+        toc_list = []
     cleaned_response=convert_page_to_int(toc_list)
     logger.info(f"[toc_transformer] Output: {len(cleaned_response)} items")
     return cleaned_response
