@@ -124,6 +124,26 @@ FULLDOC_EMBEDDING_MODEL = "text-embedding-3-large"
 
 
 # =============================================================================
+# GraphIndex strategy defaults
+# =============================================================================
+
+# LLM model for ToC building (tree structure, section splitting, summary generation).
+# Uses the same model as PageIndex since the ToC pipeline is shared.
+GRAPHINDEX_INDEXING_MODEL = "gpt-4.1-mini"
+
+# LLM model for internal referenced_nodes enrichment.
+# Identifies cross-section references within each document during indexing.
+GRAPHINDEX_ENRICHMENT_MODEL = "gpt-4.1-mini"
+
+# Embedding model for node summary embeddings.
+# Summaries + metadata are embedded for vector similarity retrieval.
+GRAPHINDEX_EMBEDDING_MODEL = "text-embedding-3-small"
+
+# Maximum number of concurrent LLM calls during referenced_nodes enrichment.
+GRAPHINDEX_ENRICHMENT_MAX_CONCURRENT = 10
+
+
+# =============================================================================
 # Hybrid search defaults
 # =============================================================================
 # Default weight for vector similarity in hybrid RRF fusion.
