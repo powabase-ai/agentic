@@ -10,7 +10,7 @@ constants.ts) must be updated separately to match.
 """
 
 # Indexing: tree building, ToC detection, summary generation, section splitting
-PAGEINDEX_INDEXING_MODEL = "gpt-4.1-mini"
+PAGEINDEX_INDEXING_MODEL = "gpt-5-mini"
 
 # Retrieval: LLM-based document selection and node selection (tree search)
 PAGEINDEX_RETRIEVAL_MODEL = "gpt-4.1-mini"
@@ -104,7 +104,7 @@ RERANKER_CANDIDATE_COUNT = 20
 # =============================================================================
 # Query Enrichment defaults
 # =============================================================================
-QUERY_ENRICHMENT_DEFAULT_MODEL = "gpt-4.1-mini"
+QUERY_ENRICHMENT_DEFAULT_MODEL = "gpt-5-mini"
 
 
 # =============================================================================
@@ -129,15 +129,15 @@ FULLDOC_EMBEDDING_MODEL = "text-embedding-3-large"
 
 # LLM model for ToC building (tree structure, section splitting, summary generation).
 # Uses the same model as PageIndex since the ToC pipeline is shared.
-GRAPHINDEX_INDEXING_MODEL = "gpt-4.1-mini"
+GRAPHINDEX_INDEXING_MODEL = "gpt-5-mini"
 
 # LLM model for internal referenced_nodes enrichment.
 # Identifies cross-section references within each document during indexing.
-GRAPHINDEX_ENRICHMENT_MODEL = "gpt-4.1-mini"
+GRAPHINDEX_ENRICHMENT_MODEL = "gpt-5-mini"
 
 # Embedding model for node summary embeddings.
 # Summaries + metadata are embedded for vector similarity retrieval.
-GRAPHINDEX_EMBEDDING_MODEL = "text-embedding-3-small"
+GRAPHINDEX_EMBEDDING_MODEL = "text-embedding-3-large"
 
 # Maximum number of concurrent LLM calls during referenced_nodes enrichment.
 GRAPHINDEX_ENRICHMENT_MAX_CONCURRENT = 10
