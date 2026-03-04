@@ -13,7 +13,7 @@ constants.ts) must be updated separately to match.
 PAGEINDEX_INDEXING_MODEL = "gpt-5-mini"
 
 # Retrieval: LLM-based document selection and node selection (tree search)
-PAGEINDEX_RETRIEVAL_MODEL = "gpt-4.1-mini"
+PAGEINDEX_RETRIEVAL_MODEL = "gpt-5-mini"
 
 
 # =============================================================================
@@ -24,52 +24,73 @@ PAGEINDEX_RETRIEVAL_MODEL = "gpt-4.1-mini"
 # Number of pages to scan from the start of the document when looking for a
 # table of contents. Also used as the upper bound for retry scans.
 # Used in: _pageindex_lib/page_index.py → find_toc_pages(), check_toc()
-PAGEINDEX_TOC_CHECK_PAGE_NUM = 15
+PAGEINDEX_TOC_CHECK_PAGE_NUM = 50
+
+# --- Post-ToC Heading Scan ---
+# Number of pages to scan *after* the detected ToC when looking for section
+# headings to calibrate the page-number offset (physical_index − page).
+# Used in: _pageindex_lib/page_index.py → process_toc_with_page_numbers()
+PAGEINDEX_TOC_OFFSET_SCAN_PAGES = 50
+
+# Maximum consecutive non-ToC pages tolerated inside a ToC sequence before
+# concluding the ToC has ended. Handles blank/separator pages between ToC pages.
+# Used in: _pageindex_lib/page_index.py → find_toc_pages()
+PAGEINDEX_TOC_GAP_TOLERANCE = 3
 
 # --- ToC Extraction LLM Input ---
 # Maximum tokens to send to the LLM in a single call when extracting or
 # generating the ToC from page text. If the document exceeds this, pages are
 # split into groups processed sequentially (generate_toc_init → generate_toc_continue).
 # Used in: _pageindex_lib/page_index.py → page_list_to_group_text()
-PAGEINDEX_TOC_MAX_TOKENS_PER_CHUNK = 16000
+PAGEINDEX_TOC_MAX_TOKENS_PER_CHUNK = 32000
 
 # --- Large-Node Recursive Splitting (page-aware pipeline) ---
 # After the tree is built, any single node spanning more than this many pages
 # AND exceeding PAGEINDEX_MAX_TOKEN_NUM_EACH_NODE tokens gets recursively
 # re-processed via meta_processor(mode='process_no_toc') to split it into children.
 # Used in: _pageindex_lib/page_index.py → process_large_node_recursively()
-PAGEINDEX_MAX_PAGE_NUM_EACH_NODE = 10
+# Used by the page-aware pipeline (tree_parser → process_large_node_recursively())
+PAGEINDEX_MAX_PAGE_NUM_EACH_NODE = 16
 PAGEINDEX_MAX_TOKEN_NUM_EACH_NODE = 16000
 
 # --- Markdown Pipeline: Leaf-Node Splitting ---
 # Tier 1: Leaf nodes above this token count are always sent to the LLM for
 # structure inference (split into sub-sections).
 # Used in: _pageindex_lib/page_index_md.py → split_large_sections()
-PAGEINDEX_MAX_NODE_TOKENS = 1500
+# Used by the markdown pipeline (md_to_tree → split_large_sections())
+PAGEINDEX_MAX_NODE_TOKENS = 16000
 
 # Tier 2: Leaf nodes above this token count AND with >= PAGEINDEX_MIN_PARAGRAPH_COUNT
 # blank-line-separated paragraphs are also sent for splitting.
 # Used in: _pageindex_lib/page_index_md.py → split_large_sections()
-PAGEINDEX_MIN_SPLIT_TOKENS = 500
+PAGEINDEX_MIN_SPLIT_TOKENS = 16000
 PAGEINDEX_MIN_PARAGRAPH_COUNT = 4
 
 # --- Thinning (optional subtree merging in markdown pipeline) ---
 # When thinning is enabled, subtrees with cumulative token count below this
 # are merged into their parent node.
 # Used in: _pageindex_lib/page_index_md.py → tree_thinning_for_index()
-PAGEINDEX_MIN_TOKEN_THRESHOLD = 2500
+PAGEINDEX_MIN_TOKEN_THRESHOLD = 0
 
 # --- Summary Generation ---
 # Nodes with fewer tokens than this use their raw text as the summary
 # (no LLM call). Above this, the LLM generates a concise summary.
 # Used in: _pageindex_lib/page_index_md.py → get_node_summary()
-PAGEINDEX_SUMMARY_TOKEN_THRESHOLD = 200
+PAGEINDEX_SUMMARY_TOKEN_THRESHOLD = 1500
 
 # --- Small-Sibling Merging (page-aware pipeline post-processing) ---
 # Leaf nodes with fewer tokens than this are merged into an adjacent sibling
 # or absorbed into their parent to reduce ToC noise.
 # Used in: _pageindex_lib/page_index_md.py → _merge_small_siblings()
-PAGEINDEX_MIN_MERGE_TOKENS = 200
+PAGEINDEX_MIN_MERGE_TOKENS = 0
+
+# --- LLM Concurrency ---
+# Maximum concurrent LLM calls during PageIndex indexing.
+
+# Controls an asyncio.Semaphore inside _llm_completion() to prevent
+# OpenAI 429 rate-limit errors when processing large documents.
+# Applies to both page_index and graph_index (Stage 1) strategies.
+PAGEINDEX_LLM_MAX_CONCURRENT = 7
 
 
 # =============================================================================
@@ -105,22 +126,49 @@ RERANKER_CANDIDATE_COUNT = 20
 # Query Enrichment defaults
 # =============================================================================
 QUERY_ENRICHMENT_DEFAULT_MODEL = "gpt-5-mini"
+QUERY_ENRICHMENT_TEMPERATURE = 0
+QUERY_ENRICHMENT_MAX_TOKENS = None  # No limit by default
+QUERY_ENRICHMENT_NUM_RETRIES = 1
 
 
 # =============================================================================
 # Metadata Enrichment defaults
 # =============================================================================
+
 # Default LLM model for metadata field extraction during enrichment.
-METADATA_ENRICHMENT_DEFAULT_MODEL = "gpt-4.1-mini"
+METADATA_ENRICHMENT_DEFAULT_MODEL = "gpt-5-mini"
+
+# Maximum input characters for item text sent to the enrichment LLM (text-only path).
+# 0 means no truncation — the full item text is sent to the model.
+METADATA_ENRICHMENT_MAX_INPUT_CHARS = 0
+
+# Maximum input characters for item text when images are also provided (multimodal path).
+# Multimodal calls include page images alongside text, so a lower limit may help
+# keep the request within model context limits and reduce cost.
+# 0 means no truncation.
+METADATA_ENRICHMENT_MAX_INPUT_CHARS_MULTIMODAL = 0
+
+# Maximum number of page images to include in a single multimodal enrichment call.
+# Additional images beyond this cap are silently dropped.
+METADATA_ENRICHMENT_MAX_IMAGES = 10
+
+# Maximum number of concurrent LLM calls during enrichment.
+METADATA_ENRICHMENT_MAX_CONCURRENT = 10
+
+# Number of items to process per database commit batch.
+METADATA_ENRICHMENT_BATCH_SIZE = 50
+
+# Maximum retry attempts when the LLM returns unparseable JSON.
+METADATA_ENRICHMENT_MAX_RETRIES = 3
 
 
 # =============================================================================
 # Full Document strategy defaults
 # =============================================================================
-FULLDOC_SUMMARY_MODEL = "gpt-4.1-mini"
+FULLDOC_SUMMARY_MODEL = "gpt-5-mini"
 FULLDOC_SUMMARY_INPUT_CHARS = 128_000  # ~32K tokens at ~4 chars/token
 FULLDOC_SUMMARY_MAX_TOKENS = 8000
-FULLDOC_EMBEDDING_MODEL = "text-embedding-3-large"
+FULLDOC_EMBEDDING_MODEL = "text-embedding-3-small"
 
 
 # =============================================================================
@@ -137,10 +185,17 @@ GRAPHINDEX_ENRICHMENT_MODEL = "gpt-5-mini"
 
 # Embedding model for node summary embeddings.
 # Summaries + metadata are embedded for vector similarity retrieval.
-GRAPHINDEX_EMBEDDING_MODEL = "text-embedding-3-large"
+GRAPHINDEX_EMBEDDING_MODEL = "text-embedding-3-small"
 
 # Maximum number of concurrent LLM calls during referenced_nodes enrichment.
 GRAPHINDEX_ENRICHMENT_MAX_CONCURRENT = 10
+
+# Maximum tokens for LLM response during referenced_nodes enrichment.
+GRAPHINDEX_ENRICHMENT_MAX_TOKENS = 1000
+
+# Maximum input characters for node text sent to the enrichment LLM.
+# 0 means no truncation (node texts are already length-bounded by the indexing pipeline).
+GRAPHINDEX_ENRICHMENT_MAX_INPUT_CHARS = 0
 
 
 # =============================================================================

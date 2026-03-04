@@ -2,9 +2,12 @@
 # This file is only used when ConfigLoader is invoked directly (standalone).
 model: "gpt-4.1-nano"
 toc_check_page_num: 20
+toc_offset_scan_pages: 70
+toc_gap_tolerance: 3
 max_page_num_each_node: 10
 max_token_num_each_node: 20000
 if_add_node_id: "yes"
 if_add_node_summary: "yes"
 if_add_doc_description: "no"
 if_add_node_text: "no"
+llm_max_concurrent: 10

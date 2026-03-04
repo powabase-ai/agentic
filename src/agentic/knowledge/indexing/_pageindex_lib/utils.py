@@ -13,12 +13,24 @@ from types import SimpleNamespace as config
 
 logger = logging.getLogger(__name__)
 
+_llm_semaphore: asyncio.Semaphore | None = None
+
+def init_llm_semaphore(max_concurrent: int) -> None:
+    global _llm_semaphore
+    _llm_semaphore = asyncio.Semaphore(max_concurrent)
+
+def reset_llm_semaphore() -> None:
+    global _llm_semaphore
+    _llm_semaphore = None
+
 __all__ = [
     # Underscore-prefixed helpers used by page_index_md.py / page_index.py via star import
     "_ensure_pypdf2",
     "_ensure_pymupdf",
     "_llm_completion",
     "_llm_json",
+    "init_llm_semaphore",
+    "reset_llm_semaphore",
     # Token counting
     "count_tokens",
     # JSON extraction
@@ -75,7 +87,9 @@ __all__ = [
     # Model config constants (re-exported from agentic.knowledge.model_config)
     "PAGEINDEX_INDEXING_MODEL",
     "PAGEINDEX_TOC_CHECK_PAGE_NUM",
+    "PAGEINDEX_TOC_GAP_TOLERANCE",
     "PAGEINDEX_TOC_MAX_TOKENS_PER_CHUNK",
+    "PAGEINDEX_TOC_OFFSET_SCAN_PAGES",
     "PAGEINDEX_MAX_PAGE_NUM_EACH_NODE",
     "PAGEINDEX_MAX_TOKEN_NUM_EACH_NODE",
     "PAGEINDEX_MAX_NODE_TOKENS",
@@ -84,6 +98,7 @@ __all__ = [
     "PAGEINDEX_MIN_TOKEN_THRESHOLD",
     "PAGEINDEX_SUMMARY_TOKEN_THRESHOLD",
     "PAGEINDEX_MIN_MERGE_TOKENS",
+    "PAGEINDEX_LLM_MAX_CONCURRENT",
 ]
 
 # Lazy imports for PDF-only dependencies (not needed for md_to_tree path)
@@ -123,13 +138,22 @@ async def _llm_completion(
     """Call LLM, return (content, finish_reason). Raises on failure."""
     messages = list(chat_history) if chat_history else []
     messages.append({"role": "user", "content": prompt})
-    response = await litellm.acompletion(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        num_retries=3,
-        drop_params=True,
-    )
+
+    async def _call():
+        return await litellm.acompletion(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            num_retries=3,
+            drop_params=True,
+        )
+
+    if _llm_semaphore is not None:
+        async with _llm_semaphore:
+            response = await _call()
+    else:
+        response = await _call()
+
     content = response.choices[0].message.content or ""
     finish_reason = response.choices[0].finish_reason
     return content, ("max_output_reached" if finish_reason == "length" else "finished")
@@ -192,7 +216,8 @@ def extract_json(content):
                 logging.warning("Extracted JSON by ignoring trailing extra data")
                 return result
             except json.JSONDecodeError:
-                logging.error("Failed to parse JSON even after cleanup and raw_decode")
+                logging.error(f"Failed to parse JSON even after cleanup and raw_decode. "
+                              f"First 300 chars of input: {content[:300]!r}")
                 return {}
     except Exception as e:
         logging.error(f"Unexpected error while extracting JSON: {e}")
@@ -601,19 +626,29 @@ def convert_physical_index_to_int(data):
         for i in range(len(data)):
             # Check if item is a dictionary and has 'physical_index' key
             if isinstance(data[i], dict) and 'physical_index' in data[i]:
+                original_value = data[i]['physical_index']
                 if isinstance(data[i]['physical_index'], str):
                     if data[i]['physical_index'].startswith('<physical_index_'):
                         try:
                             data[i]['physical_index'] = int(data[i]['physical_index'].split('_')[-1].rstrip('>').strip())
                         except ValueError:
                             data[i]['physical_index'] = None
+                            logging.warning(f"[convert_physical_index_to_int] item[{i}] "
+                                            f"title={data[i].get('title','?')!r}: "
+                                            f"int conversion failed for: {original_value!r}")
                     elif data[i]['physical_index'].startswith('physical_index_'):
                         try:
                             data[i]['physical_index'] = int(data[i]['physical_index'].split('_')[-1].strip())
                         except ValueError:
                             data[i]['physical_index'] = None
+                            logging.warning(f"[convert_physical_index_to_int] item[{i}] "
+                                            f"title={data[i].get('title','?')!r}: "
+                                            f"int conversion failed for: {original_value!r}")
                     else:
                         data[i]['physical_index'] = None
+                        logging.warning(f"[convert_physical_index_to_int] item[{i}] "
+                                        f"title={data[i].get('title','?')!r}: "
+                                        f"unrecognized physical_index format: {original_value!r}")
     elif isinstance(data, str):
         if data.startswith('<physical_index_'):
             try:
@@ -807,7 +842,9 @@ class ConfigLoader:
 from agentic.knowledge.model_config import (
     PAGEINDEX_INDEXING_MODEL,
     PAGEINDEX_TOC_CHECK_PAGE_NUM,
+    PAGEINDEX_TOC_GAP_TOLERANCE,  # noqa: F401 (re-exported via wildcard)
     PAGEINDEX_TOC_MAX_TOKENS_PER_CHUNK,
+    PAGEINDEX_TOC_OFFSET_SCAN_PAGES,
     PAGEINDEX_MAX_PAGE_NUM_EACH_NODE,
     PAGEINDEX_MAX_TOKEN_NUM_EACH_NODE,
     PAGEINDEX_MAX_NODE_TOKENS,
@@ -816,6 +853,7 @@ from agentic.knowledge.model_config import (
     PAGEINDEX_MIN_TOKEN_THRESHOLD,
     PAGEINDEX_SUMMARY_TOKEN_THRESHOLD,
     PAGEINDEX_MIN_MERGE_TOKENS,
+    PAGEINDEX_LLM_MAX_CONCURRENT,
 )
 
 DEFAULT_MODEL = PAGEINDEX_INDEXING_MODEL

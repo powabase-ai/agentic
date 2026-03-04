@@ -271,6 +271,7 @@ If all documents seem relevant, include all of them. If none seem relevant, retu
                 model=retrieval_model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
+                drop_params=True,
             )
 
             response_text = response.choices[0].message.content or ""
@@ -363,6 +364,7 @@ Return the most relevant node IDs as a JSON array:"""
                 model=retrieval_model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
+                drop_params=True,
             )
             response_text = response.choices[0].message.content or ""
         except Exception as e:

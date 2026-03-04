@@ -817,7 +817,7 @@ def clean_tree_for_output(tree_nodes):
 # Main Entry Point: Markdown Pipeline
 # =============================================================================
 
-async def md_to_tree(md_path=None, if_thinning=False, min_token_threshold=PAGEINDEX_MIN_TOKEN_THRESHOLD, if_add_node_summary='no', summary_token_threshold=PAGEINDEX_SUMMARY_TOKEN_THRESHOLD, model=None, if_add_doc_description='no', if_add_node_text='no', if_add_node_id='yes', if_split_large_sections=True, max_node_tokens=PAGEINDEX_MAX_NODE_TOKENS, min_split_tokens=PAGEINDEX_MIN_SPLIT_TOKENS, min_paragraph_count=PAGEINDEX_MIN_PARAGRAPH_COUNT, md_content=None, doc_name=None):
+async def md_to_tree(md_path=None, if_thinning=False, min_token_threshold=PAGEINDEX_MIN_TOKEN_THRESHOLD, if_add_node_summary='no', summary_token_threshold=PAGEINDEX_SUMMARY_TOKEN_THRESHOLD, model=None, if_add_doc_description='no', if_add_node_text='no', if_add_node_id='yes', if_split_large_sections=True, max_node_tokens=PAGEINDEX_MAX_NODE_TOKENS, min_split_tokens=PAGEINDEX_MIN_SPLIT_TOKENS, min_paragraph_count=PAGEINDEX_MIN_PARAGRAPH_COUNT, md_content=None, doc_name=None, llm_max_concurrent=None):
     """Build a hierarchical tree from a markdown file or string.
 
     This is the main entry point for the markdown pipeline. It orchestrates
@@ -878,6 +878,9 @@ async def md_to_tree(md_path=None, if_thinning=False, min_token_threshold=PAGEIN
             doc_name = os.path.splitext(os.path.basename(md_path))[0]
     else:
         raise ValueError("Either md_path or md_content must be provided")
+
+    if llm_max_concurrent:
+        init_llm_semaphore(llm_max_concurrent)
 
     # --- Step 1: Extract headers ---
     logger.info("Extracting nodes from markdown...")
@@ -1138,8 +1141,11 @@ async def md_to_tree_from_pages(
     min_paragraph_count=PAGEINDEX_MIN_PARAGRAPH_COUNT,
     # Parameters for the reference PageIndex tree_parser:
     toc_check_page_num=PAGEINDEX_TOC_CHECK_PAGE_NUM,
+    toc_offset_scan_pages=PAGEINDEX_TOC_OFFSET_SCAN_PAGES,
     max_page_num_each_node=PAGEINDEX_MAX_PAGE_NUM_EACH_NODE,
     max_token_num_each_node=PAGEINDEX_MAX_TOKEN_NUM_EACH_NODE,
+    toc_gap_tolerance=PAGEINDEX_TOC_GAP_TOLERANCE,
+    llm_max_concurrent=None,
 ):
     """Build a hierarchical tree from per-page text using the full ToC pipeline.
 
@@ -1208,6 +1214,8 @@ async def md_to_tree_from_pages(
     opt = SimpleNamespace(
         model=model or DEFAULT_MODEL,
         toc_check_page_num=toc_check_page_num,
+        toc_offset_scan_pages=toc_offset_scan_pages,
+        toc_gap_tolerance=toc_gap_tolerance,
         max_page_num_each_node=max_page_num_each_node,
         max_token_num_each_node=max_token_num_each_node,
         if_add_node_id=if_add_node_id,
@@ -1216,9 +1224,12 @@ async def md_to_tree_from_pages(
         if_add_doc_description="no",
     )
 
+    if llm_max_concurrent:
+        init_llm_semaphore(llm_max_concurrent)
+
     _logger.info(
         f"Page-aware pipeline: {len(page_texts)} pages, model={opt.model}, "
-        f"toc_check_page_num={toc_check_page_num}"
+        f"toc_check_page_num={toc_check_page_num}, toc_offset_scan_pages={toc_offset_scan_pages}"
     )
 
     # --- Step 3: Run the reference PageIndex pipeline ---
