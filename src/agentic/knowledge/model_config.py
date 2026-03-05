@@ -78,12 +78,6 @@ PAGEINDEX_MIN_TOKEN_THRESHOLD = 0
 # Used in: _pageindex_lib/page_index_md.py → get_node_summary()
 PAGEINDEX_SUMMARY_TOKEN_THRESHOLD = 1500
 
-# --- Small-Sibling Merging (page-aware pipeline post-processing) ---
-# Leaf nodes with fewer tokens than this are merged into an adjacent sibling
-# or absorbed into their parent to reduce ToC noise.
-# Used in: _pageindex_lib/page_index_md.py → _merge_small_siblings()
-PAGEINDEX_MIN_MERGE_TOKENS = 0
-
 # --- LLM Concurrency ---
 # Maximum concurrent LLM calls during PageIndex indexing.
 
