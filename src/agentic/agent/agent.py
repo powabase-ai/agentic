@@ -15,6 +15,7 @@ from agentic.agent.output import AgentOutput
 from agentic.agent.session import AgentSession
 from agentic.execution.context import ExecutionContext
 from agentic.execution.status import ExecutionStatus
+from agentic.knowledge.model_config import AGENT_DEFAULT_MODEL
 
 
 class Agent:
@@ -47,7 +48,7 @@ class Agent:
 
     def __init__(
         self,
-        model: str = "gpt-4o-mini",
+        model: str = AGENT_DEFAULT_MODEL,
         system_prompt: str = "",
         name: str | None = None,
     ) -> None:

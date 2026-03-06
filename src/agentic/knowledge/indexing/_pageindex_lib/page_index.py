@@ -189,7 +189,7 @@ async def check_if_toc_extraction_is_complete(content, toc, model=None):
 
 async def check_if_toc_transformation_is_complete(content, toc, model=None):
     prompt = f"""
-    You are given a raw table of contents and a able of contents.
+    You are given a raw table of contents.
     Your job is to check if the table of contents is complete.
 
     Reply format:

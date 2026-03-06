@@ -1,9 +1,10 @@
 """
 Knowledge module model & pipeline configuration.
 
-Central defaults for all models used in knowledge pipelines.
-To change the default model for indexing, retrieval, or reranking,
-update the constants below — all Python code references these.
+Single source of truth for all AI defaults used across knowledge
+pipelines: indexing, retrieval, reranking, embedding, and chunking.
+To change any default, update the constants below — all Python code
+references these (including agentic_project_service/strategies/registry.py).
 
 Frontend defaults (knowledge-bases/page.tsx, [kb_id]/page.tsx,
 constants.ts) must be updated separately to match.
@@ -70,6 +71,7 @@ PAGEINDEX_MIN_PARAGRAPH_COUNT = 4
 # When thinning is enabled, subtrees with cumulative token count below this
 # are merged into their parent node.
 # Used in: _pageindex_lib/page_index_md.py → tree_thinning_for_index()
+# By default, tree thinning is turned off; all nodes are preserved as is.
 PAGEINDEX_MIN_TOKEN_THRESHOLD = 0
 
 # --- Summary Generation ---
@@ -146,6 +148,9 @@ METADATA_ENRICHMENT_MAX_INPUT_CHARS_MULTIMODAL = 0
 # Additional images beyond this cap are silently dropped.
 METADATA_ENRICHMENT_MAX_IMAGES = 10
 
+# Default LLM response token budget for metadata enrichment calls.
+METADATA_ENRICHMENT_DEFAULT_MAX_TOKENS = 2000
+
 # Maximum number of concurrent LLM calls during enrichment.
 METADATA_ENRICHMENT_MAX_CONCURRENT = 10
 
@@ -193,8 +198,30 @@ GRAPHINDEX_ENRICHMENT_MAX_INPUT_CHARS = 0
 
 
 # =============================================================================
+# Chunk Embed strategy defaults
+# =============================================================================
+CHUNK_EMBED_EMBEDDING_MODEL = "text-embedding-3-small"
+CHUNK_EMBED_DEFAULT_CHUNK_SIZE = 2000
+CHUNK_EMBED_DEFAULT_OVERLAP = 50
+
+
+# =============================================================================
+# Agent context window defaults
+# =============================================================================
+# Default maximum tokens for the formatted context sent to the agent LLM.
+DEFAULT_MAX_CONTEXT_TOKENS = 32000
+
+
+# =============================================================================
 # Hybrid search defaults
 # =============================================================================
 # Default weight for vector similarity in hybrid RRF fusion.
 # keyword_weight = 1.0 - HYBRID_DEFAULT_VECTOR_WEIGHT.
 HYBRID_DEFAULT_VECTOR_WEIGHT = 0.5
+
+
+# =============================================================================
+# Agent defaults
+# =============================================================================
+# Default LLM model for agent execution when no model is specified.
+AGENT_DEFAULT_MODEL = "gpt-4o-mini"

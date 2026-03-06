@@ -10,6 +10,14 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from agentic.knowledge.model_config import (
+    CHUNK_EMBED_DEFAULT_CHUNK_SIZE,
+    CHUNK_EMBED_DEFAULT_OVERLAP,
+    CHUNK_EMBED_EMBEDDING_MODEL,
+    RERANKER_CANDIDATE_COUNT,
+    RERANKER_DEFAULT_MODEL,
+)
+
 
 class TextChunk(BaseModel):
     """
@@ -53,9 +61,9 @@ class IndexingConfig:
     """
 
     strategy: str = "chunk_embed"
-    chunk_size: int = 2000
-    overlap: int = 50
-    embedding_model: str = "text-embedding-3-small"
+    chunk_size: int = CHUNK_EMBED_DEFAULT_CHUNK_SIZE
+    overlap: int = CHUNK_EMBED_DEFAULT_OVERLAP
+    embedding_model: str = CHUNK_EMBED_EMBEDDING_MODEL
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -71,8 +79,8 @@ class RerankerConfig:
         provider_params: Additional provider-specific parameters
     """
 
-    model: str = "cohere/rerank-english-v3.0"
-    candidate_count: int = 20
+    model: str = RERANKER_DEFAULT_MODEL
+    candidate_count: int = RERANKER_CANDIDATE_COUNT
     api_key: str | None = None
     api_base: str | None = None
     provider_params: dict[str, Any] = field(default_factory=dict)

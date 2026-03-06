@@ -7,6 +7,10 @@ embedding and retrieval.
 
 from abc import ABC, abstractmethod
 
+from agentic.knowledge.model_config import (
+    CHUNK_EMBED_DEFAULT_CHUNK_SIZE,
+    CHUNK_EMBED_DEFAULT_OVERLAP,
+)
 from agentic.knowledge.models import TextChunk
 
 
@@ -43,8 +47,8 @@ class ChunkingStrategy(ABC):
 
     def __init__(
         self,
-        chunk_size: int = 2000,
-        overlap: int = 50,
+        chunk_size: int = CHUNK_EMBED_DEFAULT_CHUNK_SIZE,
+        overlap: int = CHUNK_EMBED_DEFAULT_OVERLAP,
     ) -> None:
         """
         Initialize the chunking strategy.

@@ -18,6 +18,7 @@ import logging
 from typing import Any
 
 from agentic.knowledge.embedder.base import Embedder
+from agentic.knowledge.model_config import CHUNK_EMBED_EMBEDDING_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ class LiteLLMEmbedder(Embedder):
 
     def __init__(
         self,
-        model: str = "text-embedding-3-small",
+        model: str = CHUNK_EMBED_EMBEDDING_MODEL,
         api_key: str | None = None,
         api_base: str | None = None,
         dimensions: int | None = None,
@@ -194,7 +195,7 @@ class OpenAIEmbedder(LiteLLMEmbedder):
 
     def __init__(
         self,
-        model: str = "text-embedding-3-small",
+        model: str = CHUNK_EMBED_EMBEDDING_MODEL,
         **kwargs: Any,
     ):
         super().__init__(model=model, **kwargs)

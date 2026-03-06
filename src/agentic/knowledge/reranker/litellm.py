@@ -14,6 +14,7 @@ import asyncio
 import logging
 from typing import Any
 
+from agentic.knowledge.model_config import RERANKER_DEFAULT_MODEL
 from agentic.knowledge.reranker.base import Reranker, RerankResult
 
 logger = logging.getLogger(__name__)
@@ -37,7 +38,7 @@ class LiteLLMReranker(Reranker):
 
     def __init__(
         self,
-        model: str = "cohere/rerank-english-v3.0",
+        model: str = RERANKER_DEFAULT_MODEL,
         api_key: str | None = None,
         api_base: str | None = None,
         timeout: int = 120,
@@ -131,7 +132,7 @@ class CohereReranker(LiteLLMReranker):
         >>> reranker = CohereReranker()  # Uses rerank-english-v3.0
     """
 
-    def __init__(self, model: str = "cohere/rerank-english-v3.0", **kwargs: Any):
+    def __init__(self, model: str = RERANKER_DEFAULT_MODEL, **kwargs: Any):
         super().__init__(model=model, **kwargs)
 
 

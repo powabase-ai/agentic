@@ -1,27 +1,29 @@
-import tiktoken
-import litellm
+import asyncio
+import contextvars
+import copy
+import json
 import logging
 import os
 from datetime import datetime
-import json
-import copy
-import asyncio
 from io import BytesIO
-import yaml
 from pathlib import Path
 from types import SimpleNamespace as config
 
+import litellm
+import tiktoken
+import yaml
+
 logger = logging.getLogger(__name__)
 
-_llm_semaphore: asyncio.Semaphore | None = None
+_llm_semaphore_var: contextvars.ContextVar[asyncio.Semaphore | None] = (
+    contextvars.ContextVar("_llm_semaphore", default=None)
+)
 
 def init_llm_semaphore(max_concurrent: int) -> None:
-    global _llm_semaphore
-    _llm_semaphore = asyncio.Semaphore(max_concurrent)
+    _llm_semaphore_var.set(asyncio.Semaphore(max_concurrent))
 
 def reset_llm_semaphore() -> None:
-    global _llm_semaphore
-    _llm_semaphore = None
+    _llm_semaphore_var.set(None)
 
 __all__ = [
     # Underscore-prefixed helpers used by page_index_md.py / page_index.py via star import
@@ -147,8 +149,9 @@ async def _llm_completion(
             drop_params=True,
         )
 
-    if _llm_semaphore is not None:
-        async with _llm_semaphore:
+    sem = _llm_semaphore_var.get()
+    if sem is not None:
+        async with sem:
             response = await _call()
     else:
         response = await _call()
