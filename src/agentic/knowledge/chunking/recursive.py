@@ -11,6 +11,10 @@ import re
 import warnings
 
 from agentic.knowledge.chunking.base import ChunkingStrategy
+from agentic.knowledge.model_config import (
+    CHUNK_EMBED_DEFAULT_CHUNK_SIZE,
+    CHUNK_EMBED_DEFAULT_OVERLAP,
+)
 from agentic.knowledge.models import TextChunk
 
 
@@ -55,8 +59,8 @@ class RecursiveChunking(ChunkingStrategy):
 
     def __init__(
         self,
-        chunk_size: int = 2000,
-        overlap: int = 50,
+        chunk_size: int = CHUNK_EMBED_DEFAULT_CHUNK_SIZE,
+        overlap: int = CHUNK_EMBED_DEFAULT_OVERLAP,
         separators: list[str] | None = None,
     ):
         if overlap >= chunk_size:

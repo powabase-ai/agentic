@@ -9,10 +9,15 @@ is prepended to each chunk for better embedding quality.
 Useful for structured Markdown documents (docs, READMEs, etc.).
 """
 
+from langchain_text_splitters.markdown import ExperimentalMarkdownSyntaxTextSplitter
+
 from agentic.knowledge.chunking.base import ChunkingStrategy
 from agentic.knowledge.chunking.recursive import RecursiveChunking
+from agentic.knowledge.model_config import (
+    CHUNK_EMBED_DEFAULT_CHUNK_SIZE,
+    CHUNK_EMBED_DEFAULT_OVERLAP,
+)
 from agentic.knowledge.models import TextChunk
-from langchain_text_splitters.markdown import ExperimentalMarkdownSyntaxTextSplitter
 
 # Markdown header symbol → metadata key produced by the splitter.
 # Defined locally to decouple from langchain internals — the class attribute
@@ -53,8 +58,8 @@ class MarkdownHeaderChunking(ChunkingStrategy):
 
     def __init__(
         self,
-        chunk_size: int = 2000,
-        overlap: int = 50,
+        chunk_size: int = CHUNK_EMBED_DEFAULT_CHUNK_SIZE,
+        overlap: int = CHUNK_EMBED_DEFAULT_OVERLAP,
     ):
         if overlap >= chunk_size:
             raise ValueError(

@@ -9,8 +9,8 @@ This module contains two entry points:
 
 2. **md_to_tree_from_pages()** — The page-aware pipeline. Delegates to the
    reference PageIndex tree_parser() for full ToC detection/verification/correction,
-   then adds Agentic-specific post-processing (parent text trimming, small sibling
-   merging). Used when per-page text arrays are available from PDF extractors.
+   then assigns MECE text to each node. Used when per-page text arrays are
+   available from PDF extractors.
 
 Both return the same format: {"doc_name": "...", "structure": [...tree...]}
 where each node in the tree carries title, node_id, text, and optional summaries.
@@ -28,9 +28,6 @@ Key functions (in pipeline order for the markdown pipeline):
     write_node_id()                — Sequential ID assignment (from utils)
     generate_summaries_for_structure_md() — Concurrent per-node LLM summaries
 
-Agentic-specific additions (not in the reference PageIndex library):
-    _trim_parent_text()     — Prevents parent/child text duplication for retrieval
-    _merge_small_siblings() — Merges tiny leaf nodes into adjacent siblings
 """
 
 import asyncio
@@ -817,7 +814,7 @@ def clean_tree_for_output(tree_nodes):
 # Main Entry Point: Markdown Pipeline
 # =============================================================================
 
-async def md_to_tree(md_path=None, if_thinning=False, min_token_threshold=PAGEINDEX_MIN_TOKEN_THRESHOLD, if_add_node_summary='no', summary_token_threshold=PAGEINDEX_SUMMARY_TOKEN_THRESHOLD, model=None, if_add_doc_description='no', if_add_node_text='no', if_add_node_id='yes', if_split_large_sections=True, max_node_tokens=PAGEINDEX_MAX_NODE_TOKENS, min_split_tokens=PAGEINDEX_MIN_SPLIT_TOKENS, min_paragraph_count=PAGEINDEX_MIN_PARAGRAPH_COUNT, md_content=None, doc_name=None):
+async def md_to_tree(md_path=None, if_thinning=False, min_token_threshold=PAGEINDEX_MIN_TOKEN_THRESHOLD, if_add_node_summary='no', summary_token_threshold=PAGEINDEX_SUMMARY_TOKEN_THRESHOLD, model=None, if_add_doc_description='no', if_add_node_text='no', if_add_node_id='yes', if_split_large_sections=True, max_node_tokens=PAGEINDEX_MAX_NODE_TOKENS, min_split_tokens=PAGEINDEX_MIN_SPLIT_TOKENS, min_paragraph_count=PAGEINDEX_MIN_PARAGRAPH_COUNT, md_content=None, doc_name=None, llm_max_concurrent=None):
     """Build a hierarchical tree from a markdown file or string.
 
     This is the main entry point for the markdown pipeline. It orchestrates
@@ -878,6 +875,9 @@ async def md_to_tree(md_path=None, if_thinning=False, min_token_threshold=PAGEIN
             doc_name = os.path.splitext(os.path.basename(md_path))[0]
     else:
         raise ValueError("Either md_path or md_content must be provided")
+
+    if llm_max_concurrent:
+        init_llm_semaphore(llm_max_concurrent)
 
     # --- Step 1: Extract headers ---
     logger.info("Extracting nodes from markdown...")
@@ -969,152 +969,8 @@ async def md_to_tree(md_path=None, if_thinning=False, min_token_threshold=PAGEIN
 
 
 # =============================================================================
-# Page-Aware Pipeline Helpers (Agentic-specific additions)
-#
-# These functions are NOT in the reference PageIndex library. They add
-# retrieval-optimized post-processing after the reference pipeline builds
-# the tree structure.
+# Page-Aware Pipeline Utilities
 # =============================================================================
-
-def _trim_parent_text(tree_nodes, page_list):
-    """Trim parent-node text to only the intro portion before the first child.
-
-    **Problem**: add_node_text() (from the reference library) assigns each node
-    the full concatenated text of its start_index..end_index page range. For
-    parent nodes, this page range encompasses all children's pages too, so
-    the parent's text is a superset of its children's text — exact duplication.
-
-    **Solution**: Walk the tree and for each parent node, re-assign its text
-    to only the pages from parent.start_index to (first_child.start_index - 1).
-    This is the "intro" or "prefix" portion — any text on pages before the
-    first child begins. If the first child starts on the same page as the
-    parent, the parent gets empty text.
-
-    This is critical for retrieval quality: without trimming, fetching a parent
-    section would return all children's text duplicated, wasting context window.
-
-    Args:
-        tree_nodes: List of tree node dicts with "start_index", "end_index",
-            "text", and "nodes" keys. Mutated in-place.
-        page_list: List of (page_text, token_count) tuples from the PDF
-            extractor. Used to re-extract text for the trimmed page range.
-    """
-    for node in tree_nodes:
-        children = node.get("nodes")
-        if not children:
-            continue  # Leaf nodes — text is already correct
-
-        first_child_start = children[0].get("start_index")
-        node_start = node.get("start_index")
-
-        if first_child_start is not None and node_start is not None:
-            if first_child_start > node_start:
-                # Parent has intro pages before the first child.
-                # Re-extract text for just those prefix pages.
-                node["text"] = get_text_of_pdf_pages(
-                    page_list, node_start, first_child_start - 1
-                )
-                node["end_index"] = first_child_start - 1
-            else:
-                # First child starts on the same page as parent.
-                # No intro text — parent gets empty string.
-                node["text"] = ""
-                node["end_index"] = node_start
-
-        # Recurse into children (they may also be parents)
-        _trim_parent_text(children, page_list)
-
-
-def _merge_small_siblings(tree_nodes, model=None, min_merge_tokens=PAGEINDEX_MIN_MERGE_TOKENS):
-    """Merge tiny leaf nodes into an adjacent sibling or parent.
-
-    **Problem**: The tree may contain very small leaf sections (e.g. a one-line
-    "Acknowledgments" section with 20 tokens). These are too small to be useful
-    as standalone retrieval units and add noise to the ToC.
-
-    **Solution**: Walk the tree and for each leaf node whose text is below
-    min_merge_tokens (default 200):
-
-    1. **Merge backward** (preferred): If the previous sibling exists, append
-       this node's text to it and extend its end_index. The small node is removed.
-
-    2. **Merge forward**: If no previous sibling but a next sibling exists,
-       prepend this node's text to the next sibling. The small node is removed
-       and the next sibling inherits its title and start_index.
-
-    3. **Absorb into parent**: If this is the only child, merge its text into
-       the parent. The child is removed, and the parent may become a leaf.
-
-    After processing all children, if the children list is empty (all were
-    absorbed), the "nodes" key is deleted from the parent, making it a leaf.
-    Otherwise, recurse into remaining children.
-
-    Only leaf nodes are candidates for merging — nodes with their own children
-    are skipped (they have structural significance regardless of text size).
-
-    Args:
-        tree_nodes: List of tree node dicts. Mutated in-place.
-        model: Model identifier for token counting.
-        min_merge_tokens: Minimum tokens for a leaf to survive as standalone.
-    """
-    for node in tree_nodes:
-        children = node.get("nodes")
-        if not children:
-            continue
-
-        i = 0
-        while i < len(children):
-            child = children[i]
-
-            # Skip non-leaf nodes — they have structural significance
-            if child.get("nodes"):
-                i += 1
-                continue
-
-            text = child.get("text", "")
-            # Skip if the leaf is large enough to be a standalone section
-            if count_tokens(text, model=model) >= min_merge_tokens:
-                i += 1
-                continue
-
-            # --- This leaf is too small — merge it ---
-
-            if i > 0:
-                # MERGE BACKWARD: append to previous sibling
-                prev = children[i - 1]
-                prev["text"] = prev.get("text", "") + "\n\n" + text
-                # Extend previous sibling's page range to cover this node
-                if child.get("end_index"):
-                    prev["end_index"] = child["end_index"]
-                children.pop(i)
-                # Don't increment i — next child shifted into this position
-
-            elif len(children) > 1:
-                # MERGE FORWARD: prepend to next sibling
-                nxt = children[i + 1]
-                nxt["text"] = text + "\n\n" + nxt.get("text", "")
-                # Next sibling inherits this node's title and start_index
-                nxt["title"] = child["title"]
-                if child.get("start_index"):
-                    nxt["start_index"] = child["start_index"]
-                children.pop(i)
-                # Don't increment i — next child shifted into this position
-
-            else:
-                # ABSORB INTO PARENT: only child, merge into parent
-                node["text"] = node.get("text", "") + "\n\n" + text
-                if child.get("end_index"):
-                    node["end_index"] = child["end_index"]
-                children.pop(i)
-                # Don't increment i — list is now empty
-
-        if not children:
-            # All children were absorbed — parent becomes a leaf node
-            del node["nodes"]
-        else:
-            # Recurse into remaining children (they may also have small leaves)
-            _merge_small_siblings(children, model=model, min_merge_tokens=min_merge_tokens)
-
 
 def _count_tree_nodes(nodes):
     return sum(1 + _count_tree_nodes(n.get('nodes', [])) for n in nodes)
@@ -1138,8 +994,11 @@ async def md_to_tree_from_pages(
     min_paragraph_count=PAGEINDEX_MIN_PARAGRAPH_COUNT,
     # Parameters for the reference PageIndex tree_parser:
     toc_check_page_num=PAGEINDEX_TOC_CHECK_PAGE_NUM,
+    toc_offset_scan_pages=PAGEINDEX_TOC_OFFSET_SCAN_PAGES,
     max_page_num_each_node=PAGEINDEX_MAX_PAGE_NUM_EACH_NODE,
     max_token_num_each_node=PAGEINDEX_MAX_TOKEN_NUM_EACH_NODE,
+    toc_gap_tolerance=PAGEINDEX_TOC_GAP_TOLERANCE,
+    llm_max_concurrent=None,
 ):
     """Build a hierarchical tree from per-page text using the full ToC pipeline.
 
@@ -1160,14 +1019,11 @@ async def md_to_tree_from_pages(
            (> max_page_num_each_node pages or > max_token_num_each_node tokens)
 
     After tree_parser returns the structure (with start_index/end_index page
-    ranges but no text), this function adds three Agentic-specific steps:
+    ranges but no text), this function adds Agentic-specific steps:
 
-        5. **add_node_text()** — Assigns each node the concatenated text of
-           its start_index..end_index page range.
-        6. **_trim_parent_text()** — Trims parent nodes to only the intro
-           pages before their first child (prevents text duplication).
-        7. **_merge_small_siblings()** — Merges tiny leaf nodes into adjacent
-           siblings (reduces noise in the ToC).
+        6. **add_node_text()** — Assigns each node the concatenated text of
+           its start_index..end_index page range (already MECE — parents
+           cover only their intro pages, not children's pages).
 
     Then optionally generates summaries and formats the output.
 
@@ -1208,6 +1064,8 @@ async def md_to_tree_from_pages(
     opt = SimpleNamespace(
         model=model or DEFAULT_MODEL,
         toc_check_page_num=toc_check_page_num,
+        toc_offset_scan_pages=toc_offset_scan_pages,
+        toc_gap_tolerance=toc_gap_tolerance,
         max_page_num_each_node=max_page_num_each_node,
         max_token_num_each_node=max_token_num_each_node,
         if_add_node_id=if_add_node_id,
@@ -1216,9 +1074,12 @@ async def md_to_tree_from_pages(
         if_add_doc_description="no",
     )
 
+    if llm_max_concurrent:
+        init_llm_semaphore(llm_max_concurrent)
+
     _logger.info(
         f"Page-aware pipeline: {len(page_texts)} pages, model={opt.model}, "
-        f"toc_check_page_num={toc_check_page_num}"
+        f"toc_check_page_num={toc_check_page_num}, toc_offset_scan_pages={toc_offset_scan_pages}"
     )
 
     # --- Step 3: Run the reference PageIndex pipeline ---
@@ -1240,18 +1101,7 @@ async def md_to_tree_from_pages(
     add_node_text(tree_structure, page_list)
     _logger.info(f"[md_to_tree_from_pages] Text assigned to all nodes from page ranges")
 
-    # --- Step 6: Agentic post-processing ---
-    # _trim_parent_text: Prevents parent/child text duplication by trimming
-    # parent text to only the intro pages before the first child.
-    _trim_parent_text(tree_structure, page_list)
-    _logger.info(f"[md_to_tree_from_pages] Parent text trimmed")
-
-    # _merge_small_siblings: Absorbs tiny leaf nodes (<200 tokens) into
-    # adjacent siblings to reduce ToC noise.
-    _merge_small_siblings(tree_structure, model=model)
-    _logger.info(f"[md_to_tree_from_pages] Small siblings merged. Tree now: {_count_tree_nodes(tree_structure)} nodes")
-
-    # --- Step 7: Generate summaries and format output ---
+    # --- Step 6: Generate summaries and format output ---
     if if_add_node_summary == "yes":
         # Format with text included (summaries are generated from text)
         tree_structure = format_structure(

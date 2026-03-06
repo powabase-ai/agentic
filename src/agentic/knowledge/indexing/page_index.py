@@ -302,6 +302,7 @@ class PageIndexAlgorithm(IndexingAlgorithm):
                 - page_texts (list[str]): Per-page text array — if provided and
                   len >= 2, routes to the page-aware pipeline instead
                 - toc_check_page_num (int): Pages to scan for ToC (page-aware)
+                - toc_offset_scan_pages (int): Pages to scan after ToC for heading offset calibration (page-aware)
                 - max_page_num_each_node (int): Max pages/node before splitting
                 - max_token_num_each_node (int): Max tokens/node before splitting
             source_id: Optional identifier for the source (passed through to result).
@@ -319,11 +320,14 @@ class PageIndexAlgorithm(IndexingAlgorithm):
         from agentic.knowledge.model_config import (
             PAGEINDEX_INDEXING_MODEL,
             PAGEINDEX_TOC_CHECK_PAGE_NUM,
+            PAGEINDEX_TOC_GAP_TOLERANCE,
+            PAGEINDEX_TOC_OFFSET_SCAN_PAGES,
             PAGEINDEX_MAX_PAGE_NUM_EACH_NODE,
             PAGEINDEX_MAX_TOKEN_NUM_EACH_NODE,
             PAGEINDEX_MAX_NODE_TOKENS,
             PAGEINDEX_MIN_TOKEN_THRESHOLD,
             PAGEINDEX_SUMMARY_TOKEN_THRESHOLD,
+            PAGEINDEX_LLM_MAX_CONCURRENT,
         )
 
         # --- Extract configuration from the extra dict ---
@@ -336,6 +340,7 @@ class PageIndexAlgorithm(IndexingAlgorithm):
         summary_token_threshold = extra.get("summary_token_threshold", PAGEINDEX_SUMMARY_TOKEN_THRESHOLD)
         split_large_sections = extra.get("split_large_sections", True)
         max_node_tokens = extra.get("max_node_tokens", PAGEINDEX_MAX_NODE_TOKENS)
+        llm_max_concurrent = extra.get("llm_max_concurrent", PAGEINDEX_LLM_MAX_CONCURRENT)
 
         # page_texts: if provided by PDF extractors, triggers the page-aware pipeline.
         # This is a list of strings where each element is the extracted text of one page.
@@ -343,8 +348,14 @@ class PageIndexAlgorithm(IndexingAlgorithm):
 
         # Page-aware pipeline config (only used when page_texts is provided)
         toc_check_page_num = extra.get("toc_check_page_num", PAGEINDEX_TOC_CHECK_PAGE_NUM)
+        toc_offset_scan_pages = extra.get("toc_offset_scan_pages", PAGEINDEX_TOC_OFFSET_SCAN_PAGES)
         max_page_num_each_node = extra.get("max_page_num_each_node", PAGEINDEX_MAX_PAGE_NUM_EACH_NODE)
         max_token_num_each_node = extra.get("max_token_num_each_node", PAGEINDEX_MAX_TOKEN_NUM_EACH_NODE)
+        toc_gap_tolerance = extra.get("toc_gap_tolerance", PAGEINDEX_TOC_GAP_TOLERANCE)
+
+        # --- Init LLM concurrency semaphore ---
+        from agentic.knowledge.indexing._pageindex_lib.utils import init_llm_semaphore
+        init_llm_semaphore(llm_max_concurrent)
 
         # --- Route to the correct pipeline ---
         if page_texts and len(page_texts) >= 2:
@@ -374,8 +385,11 @@ class PageIndexAlgorithm(IndexingAlgorithm):
                 if_split_large_sections=split_large_sections,
                 max_node_tokens=max_node_tokens,
                 toc_check_page_num=toc_check_page_num,
+                toc_offset_scan_pages=toc_offset_scan_pages,
                 max_page_num_each_node=max_page_num_each_node,
                 max_token_num_each_node=max_token_num_each_node,
+                toc_gap_tolerance=toc_gap_tolerance,
+                llm_max_concurrent=llm_max_concurrent,
             )
         else:
             # MARKDOWN PIPELINE: Used for documents that arrive as a single
@@ -405,6 +419,7 @@ class PageIndexAlgorithm(IndexingAlgorithm):
                 summary_token_threshold=summary_token_threshold,
                 if_split_large_sections=split_large_sections,
                 max_node_tokens=max_node_tokens,
+                llm_max_concurrent=llm_max_concurrent,
             )
 
         # --- Post-pipeline: split tree into toc_structure + sections ---
