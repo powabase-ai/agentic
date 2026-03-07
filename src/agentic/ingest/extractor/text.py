@@ -84,13 +84,10 @@ class TextExtractor(Extractor):
                     cause=e,
                 ) from e
 
-        # Determine format from MIME type
-        if "markdown" in raw.mime_type:
-            deriv_type = "markdown"
-            format_name = "markdown"
-        else:
-            deriv_type = "text"
-            format_name = "plain"
+        # Determine format from MIME type — always produce "text" derivative
+        # so frontend and indexing pipeline work uniformly
+        format_name = "markdown" if "markdown" in raw.mime_type else "plain"
+        deriv_type = "text"
 
         return ExtractionResult(
             source_uri=raw.source_uri,

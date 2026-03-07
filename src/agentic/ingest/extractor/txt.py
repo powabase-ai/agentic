@@ -1,8 +1,11 @@
 """
-DocxExtractor - extract text from Word documents via PDF conversion.
+TxtExtractor - extract text from plain text files via PDF conversion.
 
-Converts DOCX to PDF using LibreOffice headless, then delegates to
+Converts TXT to PDF using LibreOffice headless, then delegates to
 PDFExtractor for page-level extraction with full derivative support.
+
+This avoids token limit errors for large text files by routing through
+the page-aware pipeline instead of the markdown pipeline.
 """
 
 from __future__ import annotations
@@ -24,31 +27,29 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class DocxExtractor(Extractor):
+class TxtExtractor(Extractor):
     """
-    Extract text from DOCX files by converting to PDF via LibreOffice headless,
-    then delegating to PDFExtractor for page-level extraction.
+    Extract text from plain text files by converting to PDF via LibreOffice
+    headless, then delegating to PDFExtractor for page-level extraction.
     """
 
-    name = "docx"
-    supported_types = [
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ]
+    name = "txt"
+    supported_types = ["text/plain"]
 
     def __init__(self, pdf_extractor: PDFExtractor | None = None):
         self._pdf_extractor = pdf_extractor
 
     async def extract(self, raw: RawContent) -> ExtractionResult:
         """
-        Extract text from DOCX content by converting to PDF first.
+        Extract text from plain text content by converting to PDF first.
 
         Args:
-            raw: RawContent with DOCX bytes
+            raw: RawContent with text bytes
 
         Returns:
             ExtractionResult with page-level derivatives from PDF pipeline
         """
-        # 1. Convert DOCX → PDF via LibreOffice headless
+        # 1. Convert TXT → PDF via LibreOffice headless
         pdf_bytes = await asyncio.to_thread(
             self._convert_to_pdf, raw.content, source_uri=raw.source_uri
         )
@@ -75,7 +76,7 @@ class DocxExtractor(Extractor):
 
         # 4. Tag the origin, preserving underlying PDF method for separator logic
         underlying_method = result.extraction_method
-        result.extraction_method = "docx-via-pdf"
+        result.extraction_method = "txt-via-pdf"
         result.mime_type = raw.mime_type
         if result.auto_metadata is None:
             result.auto_metadata = {}
@@ -83,13 +84,13 @@ class DocxExtractor(Extractor):
         return result
 
     def _convert_to_pdf(
-        self, docx_bytes: bytes, source_uri: str | None = None
+        self, txt_bytes: bytes, source_uri: str | None = None
     ) -> bytes:
-        """Convert DOCX bytes to PDF using LibreOffice headless."""
+        """Convert plain text bytes to PDF using LibreOffice headless."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            input_path = os.path.join(tmpdir, "input.docx")
+            input_path = os.path.join(tmpdir, "input.txt")
             with open(input_path, "wb") as f:
-                f.write(docx_bytes)
+                f.write(txt_bytes)
 
             try:
                 proc = subprocess.run(
@@ -114,7 +115,7 @@ class DocxExtractor(Extractor):
                 ) from e
             except subprocess.TimeoutExpired as e:
                 raise ExtractionError(
-                    "LibreOffice DOCX→PDF conversion timed out after 120s",
+                    "LibreOffice TXT→PDF conversion timed out after 120s",
                     extractor_name=self.name,
                     source_uri=source_uri,
                 ) from e
@@ -122,7 +123,7 @@ class DocxExtractor(Extractor):
             if proc.returncode != 0:
                 stderr = proc.stderr.decode("utf-8", errors="replace")
                 raise ExtractionError(
-                    f"LibreOffice DOCX→PDF conversion failed (rc={proc.returncode}): {stderr}",
+                    f"LibreOffice TXT→PDF conversion failed (rc={proc.returncode}): {stderr}",
                     extractor_name=self.name,
                     source_uri=source_uri,
                 )
