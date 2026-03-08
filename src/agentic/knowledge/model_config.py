@@ -80,6 +80,11 @@ PAGEINDEX_MIN_TOKEN_THRESHOLD = 0
 # Used in: _pageindex_lib/page_index_md.py → get_node_summary()
 PAGEINDEX_SUMMARY_TOKEN_THRESHOLD = 1500
 
+# --- Document Description ---
+# Maximum input tokens for the document-description prompt.
+# The structure is truncated beyond this to stay within TPM / context limits.
+PAGEINDEX_DOC_DESCRIPTION_MAX_TOKENS = 100_000
+
 # --- LLM Concurrency ---
 # Maximum concurrent LLM calls during PageIndex indexing.
 
@@ -203,6 +208,11 @@ GRAPHINDEX_ENRICHMENT_MAX_INPUT_CHARS = 0
 CHUNK_EMBED_EMBEDDING_MODEL = "text-embedding-3-small"
 CHUNK_EMBED_DEFAULT_CHUNK_SIZE = 2000
 CHUNK_EMBED_DEFAULT_OVERLAP = 50
+
+# Maximum tokens per single embedding API request.
+# OpenAI's text-embedding-3-small allows max 300k tokens/request.
+# Use 250k to leave margin for overhead.
+EMBEDDING_MAX_TOKENS_PER_BATCH = 250_000
 
 
 # =============================================================================

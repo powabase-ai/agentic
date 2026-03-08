@@ -17,8 +17,12 @@ import asyncio
 import logging
 from typing import Any
 
+from agentic.knowledge.chunking.token_utils import count_tokens
 from agentic.knowledge.embedder.base import Embedder
-from agentic.knowledge.model_config import CHUNK_EMBED_EMBEDDING_MODEL
+from agentic.knowledge.model_config import (
+    CHUNK_EMBED_EMBEDDING_MODEL,
+    EMBEDDING_MAX_TOKENS_PER_BATCH,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +111,9 @@ class LiteLLMEmbedder(Embedder):
         """
         Generate embeddings for multiple texts.
 
+        Automatically splits into sub-batches to stay under the per-request
+        token limit (EMBEDDING_MAX_TOKENS_PER_BATCH).
+
         Args:
             texts: List of texts to embed
 
@@ -124,38 +131,51 @@ class LiteLLMEmbedder(Embedder):
         if not texts:
             return []
 
-        # Build kwargs for litellm
-        kwargs: dict[str, Any] = {
-            "model": self.model,
-            "input": texts,
-            "timeout": self.timeout,
-        }
+        # Split into sub-batches that stay under the per-request token limit
+        batches: list[list[str]] = []
+        current_batch: list[str] = []
+        current_tokens = 0
 
-        # Add optional parameters
-        if self.api_key:
-            kwargs["api_key"] = self.api_key
-        if self.api_base:
-            kwargs["api_base"] = self.api_base
-        if self._dimensions:
-            kwargs["dimensions"] = self._dimensions
+        for text in texts:
+            text_tokens = count_tokens(text)
+            if current_batch and current_tokens + text_tokens > EMBEDDING_MAX_TOKENS_PER_BATCH:
+                batches.append(current_batch)
+                current_batch = []
+                current_tokens = 0
+            current_batch.append(text)
+            current_tokens += text_tokens
 
-        # Add provider-specific params
-        kwargs.update(self.provider_params)
+        if current_batch:
+            batches.append(current_batch)
 
-        try:
-            response = litellm_embedding(**kwargs)
-            embeddings = [item["embedding"] for item in response["data"]]
+        # Embed each sub-batch
+        all_embeddings: list[list[float]] = []
+        for batch in batches:
+            kwargs: dict[str, Any] = {
+                "model": self.model,
+                "input": batch,
+                "timeout": self.timeout,
+            }
+            if self.api_key:
+                kwargs["api_key"] = self.api_key
+            if self.api_base:
+                kwargs["api_base"] = self.api_base
+            if self._dimensions:
+                kwargs["dimensions"] = self._dimensions
+            kwargs.update(self.provider_params)
 
-            logger.debug(
-                f"Generated {len(embeddings)} embeddings using {self.model} "
-                f"(tokens: {response.get('usage', {}).get('total_tokens', 'unknown')})"
-            )
+            try:
+                response = litellm_embedding(**kwargs)
+                all_embeddings.extend(item["embedding"] for item in response["data"])
+            except Exception as e:
+                logger.error(f"Embedding generation failed with {self.model}: {e}")
+                raise
 
-            return embeddings
-
-        except Exception as e:
-            logger.error(f"Embedding generation failed with {self.model}: {e}")
-            raise
+        logger.debug(
+            f"Generated {len(all_embeddings)} embeddings using {self.model} "
+            f"in {len(batches)} batch(es)"
+        )
+        return all_embeddings
 
     async def aembed(self, text: str) -> list[float]:
         """

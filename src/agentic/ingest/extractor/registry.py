@@ -184,7 +184,11 @@ class ExtractorRegistry:
 
             # Use Mistral OCR if API key is available
             mistral_api_key = os.getenv("MISTRAL_API_KEY")
-            pdf_ext = PDFExtractor(mistral_api_key=mistral_api_key)
+            try:
+                max_pages = int(os.getenv("MISTRAL_OCR_MAX_PAGES", "1000"))
+            except (TypeError, ValueError):
+                max_pages = 1000
+            pdf_ext = PDFExtractor(mistral_api_key=mistral_api_key, max_pages=max_pages)
             registry.register(pdf_ext)
         except ImportError:
             pass  # Not yet implemented
