@@ -144,31 +144,26 @@ class PDFExtractor(Extractor):
             logger.warning(f"Failed to render page images: {e}")
             return []
 
-    async def extract(self, raw: RawContent) -> ExtractionResult:
-        """
-        Extract text from PDF with fallback strategy.
+    async def _try_method(self, method: str, raw: RawContent) -> ExtractionResult:
+        """Call a single extraction method by name.
 
-        Args:
-            raw: RawContent with PDF bytes
-
-        Returns:
-            ExtractionResult with text derivative
+        For ``mistral``, applies the existing retry-with-backoff logic.
+        Other methods are called directly.
         """
-        # Try Mistral OCR first (if configured) with retry
-        if self.mistral_api_key:
+        if method == "mistral":
+            if not self.mistral_api_key:
+                raise ExtractionError(
+                    "Mistral OCR requested but MISTRAL_API_KEY is not configured",
+                    extractor_name=self.name,
+                    source_uri=raw.source_uri,
+                )
             max_retries = 3
             for attempt in range(max_retries):
                 try:
                     return await self._extract_mistral(raw)
-                except ExtractionError as e:
-                    # Deterministic errors (import failure, etc.) — don't retry
-                    logger.warning(
-                        f"Mistral OCR failed (deterministic): {e}, "
-                        f"falling back to Fitz"
-                    )
-                    break
+                except ExtractionError:
+                    raise  # deterministic — don't retry
                 except Exception as e:
-                    # Transient errors (network, rate limit) — retry with backoff
                     if attempt < max_retries - 1:
                         wait = 2 ** attempt  # 1s, 2s
                         logger.warning(
@@ -177,19 +172,75 @@ class PDFExtractor(Extractor):
                         )
                         await asyncio.sleep(wait)
                     else:
-                        logger.warning(
-                            f"Mistral OCR failed after {max_retries} attempts: {e}, "
-                            f"falling back to Fitz"
-                        )
-
-        # Fallback to Fitz (PyMuPDF)
-        try:
+                        raise
+            # unreachable, but keeps mypy happy
+            raise ExtractionError(
+                "Mistral OCR failed", extractor_name=self.name, source_uri=raw.source_uri
+            )
+        elif method == "fitz":
             return self._extract_fitz(raw)
-        except Exception as e:
-            logger.warning(f"Fitz failed: {e}, falling back to pdfplumber")
+        elif method == "pdfplumber":
+            return self._extract_pdfplumber(raw)
+        else:
+            raise ExtractionError(
+                f"Unknown extraction method: {method}",
+                extractor_name=self.name,
+                source_uri=raw.source_uri,
+            )
 
-        # Final fallback to pdfplumber
-        return self._extract_pdfplumber(raw)
+    async def extract(self, raw: RawContent) -> ExtractionResult:
+        """
+        Extract text from PDF with fallback strategy.
+
+        Reads ``raw.metadata["extraction_model"]`` to decide which method
+        to use.  ``"auto"`` (the default) iterates through the configured
+        fallback chain.  A specific method name calls that method only.
+
+        Args:
+            raw: RawContent with PDF bytes
+
+        Returns:
+            ExtractionResult with text derivative
+        """
+        from agentic.knowledge.model_config import (
+            EXTRACTION_DEFAULT_METHOD,
+            EXTRACTION_FALLBACK_CHAIN,
+        )
+
+        preference = (raw.metadata or {}).get(
+            "extraction_model", EXTRACTION_DEFAULT_METHOD
+        )
+
+        if preference != "auto":
+            # Explicit method — use it directly, raise on failure
+            return await self._try_method(preference, raw)
+
+        # Auto mode — iterate fallback chain
+        chain = list(EXTRACTION_FALLBACK_CHAIN)
+        # Skip mistral in the chain when no API key is configured
+        if not self.mistral_api_key and "mistral" in chain:
+            chain = [m for m in chain if m != "mistral"]
+
+        last_error: Exception | None = None
+        for i, method in enumerate(chain):
+            try:
+                return await self._try_method(method, raw)
+            except Exception as e:
+                last_error = e
+                remaining = chain[i + 1:]
+                if remaining:
+                    logger.warning(
+                        f"{method} extraction failed: {e}, "
+                        f"falling back to {remaining[0]}"
+                    )
+                else:
+                    logger.error(f"{method} extraction failed: {e}, no more fallbacks")
+
+        raise ExtractionError(
+            f"All extraction methods failed. Last error: {last_error}",
+            extractor_name=self.name,
+            source_uri=raw.source_uri,
+        )
 
     def _extract_fitz(self, raw: RawContent) -> ExtractionResult:
         """Extract using PyMuPDF (Fitz) - proven implementation."""
@@ -323,7 +374,7 @@ class PDFExtractor(Extractor):
         try:
             from enum import Enum
 
-            from mistralai import Mistral
+            from mistralai.client import Mistral
             from pydantic import BaseModel, Field
         except ImportError:
             raise ExtractionError(

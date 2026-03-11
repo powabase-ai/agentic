@@ -145,7 +145,6 @@ async def _llm_completion(
             model=model,
             messages=messages,
             temperature=temperature,
-            num_retries=3,
             drop_params=True,
         )
 
