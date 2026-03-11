@@ -116,6 +116,7 @@ class Agent:
             response = litellm.completion(
                 model=self.model,
                 messages=messages,
+                num_retries=3,
             )
 
             # Extract response content
@@ -187,6 +188,7 @@ class Agent:
             response = await litellm.acompletion(
                 model=self.model,
                 messages=messages,
+                num_retries=3,
             )
 
             # Extract response content
@@ -273,6 +275,7 @@ class Agent:
                 messages=messages,
                 stream=True,
                 stream_options={"include_usage": True},
+                num_retries=3,
             )
 
             # Yield chunks as they arrive, capturing the final usage chunk
@@ -356,6 +359,7 @@ class Agent:
             model=self.model,
             messages=messages,
             stream=True,
+            num_retries=3,
         )
 
         # Yield chunks as they arrive

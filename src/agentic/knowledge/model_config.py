@@ -254,13 +254,11 @@ EXTRACTION_FALLBACK_CHAIN = ["mistral", "fitz", "pdfplumber"]
 
 
 # =============================================================================
-# Global LiteLLM retry configuration
+# Global LiteLLM debug configuration
 # =============================================================================
-# Automatic retries with exponential backoff for transient errors
-# (rate limits, 500s, timeouts) across ALL litellm calls.
-import litellm
-litellm.num_retries = 3
-
 import os
+
+import litellm
+
 if os.environ.get("LITELLM_DEBUG", "").lower() in ("1", "true"):
     litellm._turn_on_debug()

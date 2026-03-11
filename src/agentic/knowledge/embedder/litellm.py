@@ -162,6 +162,7 @@ class LiteLLMEmbedder(Embedder):
                 kwargs["api_base"] = self.api_base
             if self._dimensions:
                 kwargs["dimensions"] = self._dimensions
+            kwargs["num_retries"] = 3
             kwargs.update(self.provider_params)
 
             try:

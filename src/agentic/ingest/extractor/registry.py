@@ -203,7 +203,7 @@ class ExtractorRegistry:
         try:
             from agentic.ingest.extractor.txt import TxtExtractor
 
-            registry.register(TxtExtractor(pdf_extractor=pdf_ext))
+            registry.register(TxtExtractor())
         except ImportError:
             pass
 

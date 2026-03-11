@@ -1,140 +1,84 @@
 """
-TxtExtractor - extract text from plain text files via PDF conversion.
+TxtExtractor - extract text from plain text files using native page splitting.
 
-Converts TXT to PDF using LibreOffice headless, then delegates to
-PDFExtractor for page-level extraction with full derivative support.
-
-This avoids token limit errors for large text files by routing through
-the page-aware pipeline instead of the markdown pipeline.
+Decodes text bytes and splits into virtual pages at natural paragraph
+boundaries, producing both a full-text derivative and per-page page_text
+derivatives compatible with the indexing pipeline.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
-import subprocess
-import tempfile
-from pathlib import Path
-from typing import TYPE_CHECKING
 
 from agentic.ingest.extractor.base import ExtractionError, Extractor
-from agentic.ingest.models import ExtractionResult, RawContent
-
-if TYPE_CHECKING:
-    from agentic.ingest.extractor.pdf import PDFExtractor
+from agentic.ingest.extractor.page_splitter import split_text_into_pages
+from agentic.ingest.models import Derivative, ExtractionResult, RawContent
 
 logger = logging.getLogger(__name__)
 
 
 class TxtExtractor(Extractor):
     """
-    Extract text from plain text files by converting to PDF via LibreOffice
-    headless, then delegating to PDFExtractor for page-level extraction.
+    Extract text from plain text files with virtual page splitting.
     """
 
     name = "txt"
     supported_types = ["text/plain"]
 
-    def __init__(self, pdf_extractor: PDFExtractor | None = None):
-        self._pdf_extractor = pdf_extractor
-
     async def extract(self, raw: RawContent) -> ExtractionResult:
-        """
-        Extract text from plain text content by converting to PDF first.
-
-        Args:
-            raw: RawContent with text bytes
-
-        Returns:
-            ExtractionResult with page-level derivatives from PDF pipeline
-        """
-        # 1. Convert TXT → PDF via LibreOffice headless
-        pdf_bytes = await asyncio.to_thread(
-            self._convert_to_pdf, raw.content, source_uri=raw.source_uri
-        )
-
-        # 2. Wrap as PDF RawContent with corrected .pdf filename
-        pdf_filename = raw.filename
-        if pdf_filename:
-            pdf_filename = Path(pdf_filename).stem + ".pdf"
-        pdf_raw = RawContent(
-            content=pdf_bytes,
-            mime_type="application/pdf",
-            source_uri=raw.source_uri,
-            filename=pdf_filename,
-        )
-
-        # 3. Delegate to PDF extractor
-        pdf_extractor = self._pdf_extractor
-        if pdf_extractor is None:
-            from agentic.ingest.extractor.pdf import PDFExtractor
-
-            pdf_extractor = PDFExtractor()
-
-        result = await pdf_extractor.extract(pdf_raw)
-
-        # 4. Tag the origin, preserving underlying PDF method for separator logic
-        underlying_method = result.extraction_method
-        result.extraction_method = "txt-via-pdf"
-        result.mime_type = raw.mime_type
-        if result.auto_metadata is None:
-            result.auto_metadata = {}
-        result.auto_metadata["pdf_extraction_method"] = underlying_method
-        return result
-
-    def _convert_to_pdf(
-        self, txt_bytes: bytes, source_uri: str | None = None
-    ) -> bytes:
-        """Convert plain text bytes to PDF using LibreOffice headless."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            input_path = os.path.join(tmpdir, "input.txt")
-            with open(input_path, "wb") as f:
-                f.write(txt_bytes)
-
+        # Decode bytes
+        try:
+            text = raw.content.decode("utf-8")
+        except UnicodeDecodeError:
             try:
-                proc = subprocess.run(
-                    [
-                        "libreoffice",
-                        "--headless",
-                        "--convert-to",
-                        "pdf",
-                        "--outdir",
-                        tmpdir,
-                        f"-env:UserInstallation=file://{tmpdir}/profile",
-                        input_path,
-                    ],
-                    capture_output=True,
-                    timeout=120,
-                )
-            except FileNotFoundError as e:
+                text = raw.content.decode("latin-1")
+            except Exception as e:
                 raise ExtractionError(
-                    "LibreOffice is not installed or not in PATH",
+                    f"Failed to decode text content: {e}",
                     extractor_name=self.name,
-                    source_uri=source_uri,
-                ) from e
-            except subprocess.TimeoutExpired as e:
-                raise ExtractionError(
-                    "LibreOffice TXT→PDF conversion timed out after 120s",
-                    extractor_name=self.name,
-                    source_uri=source_uri,
+                    source_uri=raw.source_uri,
+                    cause=e,
                 ) from e
 
-            if proc.returncode != 0:
-                stderr = proc.stderr.decode("utf-8", errors="replace")
-                raise ExtractionError(
-                    f"LibreOffice TXT→PDF conversion failed (rc={proc.returncode}): {stderr}",
-                    extractor_name=self.name,
-                    source_uri=source_uri,
-                )
+        # Split into virtual pages
+        pages = split_text_into_pages(text, target_tokens=1500)
+        content = "\n\n".join(pages)
 
-            pdf_path = os.path.join(tmpdir, "input.pdf")
-            if not os.path.exists(pdf_path):
-                raise ExtractionError(
-                    "LibreOffice did not produce expected PDF output",
-                    extractor_name=self.name,
-                    source_uri=source_uri,
+        # Build derivatives: one full text + one page_text per page
+        derivatives = [
+            Derivative(
+                type="text",
+                content=content,
+                format="plain",
+                metadata={
+                    "encoding": "utf-8",
+                    "char_count": len(content),
+                    "line_count": content.count("\n") + 1,
+                },
+            ),
+        ]
+        for i, page_text in enumerate(pages, start=1):
+            derivatives.append(
+                Derivative(
+                    type="page_text",
+                    content=page_text,
+                    format="plain",
+                    page=i,
                 )
+            )
 
-            with open(pdf_path, "rb") as f:
-                return f.read()
+        return ExtractionResult(
+            source_uri=raw.source_uri,
+            mime_type=raw.mime_type,
+            derivatives=derivatives,
+            auto_metadata={
+                "page_count": len(pages),
+                "char_count": len(content),
+                "extraction_method": "txt-native",
+            },
+            extraction_method="txt-native",
+            stats={
+                "bytes_processed": len(raw.content),
+                "pages": len(pages),
+            },
+        )

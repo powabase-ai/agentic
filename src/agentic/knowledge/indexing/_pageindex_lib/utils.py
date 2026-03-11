@@ -146,6 +146,7 @@ async def _llm_completion(
             messages=messages,
             temperature=temperature,
             drop_params=True,
+            num_retries=3,
         )
 
     sem = _llm_semaphore_var.get()

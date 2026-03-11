@@ -2,10 +2,14 @@
 TextExtractor - simple passthrough for text-based files.
 
 Handles plain text, markdown, and other text formats.
+For markdown files, also produces page_text derivatives via native splitting.
 """
 
 from agentic.ingest.extractor.base import ExtractionError, Extractor
 from agentic.ingest.models import Derivative, ExtractionResult, RawContent
+
+
+_MARKDOWN_MIMES = {"text/markdown", "text/x-markdown"}
 
 
 class TextExtractor(Extractor):
@@ -14,6 +18,9 @@ class TextExtractor(Extractor):
 
     This is the simplest extractor - it decodes bytes as text with
     optional encoding detection and produces a single text derivative.
+
+    For markdown MIME types, also produces page_text derivatives using
+    heading-aware page splitting.
 
     Supported types:
         - text/plain (.txt)
@@ -35,7 +42,6 @@ class TextExtractor(Extractor):
 
     name = "text"
     supported_types = [
-        "text/plain",
         "text/markdown",
         "text/x-markdown",
         "text/csv",
@@ -67,14 +73,13 @@ class TextExtractor(Extractor):
             raw: RawContent with text bytes
 
         Returns:
-            ExtractionResult with a single text derivative
+            ExtractionResult with text derivative (and page_text derivatives
+            for markdown files)
         """
         try:
-            # Try UTF-8 first (most common)
             text = raw.content.decode("utf-8")
         except UnicodeDecodeError:
             try:
-                # Fall back to latin-1 (never fails, but may be wrong)
                 text = raw.content.decode("latin-1")
             except Exception as e:
                 raise ExtractionError(
@@ -84,17 +89,56 @@ class TextExtractor(Extractor):
                     cause=e,
                 ) from e
 
-        # Determine format from MIME type — always produce "text" derivative
-        # so frontend and indexing pipeline work uniformly
-        format_name = "markdown" if "markdown" in raw.mime_type else "plain"
-        deriv_type = "text"
+        is_markdown = raw.mime_type in _MARKDOWN_MIMES
+        format_name = "markdown" if is_markdown else "plain"
 
-        return ExtractionResult(
-            source_uri=raw.source_uri,
-            mime_type=raw.mime_type,
-            derivatives=[
+        extraction_method = self.name
+        auto_metadata: dict = {
+            "char_count": len(text),
+            "line_count": text.count("\n") + 1,
+        }
+
+        # For markdown files, produce page_text derivatives via native splitting
+        if is_markdown:
+            from agentic.ingest.extractor.page_splitter import (
+                split_text_into_pages,
+            )
+
+            pages = split_text_into_pages(
+                text, target_tokens=1500, heading_aware=True
+            )
+            content = "\n\n".join(pages)
+
+            derivatives = [
                 Derivative(
-                    type=deriv_type,
+                    type="text",
+                    content=content,
+                    format=format_name,
+                    metadata={
+                        "encoding": "utf-8",
+                        "char_count": len(content),
+                        "line_count": content.count("\n") + 1,
+                    },
+                ),
+            ]
+            for i, page_text in enumerate(pages, start=1):
+                derivatives.append(
+                    Derivative(
+                        type="page_text",
+                        content=page_text,
+                        format="plain",
+                        page=i,
+                    )
+                )
+            extraction_method = "markdown-native"
+            auto_metadata["page_count"] = len(pages)
+            auto_metadata["char_count"] = len(content)
+            auto_metadata["line_count"] = content.count("\n") + 1
+            auto_metadata["extraction_method"] = extraction_method
+        else:
+            derivatives = [
+                Derivative(
+                    type="text",
                     content=text,
                     format=format_name,
                     metadata={
@@ -103,12 +147,14 @@ class TextExtractor(Extractor):
                         "line_count": text.count("\n") + 1,
                     },
                 ),
-            ],
-            auto_metadata={
-                "char_count": len(text),
-                "line_count": text.count("\n") + 1,
-            },
-            extraction_method=self.name,
+            ]
+
+        return ExtractionResult(
+            source_uri=raw.source_uri,
+            mime_type=raw.mime_type,
+            derivatives=derivatives,
+            auto_metadata=auto_metadata,
+            extraction_method=extraction_method,
             stats={
                 "bytes_processed": len(raw.content),
             },
