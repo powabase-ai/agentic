@@ -75,7 +75,7 @@ class ImageExtractor(Extractor):
         try:
             from enum import Enum
 
-            from mistralai import Mistral
+            from mistralai.client import Mistral
             from pydantic import BaseModel, Field
         except ImportError:
             raise ExtractionError(

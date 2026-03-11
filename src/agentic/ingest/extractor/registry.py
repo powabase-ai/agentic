@@ -178,21 +178,34 @@ class ExtractorRegistry:
         except ImportError:
             pass  # Not yet implemented
 
+        pdf_ext = None
         try:
             from agentic.ingest.extractor.pdf import PDFExtractor
 
             # Use Mistral OCR if API key is available
             mistral_api_key = os.getenv("MISTRAL_API_KEY")
-            registry.register(PDFExtractor(mistral_api_key=mistral_api_key))
+            try:
+                max_pages = int(os.getenv("MISTRAL_OCR_MAX_PAGES", "1000"))
+            except (TypeError, ValueError):
+                max_pages = 1000
+            pdf_ext = PDFExtractor(mistral_api_key=mistral_api_key, max_pages=max_pages)
+            registry.register(pdf_ext)
         except ImportError:
             pass  # Not yet implemented
 
         try:
             from agentic.ingest.extractor.docx import DocxExtractor
 
-            registry.register(DocxExtractor())
+            registry.register(DocxExtractor(pdf_extractor=pdf_ext))
         except ImportError:
             pass  # Not yet implemented
+
+        try:
+            from agentic.ingest.extractor.txt import TxtExtractor
+
+            registry.register(TxtExtractor())
+        except ImportError:
+            pass
 
         try:
             from agentic.ingest.extractor.image import ImageExtractor

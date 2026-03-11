@@ -145,8 +145,8 @@ async def _llm_completion(
             model=model,
             messages=messages,
             temperature=temperature,
-            num_retries=3,
             drop_params=True,
+            num_retries=3,
         )
 
     sem = _llm_semaphore_var.get()
@@ -776,10 +776,16 @@ def create_clean_structure_for_description(structure):
 
 async def generate_doc_description(structure, model=None):
     model = model or DEFAULT_MODEL
+    structure_str = str(structure)
+    token_count = count_tokens(structure_str, model)
+    if token_count > PAGEINDEX_DOC_DESCRIPTION_MAX_TOKENS:
+        # Truncate by character ratio (tokens ≈ proportional to chars)
+        ratio = PAGEINDEX_DOC_DESCRIPTION_MAX_TOKENS / token_count
+        structure_str = structure_str[: int(len(structure_str) * ratio)] + "\n[... truncated ...]"
     prompt = f"""Your are an expert in generating descriptions for a document.
     You are given a structure of a document. Your task is to generate a one-sentence description for the document, which makes it easy to distinguish the document from other documents.
 
-    Document Structure: {structure}
+    Document Structure: {structure_str}
 
     Directly return the description, do not include any other text.
     """
@@ -854,6 +860,7 @@ from agentic.knowledge.model_config import (
     PAGEINDEX_MIN_PARAGRAPH_COUNT,
     PAGEINDEX_MIN_TOKEN_THRESHOLD,
     PAGEINDEX_SUMMARY_TOKEN_THRESHOLD,
+    PAGEINDEX_DOC_DESCRIPTION_MAX_TOKENS,
     PAGEINDEX_LLM_MAX_CONCURRENT,
 )
 

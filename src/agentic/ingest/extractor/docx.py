@@ -1,33 +1,33 @@
 """
-DocxExtractor - extract text from Word documents.
+DocxExtractor - extract text from Word documents via PDF conversion.
 
-Adapted from proven implementation in agentic/etl/transformers/extractors/docx.py.
-Uses pypandoc to convert DOCX to markdown.
+Converts DOCX to PDF using LibreOffice headless, then delegates to
+PDFExtractor for page-level extraction with full derivative support.
 """
 
-import io
+from __future__ import annotations
+
+import asyncio
 import logging
+import os
+import subprocess
+import tempfile
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agentic.ingest.extractor.base import ExtractionError, Extractor
-from agentic.ingest.models import Derivative, ExtractionResult, RawContent
+from agentic.ingest.models import ExtractionResult, RawContent
+
+if TYPE_CHECKING:
+    from agentic.ingest.extractor.pdf import PDFExtractor
 
 logger = logging.getLogger(__name__)
 
 
 class DocxExtractor(Extractor):
     """
-    Extract text from DOCX files, converting to markdown.
-
-    Uses pypandoc for high-quality conversion that preserves structure.
-    Falls back to python-docx if pypandoc is not available.
-
-    Adapted from proven insurance-demo implementation.
-
-    Example:
-        >>> extractor = DocxExtractor()
-        >>> raw = RawContent(content=docx_bytes, mime_type="application/vnd...", ...)
-        >>> result = await extractor.extract(raw)
-        >>> print(result.get_primary_text())
+    Extract text from DOCX files by converting to PDF via LibreOffice headless,
+    then delegating to PDFExtractor for page-level extraction.
     """
 
     name = "docx"
@@ -35,123 +35,105 @@ class DocxExtractor(Extractor):
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ]
 
+    def __init__(self, pdf_extractor: PDFExtractor | None = None):
+        self._pdf_extractor = pdf_extractor
+
     async def extract(self, raw: RawContent) -> ExtractionResult:
         """
-        Extract text from DOCX content.
+        Extract text from DOCX content by converting to PDF first.
 
         Args:
             raw: RawContent with DOCX bytes
 
         Returns:
-            ExtractionResult with markdown derivative
+            ExtractionResult with page-level derivatives from PDF pipeline
         """
-        # Try pypandoc first (preferred - better formatting)
-        try:
-            return self._extract_pypandoc(raw)
-        except ImportError:
-            logger.warning("pypandoc not available, falling back to python-docx")
-        except Exception as e:
-            logger.warning(f"pypandoc failed: {e}, falling back to python-docx")
-
-        # Fallback to python-docx
-        return self._extract_python_docx(raw)
-
-    def _extract_pypandoc(self, raw: RawContent) -> ExtractionResult:
-        """Extract using pypandoc - converts to markdown with good formatting."""
-        try:
-            import pypandoc
-        except ImportError:
-            raise ImportError("pypandoc not installed") from None
-
-        # pypandoc works best with bytes directly
-        markdown_text = pypandoc.convert_text(raw.content, "md", format="docx")
-
-        return ExtractionResult(
-            source_uri=raw.source_uri,
-            mime_type=raw.mime_type,
-            derivatives=[
-                Derivative(
-                    type="markdown",
-                    content=markdown_text,
-                    format="markdown",
-                ),
-            ],
-            auto_metadata={
-                "char_count": len(markdown_text),
-            },
-            extraction_method="pypandoc",
-            stats={"bytes_processed": len(raw.content)},
+        # 1. Convert DOCX → PDF via LibreOffice headless
+        pdf_bytes = await asyncio.to_thread(
+            self._convert_to_pdf, raw.content, source_uri=raw.source_uri
         )
 
-    def _extract_python_docx(self, raw: RawContent) -> ExtractionResult:
-        """Extract using python-docx as fallback."""
-        try:
-            from docx import Document
-        except ImportError:
-            raise ExtractionError(
-                "Either pypandoc or python-docx is required for DOCX extraction. "
-                "Install with: pip install pypandoc  OR  pip install python-docx",
-                extractor_name=self.name,
-                source_uri=raw.source_uri,
-            ) from None
-
-        # Open document from bytes
-        doc = Document(io.BytesIO(raw.content))
-
-        # Extract paragraphs
-        paragraphs = []
-        for para in doc.paragraphs:
-            text = para.text.strip()
-            if text:
-                # Try to preserve heading structure
-                if para.style and para.style.name.startswith("Heading"):
-                    level = (
-                        para.style.name[-1] if para.style.name[-1].isdigit() else "1"
-                    )
-                    paragraphs.append(f"{'#' * int(level)} {text}")
-                else:
-                    paragraphs.append(text)
-
-        # Extract tables as markdown
-        for table in doc.tables:
-            rows = []
-            for i, row in enumerate(table.rows):
-                cells = [cell.text.strip() for cell in row.cells]
-                rows.append("| " + " | ".join(cells) + " |")
-                if i == 0:  # Add header separator
-                    rows.append("|" + "|".join(["---"] * len(cells)) + "|")
-            if rows:
-                paragraphs.append("\n".join(rows))
-
-        full_text = "\n\n".join(paragraphs)
-
-        # Extract document properties
-        auto_metadata = {
-            "char_count": len(full_text),
-            "paragraph_count": len(doc.paragraphs),
-            "table_count": len(doc.tables),
-        }
-
-        try:
-            props = doc.core_properties
-            if props.title:
-                auto_metadata["title"] = props.title
-            if props.author:
-                auto_metadata["author"] = props.author
-        except Exception:
-            pass
-
-        return ExtractionResult(
+        # 2. Wrap as PDF RawContent with corrected .pdf filename
+        pdf_filename = raw.filename
+        if pdf_filename:
+            pdf_filename = Path(pdf_filename).stem + ".pdf"
+        pdf_raw = RawContent(
+            content=pdf_bytes,
+            mime_type="application/pdf",
             source_uri=raw.source_uri,
-            mime_type=raw.mime_type,
-            derivatives=[
-                Derivative(
-                    type="markdown",
-                    content=full_text,
-                    format="markdown",
-                ),
-            ],
-            auto_metadata=auto_metadata,
-            extraction_method="python-docx",
-            stats={"bytes_processed": len(raw.content)},
+            filename=pdf_filename,
         )
+
+        # 3. Delegate to PDF extractor
+        pdf_extractor = self._pdf_extractor
+        if pdf_extractor is None:
+            from agentic.ingest.extractor.pdf import PDFExtractor
+
+            pdf_extractor = PDFExtractor()
+
+        result = await pdf_extractor.extract(pdf_raw)
+
+        # 4. Tag the origin, preserving underlying PDF method for separator logic
+        underlying_method = result.extraction_method
+        result.extraction_method = "docx-via-pdf"
+        result.mime_type = raw.mime_type
+        if result.auto_metadata is None:
+            result.auto_metadata = {}
+        result.auto_metadata["pdf_extraction_method"] = underlying_method
+        return result
+
+    def _convert_to_pdf(
+        self, docx_bytes: bytes, source_uri: str | None = None
+    ) -> bytes:
+        """Convert DOCX bytes to PDF using LibreOffice headless."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = os.path.join(tmpdir, "input.docx")
+            with open(input_path, "wb") as f:
+                f.write(docx_bytes)
+
+            try:
+                proc = subprocess.run(
+                    [
+                        "libreoffice",
+                        "--headless",
+                        "--convert-to",
+                        "pdf",
+                        "--outdir",
+                        tmpdir,
+                        f"-env:UserInstallation=file://{tmpdir}/profile",
+                        input_path,
+                    ],
+                    capture_output=True,
+                    timeout=120,
+                )
+            except FileNotFoundError as e:
+                raise ExtractionError(
+                    "LibreOffice is not installed or not in PATH",
+                    extractor_name=self.name,
+                    source_uri=source_uri,
+                ) from e
+            except subprocess.TimeoutExpired as e:
+                raise ExtractionError(
+                    "LibreOffice DOCX→PDF conversion timed out after 120s",
+                    extractor_name=self.name,
+                    source_uri=source_uri,
+                ) from e
+
+            if proc.returncode != 0:
+                stderr = proc.stderr.decode("utf-8", errors="replace")
+                raise ExtractionError(
+                    f"LibreOffice DOCX→PDF conversion failed (rc={proc.returncode}): {stderr}",
+                    extractor_name=self.name,
+                    source_uri=source_uri,
+                )
+
+            pdf_path = os.path.join(tmpdir, "input.pdf")
+            if not os.path.exists(pdf_path):
+                raise ExtractionError(
+                    "LibreOffice did not produce expected PDF output",
+                    extractor_name=self.name,
+                    source_uri=source_uri,
+                )
+
+            with open(pdf_path, "rb") as f:
+                return f.read()

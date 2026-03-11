@@ -25,7 +25,7 @@ PAGEINDEX_RETRIEVAL_MODEL = "gpt-5-mini"
 # Number of pages to scan from the start of the document when looking for a
 # table of contents. Also used as the upper bound for retry scans.
 # Used in: _pageindex_lib/page_index.py → find_toc_pages(), check_toc()
-PAGEINDEX_TOC_CHECK_PAGE_NUM = 50
+PAGEINDEX_TOC_CHECK_PAGE_NUM = 15
 
 # --- Post-ToC Heading Scan ---
 # Number of pages to scan *after* the detected ToC when looking for section
@@ -80,6 +80,11 @@ PAGEINDEX_MIN_TOKEN_THRESHOLD = 0
 # Used in: _pageindex_lib/page_index_md.py → get_node_summary()
 PAGEINDEX_SUMMARY_TOKEN_THRESHOLD = 1500
 
+# --- Document Description ---
+# Maximum input tokens for the document-description prompt.
+# The structure is truncated beyond this to stay within TPM / context limits.
+PAGEINDEX_DOC_DESCRIPTION_MAX_TOKENS = 100_000
+
 # --- LLM Concurrency ---
 # Maximum concurrent LLM calls during PageIndex indexing.
 
@@ -124,8 +129,6 @@ RERANKER_CANDIDATE_COUNT = 20
 QUERY_ENRICHMENT_DEFAULT_MODEL = "gpt-5-mini"
 QUERY_ENRICHMENT_TEMPERATURE = 0
 QUERY_ENRICHMENT_MAX_TOKENS = None  # No limit by default
-QUERY_ENRICHMENT_NUM_RETRIES = 1
-
 
 # =============================================================================
 # Metadata Enrichment defaults
@@ -187,14 +190,22 @@ GRAPHINDEX_ENRICHMENT_MODEL = "gpt-5-mini"
 GRAPHINDEX_EMBEDDING_MODEL = "text-embedding-3-small"
 
 # Maximum number of concurrent LLM calls during referenced_nodes enrichment.
-GRAPHINDEX_ENRICHMENT_MAX_CONCURRENT = 10
+GRAPHINDEX_ENRICHMENT_MAX_CONCURRENT = 7
 
 # Maximum tokens for LLM response during referenced_nodes enrichment.
-GRAPHINDEX_ENRICHMENT_MAX_TOKENS = 1000
+GRAPHINDEX_ENRICHMENT_MAX_TOKENS = 5000
 
 # Maximum input characters for node text sent to the enrichment LLM.
 # 0 means no truncation (node texts are already length-bounded by the indexing pipeline).
 GRAPHINDEX_ENRICHMENT_MAX_INPUT_CHARS = 0
+
+# Whether to include node summaries in the ToC context for enrichment prompts.
+# Off by default — titles + node IDs are sufficient for cross-reference detection,
+# and summaries can bloat prompts to 60k+ tokens on large documents.
+GRAPHINDEX_ENRICHMENT_TOC_INCLUDE_SUMMARIES = False
+
+# Maximum retry attempts when the LLM returns unparseable JSON.
+GRAPHINDEX_ENRICHMENT_MAX_JSON_RETRIES = 3
 
 
 # =============================================================================
@@ -203,6 +214,11 @@ GRAPHINDEX_ENRICHMENT_MAX_INPUT_CHARS = 0
 CHUNK_EMBED_EMBEDDING_MODEL = "text-embedding-3-small"
 CHUNK_EMBED_DEFAULT_CHUNK_SIZE = 2000
 CHUNK_EMBED_DEFAULT_OVERLAP = 50
+
+# Maximum tokens per single embedding API request.
+# OpenAI's text-embedding-3-small allows max 300k tokens/request.
+# Use 250k to leave margin for overhead.
+EMBEDDING_MAX_TOKENS_PER_BATCH = 250_000
 
 
 # =============================================================================
@@ -225,3 +241,24 @@ HYBRID_DEFAULT_VECTOR_WEIGHT = 0.5
 # =============================================================================
 # Default LLM model for agent execution when no model is specified.
 AGENT_DEFAULT_MODEL = "gpt-4o-mini"
+
+
+# =============================================================================
+# Extraction defaults
+# =============================================================================
+# Default extraction method for PDFs. "auto" uses the fallback chain below.
+EXTRACTION_DEFAULT_METHOD = "auto"  # "auto", "mistral", "fitz", "pdfplumber"
+
+# Ordered fallback chain used when extraction_model is "auto".
+EXTRACTION_FALLBACK_CHAIN = ["mistral", "fitz", "pdfplumber"]
+
+
+# =============================================================================
+# Global LiteLLM debug configuration
+# =============================================================================
+import os
+
+import litellm
+
+if os.environ.get("LITELLM_DEBUG", "").lower() in ("1", "true"):
+    litellm._turn_on_debug()

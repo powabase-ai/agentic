@@ -116,19 +116,14 @@ class Agent:
             response = litellm.completion(
                 model=self.model,
                 messages=messages,
+                num_retries=3,
             )
 
             # Extract response content
             content = response.choices[0].message.content
 
-            # Build usage dict
-            usage = None
-            if response.usage:
-                usage = {
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "completion_tokens": response.usage.completion_tokens,
-                    "total_tokens": response.usage.total_tokens,
-                }
+            # Extract usage (including extended token details)
+            usage = self._extract_usage(response)
 
             # Add assistant message to messages list
             messages.append({"role": "assistant", "content": content})
@@ -193,19 +188,14 @@ class Agent:
             response = await litellm.acompletion(
                 model=self.model,
                 messages=messages,
+                num_retries=3,
             )
 
             # Extract response content
             content = response.choices[0].message.content
 
-            # Build usage dict
-            usage = None
-            if response.usage:
-                usage = {
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "completion_tokens": response.usage.completion_tokens,
-                    "total_tokens": response.usage.total_tokens,
-                }
+            # Extract usage (including extended token details)
+            usage = self._extract_usage(response)
 
             # Add assistant message to messages list
             messages.append({"role": "assistant", "content": content})
@@ -279,19 +269,25 @@ class Agent:
         content_chunks: list[str] = []
 
         try:
-            # Call LLM with streaming
+            # Call LLM with streaming + usage reporting
             response = litellm.completion(
                 model=self.model,
                 messages=messages,
                 stream=True,
+                stream_options={"include_usage": True},
+                num_retries=3,
             )
 
-            # Yield chunks as they arrive
+            # Yield chunks as they arrive, capturing the final usage chunk
+            usage_data = None
             for chunk in response:
                 if chunk.choices and chunk.choices[0].delta.content:
                     content = chunk.choices[0].delta.content
                     content_chunks.append(content)
                     yield content
+                # The final chunk has usage but an empty choices list
+                if hasattr(chunk, "usage") and chunk.usage is not None:
+                    usage_data = self._extract_usage(chunk)
 
             # Build final content
             final_content = "".join(content_chunks)
@@ -299,8 +295,6 @@ class Agent:
             # Add assistant message to messages list
             messages.append({"role": "assistant", "content": final_content})
 
-            # Return final output
-            # Note: Streaming doesn't provide accurate usage stats in most providers
             return AgentOutput(
                 execution_id=context.execution_id,
                 status=ExecutionStatus.COMPLETED,
@@ -308,7 +302,7 @@ class Agent:
                 completed_at=datetime.now(),
                 content=final_content,
                 messages=messages,
-                usage=None,  # Usage not reliably available in streaming mode
+                usage=usage_data,
             )
 
         except Exception as e:
@@ -365,12 +359,37 @@ class Agent:
             model=self.model,
             messages=messages,
             stream=True,
+            num_retries=3,
         )
 
         # Yield chunks as they arrive
         async for chunk in response:
             if chunk.choices and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
+
+    @staticmethod
+    def _extract_usage(response) -> dict[str, int] | None:
+        """Extract usage info from a litellm response, including extended token details."""
+        if not response.usage:
+            return None
+        usage = {
+            "prompt_tokens": response.usage.prompt_tokens,
+            "completion_tokens": response.usage.completion_tokens,
+            "total_tokens": response.usage.total_tokens,
+        }
+        # Reasoning model details (o1, o3, etc.)
+        details = getattr(response.usage, "completion_tokens_details", None)
+        if details:
+            reasoning = getattr(details, "reasoning_tokens", None)
+            if reasoning is not None:
+                usage["reasoning_tokens"] = reasoning
+        # Prompt cache details
+        prompt_details = getattr(response.usage, "prompt_tokens_details", None)
+        if prompt_details:
+            cached = getattr(prompt_details, "cached_tokens", None)
+            if cached is not None:
+                usage["cached_tokens"] = cached
+        return usage
 
     def _build_messages(
         self,

@@ -34,6 +34,7 @@ from agentic.ingest.extractor.image import ImageExtractor
 from agentic.ingest.extractor.pdf import PDFExtractor
 from agentic.ingest.extractor.registry import ExtractorRegistry
 from agentic.ingest.extractor.text import TextExtractor
+from agentic.ingest.extractor.txt import TxtExtractor
 
 __all__ = [
     "Extractor",
@@ -45,4 +46,5 @@ __all__ = [
     "PDFExtractor",
     "DocxExtractor",
     "ImageExtractor",
+    "TxtExtractor",
 ]

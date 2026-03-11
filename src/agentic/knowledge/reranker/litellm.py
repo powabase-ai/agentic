@@ -84,6 +84,7 @@ class LiteLLMReranker(Reranker):
         if self.api_base:
             kwargs["api_base"] = self.api_base
 
+        kwargs["num_retries"] = 3
         kwargs.update(self.provider_params)
 
         try:

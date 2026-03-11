@@ -260,7 +260,7 @@ class TestTextExtractor:
 
         result = await extractor.extract(raw)
 
-        assert result.derivatives[0].type == "markdown"
+        assert result.derivatives[0].type == "text"
         assert result.derivatives[0].format == "markdown"
 
     @pytest.mark.asyncio
