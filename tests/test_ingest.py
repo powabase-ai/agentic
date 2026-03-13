@@ -295,10 +295,9 @@ class TestTextExtractor:
         assert result.auto_metadata["char_count"] == 20
 
     def test_text_extractor_supported_types(self):
-        """TextExtractor should support text/* types."""
+        """TextExtractor should support text/* types (except text/plain, handled by TxtExtractor)."""
         extractor = TextExtractor()
 
-        assert extractor.supports("text/plain")
         assert extractor.supports("text/markdown")
         assert extractor.supports("text/csv")
 
@@ -321,7 +320,7 @@ class TestExtractorRegistry:
         registry.register(extractor)
 
         assert len(registry) == 1
-        assert "text/plain" in registry.list_supported_types()
+        assert "text/markdown" in registry.list_supported_types()
 
     def test_registry_get_extractor(self):
         """get_extractor should return correct extractor."""
@@ -500,12 +499,12 @@ class TestExtractorRegistryWithBuiltins:
     """Tests for ExtractorRegistry with built-in extractors."""
 
     def test_registry_default_has_text(self):
-        """default() should include TextExtractor."""
+        """default() should include TxtExtractor for text/plain."""
         registry = ExtractorRegistry.default()
         assert registry.supports("text/plain")
 
         extractor = registry.get_extractor("text/plain")
-        assert extractor.name == "text"
+        assert extractor.name == "txt"
 
     def test_registry_default_has_html(self):
         """default() should include HTMLExtractor."""
