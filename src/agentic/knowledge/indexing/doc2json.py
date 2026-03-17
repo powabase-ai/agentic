@@ -931,7 +931,8 @@ Return a JSON object with exactly two keys:
         combined_text = "\n".join(f"- {s}" for s in summaries)
 
         system_prompt = """You are a document summarizer. Given per-section summaries from a document,
-create a single coherent summary that captures the key information. Be concise (2-4 sentences)."""
+create a single coherent summary that captures all key information across sections. Make sure you capture all 
+relevant entities, key insights, key events, key metrics or numbers, etc. Be concise (4-6 sentences)."""
 
         user_prompt = f"""## Section Summaries
 {combined_text}
