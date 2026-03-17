@@ -30,6 +30,10 @@ from agentic.knowledge.indexing.chunk_embed import (
     ChunkData,
     ChunkEmbedResult,
 )
+from agentic.knowledge.indexing.doc2json import (
+    Doc2JSONAlgorithm,
+    Doc2JSONResult,
+)
 from agentic.knowledge.indexing.page_index import (
     PageIndexAlgorithm,
     PageIndexResult,
@@ -41,6 +45,8 @@ __all__ = [
     "ChunkAndEmbedAlgorithm",
     "ChunkData",
     "ChunkEmbedResult",
+    "Doc2JSONAlgorithm",
+    "Doc2JSONResult",
     "PageIndexAlgorithm",
     "PageIndexResult",
     "SectionData",
