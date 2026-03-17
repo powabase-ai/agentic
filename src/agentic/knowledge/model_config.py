@@ -215,6 +215,32 @@ CHUNK_EMBED_EMBEDDING_MODEL = "text-embedding-3-small"
 CHUNK_EMBED_DEFAULT_CHUNK_SIZE = 2000
 CHUNK_EMBED_DEFAULT_OVERLAP = 50
 
+
+# =============================================================================
+# Doc2JSON strategy defaults
+# =============================================================================
+# LLM model for sliding window extraction (summary + JSON extraction)
+# Must be multimodal-capable when use_images=True
+DOC2JSON_EXTRACTION_MODEL = "gpt-5-mini"
+
+# Embedding model for summary embeddings
+DOC2JSON_EMBEDDING_MODEL = "text-embedding-3-small"
+
+# Sliding window configuration (in tokens) - used when use_images=False
+DOC2JSON_DEFAULT_WINDOW_SIZE = 4000
+DOC2JSON_DEFAULT_WINDOW_OVERLAP = 200
+
+# Image-based extraction (multimodal mode)
+DOC2JSON_USE_IMAGES = False  # Extract from page images instead of text
+DOC2JSON_DEFAULT_PAGES_PER_WINDOW = 3  # Pages per LLM call when using images
+
+# LLM output token limits
+DOC2JSON_EXTRACTION_MAX_TOKENS = 4000
+DOC2JSON_SUMMARY_MAX_TOKENS = 2000
+
+# Maximum retry attempts for JSON parsing failures
+DOC2JSON_MAX_RETRIES = 3
+
 # Maximum tokens per single embedding API request.
 # OpenAI's text-embedding-3-small allows max 300k tokens/request.
 # Use 250k to leave margin for overhead.
