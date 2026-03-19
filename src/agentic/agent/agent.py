@@ -51,6 +51,8 @@ class Agent:
         model: str = AGENT_DEFAULT_MODEL,
         system_prompt: str = "",
         name: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> None:
         """
         Initialize an Agent.
@@ -62,10 +64,14 @@ class Agent:
                           This is sent as the system message to the LLM.
             name: Optional name for this agent. Useful for logging and
                   debugging, especially in multi-agent scenarios.
+            temperature: Sampling temperature (0-2). None uses the model default.
+            max_tokens: Maximum tokens to generate. None uses the model default.
         """
         self.model = model
         self.system_prompt = system_prompt
         self.name = name
+        self.temperature = temperature
+        self.max_tokens = max_tokens
 
     def run(
         self,
@@ -117,6 +123,8 @@ class Agent:
                 model=self.model,
                 messages=messages,
                 num_retries=3,
+                **({"temperature": self.temperature} if self.temperature is not None else {}),
+                **({"max_tokens": self.max_tokens} if self.max_tokens is not None else {}),
             )
 
             # Extract response content
@@ -189,6 +197,8 @@ class Agent:
                 model=self.model,
                 messages=messages,
                 num_retries=3,
+                **({"temperature": self.temperature} if self.temperature is not None else {}),
+                **({"max_tokens": self.max_tokens} if self.max_tokens is not None else {}),
             )
 
             # Extract response content
@@ -276,6 +286,8 @@ class Agent:
                 stream=True,
                 stream_options={"include_usage": True},
                 num_retries=3,
+                **({"temperature": self.temperature} if self.temperature is not None else {}),
+                **({"max_tokens": self.max_tokens} if self.max_tokens is not None else {}),
             )
 
             # Yield chunks as they arrive, capturing the final usage chunk
@@ -360,6 +372,8 @@ class Agent:
             messages=messages,
             stream=True,
             num_retries=3,
+            **({"temperature": self.temperature} if self.temperature is not None else {}),
+            **({"max_tokens": self.max_tokens} if self.max_tokens is not None else {}),
         )
 
         # Yield chunks as they arrive
