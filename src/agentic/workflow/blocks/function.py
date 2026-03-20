@@ -2,37 +2,55 @@
 
 from __future__ import annotations
 
+import importlib
 import logging
 from typing import Any
 
 from agentic.workflow.block import BaseBlock, BlockInput, BlockOutput
 
-try:
-    import numpy as np
-except ImportError:
-    np = None
-
-try:
-    import pandas as pd
-except ImportError:
-    pd = None
-
-try:
-    import scipy
-except ImportError:
-    scipy = None
-
-try:
-    import seaborn as sns
-except ImportError:
-    sns = None
-
-try:
-    import sklearn
-except ImportError:
-    sklearn = None
-
 logger = logging.getLogger(__name__)
+
+# ─── Import registry ─────────────────────────────────────────────────────────
+# key -> (module_name, alias_or_None, is_stdlib)
+
+IMPORT_REGISTRY: dict[str, tuple[str, str | None, bool]] = {
+    # Stdlib
+    "json": ("json", None, True),
+    "re": ("re", None, True),
+    "math": ("math", None, True),
+    "datetime": ("datetime", None, True),
+    "collections": ("collections", None, True),
+    "itertools": ("itertools", None, True),
+    # Third-party
+    "numpy": ("numpy", "np", False),
+    "pandas": ("pandas", "pd", False),
+    "scipy": ("scipy", None, False),
+    "seaborn": ("seaborn", "sns", False),
+    "sklearn": ("sklearn", None, False),
+    "matplotlib": ("matplotlib", None, False),
+    "requests": ("requests", None, False),
+}
+
+LEGACY_DEFAULT_IMPORTS = ["numpy", "pandas", "scipy", "seaborn", "sklearn"]
+
+
+def _load_imports(selected_keys: list[str]) -> dict[str, Any]:
+    """Dynamically import only the selected libraries."""
+    result: dict[str, Any] = {}
+    for key in selected_keys:
+        entry = IMPORT_REGISTRY.get(key)
+        if not entry:
+            continue  # ignore unknown keys
+        module_name, alias, _is_stdlib = entry
+        try:
+            mod = importlib.import_module(module_name)
+            result[module_name] = mod
+            if alias:
+                result[alias] = mod
+        except ImportError:
+            logger.warning("Library %s not available", module_name)
+    return result
+
 
 # Restricted builtins for sandboxed execution
 _SAFE_BUILTINS = {
@@ -66,22 +84,6 @@ _SAFE_BUILTINS = {
     "False": False,
 }
 
-_DATA_SCIENCE_LIBS: dict[str, Any] = {}
-if np is not None:
-    _DATA_SCIENCE_LIBS["np"] = np
-    _DATA_SCIENCE_LIBS["numpy"] = np
-if pd is not None:
-    _DATA_SCIENCE_LIBS["pd"] = pd
-    _DATA_SCIENCE_LIBS["pandas"] = pd
-if scipy is not None:
-    _DATA_SCIENCE_LIBS["scipy"] = scipy
-if sns is not None:
-    _DATA_SCIENCE_LIBS["sns"] = sns
-    _DATA_SCIENCE_LIBS["seaborn"] = sns
-if sklearn is not None:
-    _DATA_SCIENCE_LIBS["sklearn"] = sklearn
-
-
 class FunctionBlock(BaseBlock):
     block_type = "function"
 
@@ -100,8 +102,11 @@ class FunctionBlock(BaseBlock):
             sandbox[safe_name] = output
         # Expose input data
         sandbox["input_data"] = block_input.block_outputs
-        # Expose pre-imported data science libraries
-        sandbox.update(_DATA_SCIENCE_LIBS)
+        # Load selected imports (fall back to legacy defaults for old workflows)
+        selected = self.config.get("imports")
+        if selected is None:
+            selected = LEGACY_DEFAULT_IMPORTS
+        sandbox.update(_load_imports(selected))
 
         try:
             exec(resolved_code, sandbox)  # noqa: S102

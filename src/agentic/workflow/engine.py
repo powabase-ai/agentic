@@ -20,6 +20,18 @@ from agentic.workflow.variable_resolver import resolve_value
 logger = logging.getLogger(__name__)
 
 
+def _resolve_output_path(source_data: Any, output_field: str) -> Any | None:
+    """Walk a dotted path through block output data."""
+    parts = output_field.split(".")
+    value = source_data
+    for part in parts:
+        if isinstance(value, dict) and part in value:
+            value = value[part]
+        else:
+            return None
+    return value
+
+
 @dataclass
 class BlockDefinition:
     """A block within a workflow graph."""
@@ -136,6 +148,36 @@ class DAGEngine:
             return False
         return False
 
+    @staticmethod
+    def _apply_input_mappings(
+        resolved_config: dict[str, Any],
+        block_outputs: dict[str, Any],
+    ) -> None:
+        """Process structured input mappings, supporting dotted output paths."""
+        input_mappings = resolved_config.pop("_inputMappings", [])
+        if not isinstance(input_mappings, list):
+            return
+        for mapping in input_mappings:
+            source_id = mapping.get("sourceId")
+            output_field = mapping.get("outputField", "output")
+            target_field = mapping.get("targetField")
+            if not source_id or not target_field:
+                continue
+            source_data = block_outputs.get(source_id)
+            if source_data is None:
+                continue
+            value = _resolve_output_path(source_data, output_field)
+            # Backward compat: if field's root isn't "output", try prepending it
+            if value is None and output_field.split(".")[0] != "output":
+                value = _resolve_output_path(source_data, f"output.{output_field}")
+            if value is None:
+                continue
+            # Skip if the user manually specified a value for this field
+            existing = resolved_config.get(target_field)
+            if existing is not None and existing != "":
+                continue
+            resolved_config[target_field] = value
+
     async def execute(self) -> AsyncGenerator[ExecutionEvent]:
         """Execute all blocks, yielding events as they occur."""
         order = self._topological_order()
@@ -170,37 +212,7 @@ class DAGEngine:
                 )
                 resolved_config = resolve_value(bdef.config, block_outputs)
 
-                # Process structured input mappings
-                input_mappings = resolved_config.pop("_inputMappings", [])
-                if isinstance(input_mappings, list):
-                    for mapping in input_mappings:
-                        source_id = mapping.get("sourceId")
-                        output_field = mapping.get("outputField", "output")
-                        target_field = mapping.get("targetField")
-                        if not source_id or not target_field:
-                            continue
-                        source_data = block_outputs.get(source_id)
-                        if source_data is None:
-                            continue
-                        value = source_data
-                        if isinstance(value, dict):
-                            if output_field != "output" or output_field not in value:
-                                inner = value.get("output")
-                                if isinstance(inner, dict) and output_field in inner:
-                                    value = inner[output_field]
-                                elif output_field in value:
-                                    value = value[output_field]
-                                else:
-                                    continue
-                            else:
-                                value = value[output_field]
-                        if value is None:
-                            continue
-                        existing = resolved_config.get(target_field)
-                        if existing and isinstance(existing, str) and isinstance(value, str):
-                            resolved_config[target_field] = f"{existing}\n{value}"
-                        else:
-                            resolved_config[target_field] = value
+                self._apply_input_mappings(resolved_config, block_outputs)
 
                 # Restore raw expression/code AFTER input mappings so stale
                 # mappings targeting these fields can't overwrite them.
@@ -281,37 +293,7 @@ class DAGEngine:
                 )
                 resolved_config = resolve_value(bdef.config, block_outputs)
 
-                # Process structured input mappings
-                input_mappings = resolved_config.pop("_inputMappings", [])
-                if isinstance(input_mappings, list):
-                    for mapping in input_mappings:
-                        source_id = mapping.get("sourceId")
-                        output_field = mapping.get("outputField", "output")
-                        target_field = mapping.get("targetField")
-                        if not source_id or not target_field:
-                            continue
-                        source_data = block_outputs.get(source_id)
-                        if source_data is None:
-                            continue
-                        value = source_data
-                        if isinstance(value, dict):
-                            if output_field != "output" or output_field not in value:
-                                inner = value.get("output")
-                                if isinstance(inner, dict) and output_field in inner:
-                                    value = inner[output_field]
-                                elif output_field in value:
-                                    value = value[output_field]
-                                else:
-                                    continue
-                            else:
-                                value = value[output_field]
-                        if value is None:
-                            continue
-                        existing = resolved_config.get(target_field)
-                        if existing and isinstance(existing, str) and isinstance(value, str):
-                            resolved_config[target_field] = f"{existing}\n{value}"
-                        else:
-                            resolved_config[target_field] = value
+                self._apply_input_mappings(resolved_config, block_outputs)
 
                 # Restore raw expression/code AFTER input mappings so stale
                 # mappings targeting these fields can't overwrite them.

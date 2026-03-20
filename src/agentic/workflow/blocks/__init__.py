@@ -5,8 +5,10 @@ from agentic.workflow.blocks.api_call import APICallBlock
 from agentic.workflow.blocks.condition import ConditionBlock
 from agentic.workflow.blocks.function import FunctionBlock
 from agentic.workflow.blocks.response import ResponseBlock
+from agentic.workflow.blocks.platform_api import PlatformAPIBlock
 from agentic.workflow.blocks.split import SplitBlock
 from agentic.workflow.blocks.starter import StarterBlock
+from agentic.workflow.blocks.webhook import WebhookBlock
 from agentic.workflow.block import BlockRegistry
 
 # Auto-register all block types
@@ -15,15 +17,19 @@ BlockRegistry.register("agent", AgentBlock)
 BlockRegistry.register("function", FunctionBlock)
 BlockRegistry.register("condition", ConditionBlock)
 BlockRegistry.register("api_call", APICallBlock)
+BlockRegistry.register("platform_api", PlatformAPIBlock)
 BlockRegistry.register("response", ResponseBlock)
 BlockRegistry.register("split", SplitBlock)
+BlockRegistry.register("webhook", WebhookBlock)
 
 __all__ = [
     "StarterBlock",
+    "WebhookBlock",
     "AgentBlock",
     "FunctionBlock",
     "ConditionBlock",
     "APICallBlock",
+    "PlatformAPIBlock",
     "ResponseBlock",
     "SplitBlock",
 ]
