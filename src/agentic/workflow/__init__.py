@@ -5,7 +5,7 @@ Provides:
 - Workflow: High-level API for building and running workflows
 - DAGEngine: Core execution engine
 - Block primitives: BaseBlock, BlockInput, BlockOutput, BlockRegistry
-- 7 built-in block types: starter, agent, function, condition, router, api_call, response
+- 7 built-in block types: starter, agent, function, condition, api_call, split, response
 - Variable resolver and expression evaluator
 """
 

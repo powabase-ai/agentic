@@ -6,7 +6,31 @@ import logging
 from typing import Any
 
 from agentic.workflow.block import BaseBlock, BlockInput, BlockOutput
-from agentic.workflow.variable_resolver import resolve_value
+
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
+
+try:
+    import scipy
+except ImportError:
+    scipy = None
+
+try:
+    import seaborn as sns
+except ImportError:
+    sns = None
+
+try:
+    import sklearn
+except ImportError:
+    sklearn = None
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +66,21 @@ _SAFE_BUILTINS = {
     "False": False,
 }
 
+_DATA_SCIENCE_LIBS: dict[str, Any] = {}
+if np is not None:
+    _DATA_SCIENCE_LIBS["np"] = np
+    _DATA_SCIENCE_LIBS["numpy"] = np
+if pd is not None:
+    _DATA_SCIENCE_LIBS["pd"] = pd
+    _DATA_SCIENCE_LIBS["pandas"] = pd
+if scipy is not None:
+    _DATA_SCIENCE_LIBS["scipy"] = scipy
+if sns is not None:
+    _DATA_SCIENCE_LIBS["sns"] = sns
+    _DATA_SCIENCE_LIBS["seaborn"] = sns
+if sklearn is not None:
+    _DATA_SCIENCE_LIBS["sklearn"] = sklearn
+
 
 class FunctionBlock(BaseBlock):
     block_type = "function"
@@ -51,8 +90,7 @@ class FunctionBlock(BaseBlock):
         if not code.strip():
             return BlockOutput(data={"output": None})
 
-        # Resolve any variable references in the code
-        resolved_code = str(resolve_value(code, block_input.block_outputs))
+        resolved_code = code
 
         # Build sandbox environment
         sandbox: dict[str, Any] = {"__builtins__": _SAFE_BUILTINS}
@@ -61,7 +99,9 @@ class FunctionBlock(BaseBlock):
             safe_name = block_id.replace("-", "_")
             sandbox[safe_name] = output
         # Expose input data
-        sandbox["input_data"] = block_input.data
+        sandbox["input_data"] = block_input.block_outputs
+        # Expose pre-imported data science libraries
+        sandbox.update(_DATA_SCIENCE_LIBS)
 
         try:
             exec(resolved_code, sandbox)  # noqa: S102

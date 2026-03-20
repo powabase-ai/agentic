@@ -156,6 +156,18 @@ class DAGEngine:
 
             try:
                 block = BlockRegistry.create(bdef.type, config=bdef.config)
+                # Preserve raw expression for condition blocks so their
+                # own <ref> resolver handles type-safe substitution.
+                raw_expression = (
+                    bdef.config.get("expression")
+                    if bdef.type == "condition"
+                    else None
+                )
+                raw_code = (
+                    bdef.config.get("code")
+                    if bdef.type == "function"
+                    else None
+                )
                 resolved_config = resolve_value(bdef.config, block_outputs)
 
                 # Process structured input mappings
@@ -189,6 +201,13 @@ class DAGEngine:
                             resolved_config[target_field] = f"{existing}\n{value}"
                         else:
                             resolved_config[target_field] = value
+
+                # Restore raw expression/code AFTER input mappings so stale
+                # mappings targeting these fields can't overwrite them.
+                if raw_expression is not None:
+                    resolved_config["expression"] = raw_expression
+                if raw_code is not None:
+                    resolved_config["code"] = raw_code
 
                 block.config = resolved_config
 
@@ -248,6 +267,18 @@ class DAGEngine:
 
             try:
                 block = BlockRegistry.create(bdef.type, config=bdef.config)
+                # Preserve raw expression/code so their own resolvers
+                # handle type-safe substitution.
+                raw_expression = (
+                    bdef.config.get("expression")
+                    if bdef.type == "condition"
+                    else None
+                )
+                raw_code = (
+                    bdef.config.get("code")
+                    if bdef.type == "function"
+                    else None
+                )
                 resolved_config = resolve_value(bdef.config, block_outputs)
 
                 # Process structured input mappings
@@ -281,6 +312,13 @@ class DAGEngine:
                             resolved_config[target_field] = f"{existing}\n{value}"
                         else:
                             resolved_config[target_field] = value
+
+                # Restore raw expression/code AFTER input mappings so stale
+                # mappings targeting these fields can't overwrite them.
+                if raw_expression is not None:
+                    resolved_config["expression"] = raw_expression
+                if raw_code is not None:
+                    resolved_config["code"] = raw_code
 
                 block.config = resolved_config
 
