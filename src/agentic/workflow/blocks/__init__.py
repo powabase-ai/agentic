@@ -14,9 +14,11 @@ from agentic.workflow.block import BlockRegistry
 # Auto-register all block types
 BlockRegistry.register("starter", StarterBlock)
 BlockRegistry.register("agent", AgentBlock)
-BlockRegistry.register("function", FunctionBlock)
+BlockRegistry.register("code", FunctionBlock)
+BlockRegistry.register("function", FunctionBlock)  # backward compat alias
 BlockRegistry.register("condition", ConditionBlock)
-BlockRegistry.register("api_call", APICallBlock)
+BlockRegistry.register("general_api", APICallBlock)
+BlockRegistry.register("api_call", APICallBlock)  # backward compat alias
 BlockRegistry.register("platform_api", PlatformAPIBlock)
 BlockRegistry.register("response", ResponseBlock)
 BlockRegistry.register("split", SplitBlock)

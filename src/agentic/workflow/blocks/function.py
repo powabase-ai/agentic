@@ -85,7 +85,7 @@ _SAFE_BUILTINS = {
 }
 
 class FunctionBlock(BaseBlock):
-    block_type = "function"
+    block_type = "code"
 
     async def execute(self, block_input: BlockInput) -> BlockOutput:
         code = self.config.get("code", "")

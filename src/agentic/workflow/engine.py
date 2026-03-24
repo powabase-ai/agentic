@@ -135,10 +135,11 @@ class DAGEngine:
                 route = None
                 if isinstance(source_output, dict):
                     route = source_output.get("route")
-                if route is not None and str(route) != str(edge.condition):
+                if route is None:
+                    continue  # source has no routing info — can't satisfy condition
+                if str(route) != str(edge.condition):
                     continue
-                if route is not None and str(route) == str(edge.condition):
-                    return True
+                return True  # route matches condition
 
             # No condition — just needs source to have produced output
             return True
@@ -205,19 +206,26 @@ class DAGEngine:
                     if bdef.type == "condition"
                     else None
                 )
+                raw_branches = (
+                    bdef.config.get("branches")
+                    if bdef.type == "condition"
+                    else None
+                )
                 raw_code = (
                     bdef.config.get("code")
-                    if bdef.type == "function"
+                    if bdef.type in ("code", "function")
                     else None
                 )
                 resolved_config = resolve_value(bdef.config, block_outputs)
 
                 self._apply_input_mappings(resolved_config, block_outputs)
 
-                # Restore raw expression/code AFTER input mappings so stale
-                # mappings targeting these fields can't overwrite them.
+                # Restore raw expression/code/branches AFTER input mappings
+                # so stale mappings targeting these fields can't overwrite them.
                 if raw_expression is not None:
                     resolved_config["expression"] = raw_expression
+                if raw_branches is not None:
+                    resolved_config["branches"] = raw_branches
                 if raw_code is not None:
                     resolved_config["code"] = raw_code
 
@@ -279,26 +287,33 @@ class DAGEngine:
 
             try:
                 block = BlockRegistry.create(bdef.type, config=bdef.config)
-                # Preserve raw expression/code so their own resolvers
+                # Preserve raw expression/code/branches so their own resolvers
                 # handle type-safe substitution.
                 raw_expression = (
                     bdef.config.get("expression")
                     if bdef.type == "condition"
                     else None
                 )
+                raw_branches = (
+                    bdef.config.get("branches")
+                    if bdef.type == "condition"
+                    else None
+                )
                 raw_code = (
                     bdef.config.get("code")
-                    if bdef.type == "function"
+                    if bdef.type in ("code", "function")
                     else None
                 )
                 resolved_config = resolve_value(bdef.config, block_outputs)
 
                 self._apply_input_mappings(resolved_config, block_outputs)
 
-                # Restore raw expression/code AFTER input mappings so stale
-                # mappings targeting these fields can't overwrite them.
+                # Restore raw expression/code/branches AFTER input mappings
+                # so stale mappings targeting these fields can't overwrite them.
                 if raw_expression is not None:
                     resolved_config["expression"] = raw_expression
+                if raw_branches is not None:
+                    resolved_config["branches"] = raw_branches
                 if raw_code is not None:
                     resolved_config["code"] = raw_code
 

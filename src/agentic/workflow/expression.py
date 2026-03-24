@@ -39,6 +39,30 @@ _BIN_OPS = {
     ast.Mod: operator.mod,
 }
 
+
+def _coerce_value(value: object) -> object:
+    """Try to convert a string to a native Python type for comparisons.
+
+    Attempts: bool ("true"/"false") -> int -> float -> leave as string.
+    """
+    if not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    if stripped.lower() == "true":
+        return True
+    if stripped.lower() == "false":
+        return False
+    try:
+        return int(stripped)
+    except ValueError:
+        pass
+    try:
+        return float(stripped)
+    except ValueError:
+        pass
+    return value
+
+
 _ALLOWED_NODES = {
     ast.Expression,
     ast.BoolOp,
@@ -121,12 +145,12 @@ def _eval_node(node: ast.AST, variables: dict[str, Any]) -> Any:
         return fn(_eval_node(node.operand, variables))
 
     if isinstance(node, ast.Compare):
-        left = _eval_node(node.left, variables)
+        left = _coerce_value(_eval_node(node.left, variables))
         for op_node, comparator in zip(node.ops, node.comparators):
             fn = _CMP_OPS.get(type(op_node))
             if not fn:
                 raise ValueError(f"Unsupported compare: {type(op_node).__name__}")
-            right = _eval_node(comparator, variables)
+            right = _coerce_value(_eval_node(comparator, variables))
             if not fn(left, right):
                 return False
             left = right
