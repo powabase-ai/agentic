@@ -313,3 +313,90 @@ class TestQueryParams:
         })
         params = block.config.get("params", "")
         assert params == ""
+
+
+# ---------------------------------------------------------------------------
+# Database schema parameter tests
+# ---------------------------------------------------------------------------
+
+class TestDatabaseSchemaParam:
+    """Verify db_schema config is appended to database route paths."""
+
+    def test_schema_not_appended_when_public(self):
+        """Schema 'public' should not add a query param (it's the default)."""
+        block = PlatformAPIBlock(config={"db_table": "users", "db_schema": "public"})
+        method, path = block._resolve_route("database", "list", None)
+        assert "schema=" not in path
+        assert path == "/api/database/tables/users"
+
+    def test_schema_not_appended_when_empty(self):
+        """Empty db_schema should not add a query param."""
+        block = PlatformAPIBlock(config={"db_table": "users", "db_schema": ""})
+        method, path = block._resolve_route("database", "list", None)
+        assert "schema=" not in path
+
+    def test_schema_not_appended_when_absent(self):
+        """Missing db_schema should not add a query param."""
+        block = PlatformAPIBlock(config={"db_table": "users"})
+        method, path = block._resolve_route("database", "list", None)
+        assert "schema=" not in path
+
+    def test_schema_appended_for_non_public(self):
+        """Non-public schema should be appended as a query param."""
+        block = PlatformAPIBlock(config={"db_table": "users", "db_schema": "ai"})
+        method, path = block._resolve_route("database", "list", None)
+        assert "?schema=ai" in path
+
+    def test_schema_appended_for_list_tables(self):
+        """Schema param should work for list_tables operation too."""
+        block = PlatformAPIBlock(config={"db_schema": "ai"})
+        method, path = block._resolve_route("database", "list_tables", None)
+        assert "?schema=ai" in path
+
+    def test_schema_appended_for_create(self):
+        """Schema param should be appended for POST (create) operations."""
+        block = PlatformAPIBlock(config={"db_table": "orders", "db_schema": "custom"})
+        method, path = block._resolve_route("database", "create", None)
+        assert "?schema=custom" in path
+        assert method == "POST"
+
+    def test_schema_appended_for_update(self):
+        """Schema param should be appended for PATCH (update) operations."""
+        block = PlatformAPIBlock(config={
+            "db_table": "orders", "db_row_id": "42", "db_schema": "custom",
+        })
+        method, path = block._resolve_route("database", "update", None)
+        assert "?schema=custom" in path
+
+    def test_schema_appended_for_delete(self):
+        """Schema param should be appended for DELETE operations."""
+        block = PlatformAPIBlock(config={
+            "db_table": "orders", "db_row_id": "42", "db_schema": "auth",
+        })
+        method, path = block._resolve_route("database", "delete", None)
+        assert "?schema=auth" in path
+
+    def test_schema_not_appended_for_non_database(self):
+        """Schema should not affect non-database routes."""
+        block = PlatformAPIBlock(config={"db_schema": "ai"})
+        method, path = block._resolve_route("agents", "list", None)
+        assert "schema=" not in path
+
+    def test_schema_invalid_name_raises(self):
+        """Schema with special characters should raise ValueError."""
+        block = PlatformAPIBlock(config={"db_table": "users", "db_schema": "my-schema!"})
+        with pytest.raises(ValueError, match="Invalid schema name"):
+            block._resolve_route("database", "list", None)
+
+    def test_schema_injection_attempt_raises(self):
+        """Schema value attempting query-param injection should raise ValueError."""
+        block = PlatformAPIBlock(config={"db_table": "users", "db_schema": "ai&admin=true"})
+        with pytest.raises(ValueError, match="Invalid schema name"):
+            block._resolve_route("database", "list", None)
+
+    def test_schema_non_string_value_no_crash(self):
+        """Non-string db_schema (e.g. int from resolve_value) should not crash with AttributeError."""
+        block = PlatformAPIBlock(config={"db_table": "users", "db_schema": 123})
+        # int 123 -> str "123" -> fails _TABLE_NAME_RE (starts with digit) -> ValueError
+        with pytest.raises(ValueError, match="Invalid schema name"):
+            block._resolve_route("database", "list", None)

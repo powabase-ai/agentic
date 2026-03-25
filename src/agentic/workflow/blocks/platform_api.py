@@ -187,6 +187,21 @@ class PlatformAPIBlock(BaseBlock):
                 raise ValueError("db_row_id is required for this operation")
             path = path.replace("{row_id}", str(row_id))
 
+        # Append schema query param for database operations
+        if resource == "database":
+            db_schema = resolve_value(
+                self.config.get("db_schema", ""), block_outputs or {}
+            )
+            if db_schema:
+                schema_str = str(db_schema).strip()
+                if schema_str and schema_str != "public":
+                    if not _TABLE_NAME_RE.match(schema_str):
+                        raise ValueError(
+                            f"Invalid schema name: {schema_str!r} (alphanumeric and underscores only)"
+                        )
+                    separator = "&" if "?" in path else "?"
+                    path = f"{path}{separator}schema={schema_str}"
+
         return method, path
 
     async def execute(self, block_input: BlockInput) -> BlockOutput:
