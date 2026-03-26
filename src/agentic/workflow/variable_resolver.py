@@ -10,8 +10,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
-# Pattern: <blockId.output> or <blockId.output.nested.field>
-_VAR_PATTERN = re.compile(r"<(\w+(?:\.\w+)+)>")
+# Pattern: <blockId.output> or <Block Name.output.nested.field>
+# Allows spaces and hyphens in the block name segment (first segment before the dot).
+_VAR_PATTERN = re.compile(r"<([\w -]+\.[\w.]+)>")
 
 
 def resolve_variable(ref: str, block_outputs: dict[str, Any]) -> Any:

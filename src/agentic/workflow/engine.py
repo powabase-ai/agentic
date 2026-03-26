@@ -239,6 +239,9 @@ class DAGEngine:
 
                 output = await block.execute(block_input)
                 block_outputs[block_id] = output.data
+                # Also index by block name so <BlockName.output> refs resolve
+                if bdef.name and bdef.name not in block_outputs:
+                    block_outputs[bdef.name] = output.data
                 elapsed_ms = (time.monotonic() - start_time) * 1000
 
                 event = ExecutionEvent(
@@ -341,6 +344,8 @@ class DAGEngine:
 
                 if final_output:
                     block_outputs[block_id] = final_output.data
+                    if bdef.name and bdef.name not in block_outputs:
+                        block_outputs[bdef.name] = final_output.data
                     yield ExecutionEvent(
                         type="block_complete",
                         block_id=block_id,
@@ -352,6 +357,8 @@ class DAGEngine:
                     # Fallback: stream yielded no BlockOutput — run execute()
                     output = await block.execute(block_input)
                     block_outputs[block_id] = output.data
+                    if bdef.name and bdef.name not in block_outputs:
+                        block_outputs[bdef.name] = output.data
                     elapsed_ms = (time.monotonic() - start_time) * 1000
                     yield ExecutionEvent(
                         type="block_complete",

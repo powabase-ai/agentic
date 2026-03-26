@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import importlib
 import logging
+import re
+import subprocess
+import sys
 from typing import Any
 
 from agentic.workflow.block import BaseBlock, BlockInput, BlockOutput
@@ -49,6 +52,81 @@ def _load_imports(selected_keys: list[str]) -> dict[str, Any]:
                 result[alias] = mod
         except ImportError:
             logger.warning("Library %s not available", module_name)
+    return result
+
+
+# ─── Custom packages ─────────────────────────────────────────────────────────
+
+_PIP_TO_IMPORT: dict[str, str] = {
+    "Pillow": "PIL",
+    "pillow": "PIL",
+    "scikit-learn": "sklearn",
+    "beautifulsoup4": "bs4",
+    "pyyaml": "yaml",
+    "opencv-python": "cv2",
+    "python-dateutil": "dateutil",
+}
+
+
+def _parse_package_specs(raw: str) -> list[tuple[str, str]]:
+    """Split comma-separated pip specifiers into (module_name, pip_spec) tuples."""
+    if not raw or not raw.strip():
+        return []
+    results: list[tuple[str, str]] = []
+    for part in raw.split(","):
+        spec = part.strip()
+        if not spec:
+            continue
+        # Extract the bare package name (before any version specifier)
+        bare_name = re.split(r"[><=!~;@\[]", spec)[0].strip()
+        # Map pip name to import name if known, otherwise use bare name
+        module_name = _PIP_TO_IMPORT.get(bare_name, bare_name.replace("-", "_"))
+        results.append((module_name, spec))
+    return results
+
+
+def _pip_install(pip_spec: str) -> bool:
+    """Attempt to pip-install a package. Returns True on success."""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--quiet", pip_spec],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            logger.warning("pip install %s failed: %s", pip_spec, result.stderr.strip())
+            return False
+        return True
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.warning("pip install %s failed: %s", pip_spec, e)
+        return False
+
+
+def _load_custom_packages(raw: str) -> dict[str, Any]:
+    """Parse custom_packages string, import (pip-installing if needed)."""
+    result: dict[str, Any] = {}
+    for module_name, pip_spec in _parse_package_specs(raw):
+        # Try importing directly first (already installed)
+        try:
+            mod = importlib.import_module(module_name)
+            result[module_name] = mod
+            continue
+        except ImportError:
+            pass
+        # Not installed — try pip install then retry
+        if _pip_install(pip_spec):
+            importlib.invalidate_caches()
+            try:
+                mod = importlib.import_module(module_name)
+                result[module_name] = mod
+                continue
+            except ImportError:
+                logger.warning(
+                    "Installed %s but could not import %s", pip_spec, module_name
+                )
+        else:
+            logger.warning("Could not install or import %s", pip_spec)
     return result
 
 
@@ -107,6 +185,14 @@ class FunctionBlock(BaseBlock):
         if selected is None:
             selected = LEGACY_DEFAULT_IMPORTS
         sandbox.update(_load_imports(selected))
+
+        # Load custom packages (pip-installed on demand)
+        custom_raw = self.config.get("custom_packages", "")
+        if not isinstance(custom_raw, str):
+            logger.warning("custom_packages must be a string, got %s", type(custom_raw).__name__)
+            custom_raw = ""
+        if custom_raw:
+            sandbox.update(_load_custom_packages(custom_raw))
 
         try:
             exec(resolved_code, sandbox)  # noqa: S102
