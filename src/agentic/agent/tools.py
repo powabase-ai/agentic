@@ -28,6 +28,10 @@ class ToolDefinition:
     is_destructive: bool = False  # Irreversible action?
     max_result_chars: int | None = 50000  # None = unlimited
 
+    def validate_input(self, arguments: dict[str, Any]) -> tuple[bool, str | None]:
+        """Validate input before execution. Override for custom validation."""
+        return True, None
+
     def execute(
         self, arguments: dict[str, Any], context: ExecutionContext | None
     ) -> str:
