@@ -37,7 +37,12 @@ from agentic.agent import Agent, AgentOutput, AgentSession
 from agentic.agent.tools import BuiltinTool, CustomTool, ToolDefinition
 
 # Execution infrastructure
-from agentic.execution import ExecutionContext, ExecutionStatus
+from agentic.execution import (
+    ExecutionContext,
+    ExecutionStatus,
+    MaxDepthExceeded,
+    TokenBudget,
+)
 
 # Ingest module - content ingestion (connectors & extractors)
 from agentic.ingest import (
@@ -96,6 +101,8 @@ __all__ = [
     # Execution infrastructure
     "ExecutionContext",
     "ExecutionStatus",
+    "TokenBudget",
+    "MaxDepthExceeded",
     # Knowledge (base classes)
     "KnowledgeStore",
     "IndexingAlgorithm",

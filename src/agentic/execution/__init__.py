@@ -9,11 +9,13 @@ and Workflow executions:
 """
 
 from agentic.execution.base import BaseOutput
-from agentic.execution.context import ExecutionContext
+from agentic.execution.context import ExecutionContext, MaxDepthExceeded, TokenBudget
 from agentic.execution.status import ExecutionStatus
 
 __all__ = [
     "ExecutionStatus",
     "ExecutionContext",
+    "TokenBudget",
+    "MaxDepthExceeded",
     "BaseOutput",
 ]
