@@ -34,7 +34,12 @@ See Also:
 
 # Agent module - fully implemented
 from agentic.agent import Agent, AgentOutput, AgentSession, ToolCallRecord
-from agentic.agent.tools import BuiltinTool, CustomTool, ToolDefinition
+from agentic.agent.tools import (
+    BuiltinTool,
+    CustomTool,
+    KnowledgeSearchTool,
+    ToolDefinition,
+)
 
 # Execution infrastructure
 from agentic.execution import (
@@ -91,6 +96,7 @@ __all__ = [
     "ToolDefinition",
     "BuiltinTool",
     "CustomTool",
+    "KnowledgeSearchTool",
     # Orchestration (placeholder)
     "Orchestration",
     "OrchestrationOutput",

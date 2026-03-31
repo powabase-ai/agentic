@@ -112,3 +112,75 @@ class TestCustomTool:
         )
         result = tool.execute({}, None)
         assert len(result) == 10000
+
+
+class TestKnowledgeSearchTool:
+    def test_create(self):
+        from agentic.agent.tools import KnowledgeSearchTool
+
+        tool = KnowledgeSearchTool(
+            name="search_policies",
+            description="Search the policies knowledge base",
+            knowledge_base_configs=[{"id": "kb-123", "top_k": 5}],
+            max_context_tokens=8000,
+        )
+        assert tool.name == "search_policies"
+        assert tool.knowledge_base_configs == [{"id": "kb-123", "top_k": 5}]
+        assert tool.max_context_tokens == 8000
+        assert tool.input_schema["type"] == "object"
+        assert "query" in tool.input_schema["properties"]
+
+    def test_execute_requires_handler(self):
+        from agentic.agent.tools import KnowledgeSearchTool
+
+        tool = KnowledgeSearchTool(
+            name="search_test",
+            description="test",
+            knowledge_base_configs=[{"id": "kb-1"}],
+        )
+        with pytest.raises(NotImplementedError):
+            tool.execute({"query": "test"}, None)
+
+    def test_execute_with_handler(self):
+        from agentic.agent.tools import KnowledgeSearchTool
+
+        def mock_handler(query, kb_configs, max_tokens, session_history):
+            return f"Results for: {query}"
+
+        tool = KnowledgeSearchTool(
+            name="search_test",
+            description="test",
+            knowledge_base_configs=[{"id": "kb-1"}],
+            search_handler=mock_handler,
+        )
+        result = tool.execute({"query": "hello"}, None)
+        assert result == "Results for: hello"
+
+    def test_to_function_schema(self):
+        from agentic.agent.tools import KnowledgeSearchTool
+
+        tool = KnowledgeSearchTool(
+            name="search_docs",
+            description="Search documentation",
+            knowledge_base_configs=[{"id": "kb-1"}],
+        )
+        schema = tool.to_function_schema()
+        assert schema["function"]["name"] == "search_docs"
+        assert "query" in schema["function"]["parameters"]["properties"]
+
+    def test_combined_tool_has_kb_names_param(self):
+        from agentic.agent.tools import KnowledgeSearchTool
+
+        tool = KnowledgeSearchTool(
+            name="knowledge_search",
+            description="Search across KBs",
+            knowledge_base_configs=[
+                {"id": "kb-1", "name": "policies"},
+                {"id": "kb-2", "name": "claims"},
+            ],
+            include_kb_filter=True,
+        )
+        schema = tool.to_function_schema()
+        params = schema["function"]["parameters"]
+        assert "knowledge_base_names" in params["properties"]
+        assert params["properties"]["knowledge_base_names"]["type"] == "array"
