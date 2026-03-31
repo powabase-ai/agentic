@@ -11,6 +11,7 @@ from typing import Any
 
 import litellm
 
+from agentic.agent.compaction import compact_messages, estimate_token_count
 from agentic.agent.output import AgentOutput, ToolCallRecord
 from agentic.agent.session import AgentSession
 from agentic.agent.tools import ToolDefinition
@@ -301,6 +302,17 @@ class Agent:
                         "has_tool_calls": has_tool_calls,
                     }
                 )
+
+                # Compaction check: summarize history if context is growing large
+                if estimate_token_count(messages) > 100000:
+                    context.emit_event(
+                        {
+                            "type": "compaction",
+                            "step": step,
+                            "message_count": len(messages),
+                        }
+                    )
+                    messages = compact_messages(messages)
 
                 # Check for doom loop: last 3 calls identical
                 if len(recent_calls) >= 3:
