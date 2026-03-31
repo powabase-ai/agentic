@@ -88,6 +88,8 @@ class Agent:
         tools: dict[str, ToolDefinition] | None = None,
         max_steps: int = 25,
         fallback_model: str | None = None,
+        tool_rules: dict[str, list[dict]] | None = None,
+        hooks: list | None = None,
     ) -> AgentOutput:
         """
         Execute the agent with the given input using a ReAct loop.
@@ -407,6 +409,8 @@ class Agent:
                                     tools,
                                     context,
                                     step,
+                                    tool_rules,
+                                    hooks,
                                 )
                             ] = tc
                         for future in as_completed(futures):
@@ -428,7 +432,9 @@ class Agent:
                 for tc in exclusive_calls:
                     if context.is_aborted:
                         break
-                    result, record = self._execute_single_tool(tc, tools, context, step)
+                    result, record = self._execute_single_tool(
+                        tc, tools, context, step, tool_rules, hooks
+                    )
                     all_tool_calls.append(record)
                     working_messages.append(
                         {
@@ -497,6 +503,19 @@ class Agent:
 
             # Build final output
             content = assistant_msg.content
+
+            # PreResponse hook: allow hooks to inspect/block/modify final output
+            if hooks and content:
+                from agentic.agent.hooks import run_hooks
+
+                pre_response = run_hooks("PreResponse", "", {}, content, hooks)
+                if pre_response.blocked:
+                    content = (
+                        f"[Response blocked: "
+                        f"{pre_response.message or 'PreResponse hook denied'}]"
+                    )
+                elif pre_response.modified_output:
+                    content = pre_response.modified_output
 
             return AgentOutput(
                 execution_id=context.execution_id,
@@ -740,7 +759,9 @@ class Agent:
             if chunk.choices and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
 
-    def _execute_single_tool(self, tc, tools, context, step):
+    def _execute_single_tool(
+        self, tc, tools, context, step, tool_rules=None, hooks=None
+    ):
         """Execute a single tool call. Returns (result_str, ToolCallRecord).
 
         Thread-safe: only reads from `tools` dict and `tc` (both immutable
@@ -765,6 +786,71 @@ class Agent:
 
         tool_start = time.monotonic()
         tool_def = tools.get(tool_name) if tools else None
+
+        # === Pre-execution pipeline ===
+        if tool_def:
+            # Step 1: Schema-level input validation
+            valid, validation_msg = tool_def.validate_input(arguments)
+            if not valid:
+                result = f"Error: Input validation failed — {validation_msg}"
+                tool_duration_ms = int((time.monotonic() - tool_start) * 1000)
+                return self._finish_tool(
+                    result,
+                    tool_def,
+                    tool_name,
+                    arguments,
+                    step,
+                    context,
+                    tc,
+                    tool_duration_ms,
+                )
+
+            # Step 2: Evaluate runtime rules
+            if tool_rules:
+                rules_for_tool = tool_rules.get(tool_name, [])
+                if rules_for_tool:
+                    from agentic.agent.rules import evaluate_rules
+
+                    allowed, reason = evaluate_rules(arguments, rules_for_tool)
+                    if not allowed:
+                        result = f"Error: Blocked by rule — {reason}"
+                        tool_duration_ms = int((time.monotonic() - tool_start) * 1000)
+                        return self._finish_tool(
+                            result,
+                            tool_def,
+                            tool_name,
+                            arguments,
+                            step,
+                            context,
+                            tc,
+                            tool_duration_ms,
+                        )
+
+            # Step 3: Run PreToolUse hooks
+            if hooks:
+                from agentic.agent.hooks import run_hooks
+
+                pre_result = run_hooks("PreToolUse", tool_name, arguments, None, hooks)
+                if pre_result.blocked:
+                    result = (
+                        f"Error: Blocked by hook — "
+                        f"{pre_result.message or 'PreToolUse hook denied'}"
+                    )
+                    tool_duration_ms = int((time.monotonic() - tool_start) * 1000)
+                    return self._finish_tool(
+                        result,
+                        tool_def,
+                        tool_name,
+                        arguments,
+                        step,
+                        context,
+                        tc,
+                        tool_duration_ms,
+                    )
+                if pre_result.modified_input:
+                    arguments = pre_result.modified_input
+
+        # === Execute the tool ===
         if tool_def:
             try:
                 result = tool_def.execute(arguments, context)
@@ -773,6 +859,14 @@ class Agent:
         else:
             result = f"Error: Unknown tool '{tool_name}'"
         tool_duration_ms = int((time.monotonic() - tool_start) * 1000)
+
+        # === Post-execution: Run PostToolUse hooks ===
+        if hooks and tool_def:
+            from agentic.agent.hooks import run_hooks
+
+            post_result = run_hooks("PostToolUse", tool_name, arguments, result, hooks)
+            if post_result.modified_output:
+                result = post_result.modified_output
 
         # Safety cap on result size
         if (
@@ -805,6 +899,37 @@ class Agent:
             }
         )
 
+        return result, record
+
+    def _finish_tool(
+        self,
+        result,
+        tool_def,
+        tool_name,
+        arguments,
+        step,
+        context,
+        tc,
+        tool_duration_ms,
+    ):
+        """Build ToolCallRecord and emit tool_result event for early returns."""
+        record = ToolCallRecord(
+            step=step,
+            tool_name=tool_name,
+            arguments=arguments,
+            result=result,
+            duration_ms=tool_duration_ms,
+        )
+        context.emit_event(
+            {
+                "type": "tool_result",
+                "step": step,
+                "tool_name": tool_name,
+                "call_id": tc.id,
+                "result_preview": result[:200] if result else "",
+                "duration_ms": tool_duration_ms,
+            }
+        )
         return result, record
 
     @staticmethod
