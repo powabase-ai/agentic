@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -65,6 +66,14 @@ class ExecutionContext:
     # Internal event counter
     _event_seq: int = field(default=0, repr=False)
 
+    # Abort signal (set when client disconnects)
+    abort_signal: threading.Event | None = None
+
+    @property
+    def is_aborted(self) -> bool:
+        """Check if the execution has been aborted."""
+        return self.abort_signal is not None and self.abort_signal.is_set()
+
     def child_context(self) -> ExecutionContext:
         """Create a context for a sub-agent execution."""
         if self.depth >= self.max_depth:
@@ -81,6 +90,7 @@ class ExecutionContext:
             on_event=self.on_event,
             session_history=self.session_history,
             metadata=self.metadata,
+            abort_signal=self.abort_signal,
         )
 
     def emit_event(self, event: dict[str, Any]) -> None:
@@ -106,4 +116,5 @@ class ExecutionContext:
             max_depth=self.max_depth,
             on_event=self.on_event,
             session_history=self.session_history,
+            abort_signal=self.abort_signal,
         )
