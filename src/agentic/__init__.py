@@ -34,6 +34,7 @@ See Also:
 
 # Agent module - fully implemented
 from agentic.agent import Agent, AgentOutput, AgentSession
+from agentic.agent.tools import BuiltinTool, CustomTool, ToolDefinition
 
 # Execution infrastructure
 from agentic.execution import ExecutionContext, ExecutionStatus
@@ -80,6 +81,10 @@ __all__ = [
     "Agent",
     "AgentOutput",
     "AgentSession",
+    # Tools (implemented)
+    "ToolDefinition",
+    "BuiltinTool",
+    "CustomTool",
     # Orchestration (placeholder)
     "Orchestration",
     "OrchestrationOutput",
