@@ -10,6 +10,30 @@ from agentic.execution.status import ExecutionStatus
 
 
 @dataclass
+class ToolCallRecord:
+    """Record of a single tool call within a ReAct loop step."""
+
+    step: int
+    tool_name: str
+    arguments: dict[str, Any]
+    result: str
+    duration_ms: int
+    usage: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        d = {
+            "step": self.step,
+            "tool_name": self.tool_name,
+            "arguments": self.arguments,
+            "result": self.result,
+            "duration_ms": self.duration_ms,
+        }
+        if self.usage is not None:
+            d["usage"] = self.usage
+        return d
+
+
+@dataclass
 class AgentOutput(BaseOutput):
     """
     Result of a single Agent.run() call.
@@ -38,6 +62,11 @@ class AgentOutput(BaseOutput):
     content: str | None = None
     messages: list[dict[str, Any]] = field(default_factory=list)
     usage: dict[str, Any] | None = None
+
+    # ReAct loop fields
+    steps: int = 0
+    tool_calls: list[ToolCallRecord] = field(default_factory=list)
+    events: list[dict[str, Any]] = field(default_factory=list)
 
     def get_content(self) -> str:
         """

@@ -33,7 +33,7 @@ See Also:
 """
 
 # Agent module - fully implemented
-from agentic.agent import Agent, AgentOutput, AgentSession
+from agentic.agent import Agent, AgentOutput, AgentSession, ToolCallRecord
 from agentic.agent.tools import BuiltinTool, CustomTool, ToolDefinition
 
 # Execution infrastructure
@@ -86,6 +86,7 @@ __all__ = [
     "Agent",
     "AgentOutput",
     "AgentSession",
+    "ToolCallRecord",
     # Tools (implemented)
     "ToolDefinition",
     "BuiltinTool",
