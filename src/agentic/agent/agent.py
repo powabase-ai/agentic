@@ -11,7 +11,10 @@ from typing import Any
 
 import litellm
 
+from agentic.agent.cache import sort_tools_for_cache
 from agentic.agent.compaction import compact_messages, estimate_token_count
+from agentic.agent.loop_state import LoopState
+from agentic.agent.normalization import normalize_messages
 from agentic.agent.output import AgentOutput, ToolCallRecord
 from agentic.agent.session import AgentSession
 from agentic.agent.tools import ToolDefinition
@@ -88,6 +91,13 @@ class Agent:
 
         Without tools, behaves identically to a single LLM call (backward compat).
 
+        The loop is structured as a 5-phase pipeline per iteration:
+          Phase 1 (Setup) — abort check, normalize messages, emit step_started
+          Phase 2 (LLM Call) — call litellm, accumulate usage, enforce budget
+          Phase 3 (Decision) — stop if no tool calls or last step
+          Phase 4 (Tool Execution) — execute tools, record results
+          Phase 5 (Continuation) — compaction, doom loop check, advance state
+
         Args:
             input: The user input. Can be a string or a list of message dicts
                    in OpenAI format [{"role": "user", "content": "..."}]
@@ -125,13 +135,18 @@ class Agent:
             # Build messages list
             messages = self._build_messages(input, session)
 
-            # Convert tools to LiteLLM function schemas
+            # Build tool schemas using cache-aware ordering
             tool_schemas = None
+            available_tool_names = None
             if tools:
-                tool_schemas = [t.to_function_schema() for t in tools.values()]
+                sorted_tools = sort_tools_for_cache(tools)
+                tool_schemas = [t.to_function_schema() for t in sorted_tools]
+                available_tool_names = set(tools.keys())
 
-            # Track loop state
-            step = 0
+            # Initialize structured loop state
+            state = LoopState.initial(messages=messages, model=self.model)
+
+            # Accumulator state (not part of LoopState since these only grow)
             all_tool_calls: list[ToolCallRecord] = []
             collected_events: list[dict] = []
             total_usage: dict[str, int] = {
@@ -141,8 +156,6 @@ class Agent:
             }
             # For doom loop detection: list of (tool_name, arguments_str) tuples
             recent_calls: list[tuple[str, str]] = []
-            # Budget exhaustion flag (set when budget is exceeded mid-loop)
-            budget_exhausted = False
 
             # Wrap on_event to also collect into local list
             original_on_event = context.on_event
@@ -155,21 +168,45 @@ class Agent:
             context.on_event = collecting_on_event
 
             while True:
-                step += 1
-                is_last_step = step >= max_steps or budget_exhausted
+                # The "step" as seen by events/output is turn_count + 1
+                # (turn_count starts at 0 and increments in Phase 5)
+                step = state.turn_count + 1
+
+                # ===== PHASE 1: SETUP =====
+                if context.is_aborted:
+                    return AgentOutput(
+                        execution_id=context.execution_id,
+                        status=ExecutionStatus.CANCELLED,
+                        started_at=started_at,
+                        completed_at=datetime.now(),
+                        error="Execution aborted",
+                        messages=list(state.messages),
+                        usage=total_usage,
+                        steps=step,
+                        tool_calls=all_tool_calls,
+                        events=collected_events,
+                    )
+
+                is_last_step = step >= max_steps or state.budget_exhausted
+
+                # Normalize messages before LLM call
+                normalized = normalize_messages(
+                    list(state.messages), available_tool_names
+                )
 
                 # Emit step_started event
                 context.emit_event(
                     {"type": "step_started", "step": step, "is_last_step": is_last_step}
                 )
 
+                # ===== PHASE 2: LLM CALL =====
                 # On last step, don't pass tools to force a text-only response
                 step_tools = None if is_last_step else tool_schemas
 
                 # Build call kwargs
                 call_kwargs: dict[str, Any] = {
-                    "model": self.model,
-                    "messages": messages,
+                    "model": state.current_model,
+                    "messages": normalized,
                     "num_retries": 3,
                     "stream": False,
                 }
@@ -189,17 +226,22 @@ class Agent:
                 if context.budget and step_usage:
                     context.budget.consume(step_usage.get("total_tokens", 0))
                     if context.budget.exceeded:
-                        budget_exhausted = True
+                        state = state.with_budget_exhausted()
                     elif context.budget.remaining < (context.budget.max_tokens * 0.15):
-                        messages.append(
-                            {
-                                "role": "system",
-                                "content": (
-                                    f"BUDGET WARNING: You have approximately "
-                                    f"{context.budget.remaining} tokens remaining. "
-                                    "Wrap up your work efficiently. Avoid unnecessary tool calls."
-                                ),
-                            }
+                        budget_msg = {
+                            "role": "system",
+                            "content": (
+                                f"BUDGET WARNING: You have approximately "
+                                f"{context.budget.remaining} tokens remaining. "
+                                "Wrap up your work efficiently. Avoid unnecessary "
+                                "tool calls."
+                            ),
+                            "_injected": True,
+                        }
+                        # Add to working messages (will be picked up via next_turn)
+                        working_budget = list(state.messages) + [budget_msg]
+                        state = state.recover(
+                            messages=working_budget, reason="budget_warning"
                         )
 
                 assistant_msg = response.choices[0].message
@@ -230,12 +272,12 @@ class Agent:
                         }
                         for tc in assistant_msg.tool_calls
                     ]
-                messages.append(msg_dict)
 
-                # Check if we should stop: no tools provided, text response,
-                # no tool calls, or last step
+                working_messages = list(state.messages) + [msg_dict]
+
+                # ===== PHASE 3: DECISION =====
                 if finish_reason == "stop" or not has_tool_calls or is_last_step:
-                    # Emit step_completed before breaking (no tool calls to wait for)
+                    # Emit step_completed before returning
                     context.emit_event(
                         {
                             "type": "step_completed",
@@ -246,8 +288,12 @@ class Agent:
                     )
                     break
 
-                # Execute each tool call
+                # ===== PHASE 4: TOOL EXECUTION =====
                 for tc in assistant_msg.tool_calls:
+                    # Check abort between tools
+                    if context.is_aborted:
+                        break
+
                     tool_name = tc.function.name
                     arguments_str = tc.function.arguments
                     try:
@@ -301,7 +347,7 @@ class Agent:
                     )
 
                     # Append tool result message for next LLM call
-                    messages.append(
+                    working_messages.append(
                         {
                             "role": "tool",
                             "tool_call_id": tc.id,
@@ -322,16 +368,31 @@ class Agent:
                     }
                 )
 
+                # Check abort after tool execution
+                if context.is_aborted:
+                    return AgentOutput(
+                        execution_id=context.execution_id,
+                        status=ExecutionStatus.CANCELLED,
+                        started_at=started_at,
+                        completed_at=datetime.now(),
+                        error="Execution aborted during tool execution",
+                        messages=working_messages,
+                        usage=total_usage,
+                        steps=step,
+                        tool_calls=all_tool_calls,
+                        events=collected_events,
+                    )
+
                 # Compaction check: summarize history if context is growing large
-                if estimate_token_count(messages) > 100000:
+                if estimate_token_count(working_messages) > 100000:
                     context.emit_event(
                         {
                             "type": "compaction",
                             "step": step,
-                            "message_count": len(messages),
+                            "message_count": len(working_messages),
                         }
                     )
-                    messages = compact_messages(messages)
+                    working_messages = compact_messages(working_messages)
 
                 # Check for doom loop: last 3 calls identical
                 if len(recent_calls) >= 3:
@@ -343,12 +404,15 @@ class Agent:
                             started_at=started_at,
                             completed_at=datetime.now(),
                             error="Doom loop detected: 3 identical tool calls in a row",
-                            messages=messages,
+                            messages=working_messages,
                             usage=total_usage,
                             steps=step,
                             tool_calls=all_tool_calls,
                             events=collected_events,
                         )
+
+                # ===== PHASE 5: CONTINUATION =====
+                state = state.next_turn(messages=working_messages)
 
             # Build final output
             content = assistant_msg.content
@@ -359,7 +423,7 @@ class Agent:
                 started_at=started_at,
                 completed_at=datetime.now(),
                 content=content,
-                messages=messages,
+                messages=working_messages,
                 usage=total_usage,
                 steps=step,
                 tool_calls=all_tool_calls,

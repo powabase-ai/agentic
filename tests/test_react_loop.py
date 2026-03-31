@@ -1,5 +1,6 @@
 """Tests for the Agent ReAct loop with tool calling."""
 
+import threading
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -200,3 +201,20 @@ class TestReactLoopEvents:
         assert "tool_result" in output_event_types
         assert "step_completed" in output_event_types
         assert output.events == events
+
+
+class TestAbortIntegration:
+    """Abort signal integration with the ReAct loop."""
+
+    @patch("agentic.agent.agent.litellm")
+    def test_aborted_before_llm_call(self, mock_litellm):
+        """When abort_signal is already set, run() returns cancelled without calling LLM."""
+        signal = threading.Event()
+        signal.set()  # Already aborted
+        ctx = ExecutionContext(execution_id="test", abort_signal=signal)
+
+        agent = Agent(model="gpt-4o-mini", system_prompt="test")
+        output = agent.run("test", context=ctx)
+
+        assert output.status.value in ("cancelled", "failed")
+        mock_litellm.completion.assert_not_called()
