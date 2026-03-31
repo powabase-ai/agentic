@@ -184,10 +184,19 @@ class TestReactLoopEvents:
         )
 
         agent = Agent(model="gpt-4o-mini", system_prompt="test")
-        agent.run("test", context=ctx, tools={"ping": tool})
+        output = agent.run("test", context=ctx, tools={"ping": tool})
 
         event_types = [e["type"] for e in events]
         assert "step_started" in event_types
         assert "tool_call" in event_types
         assert "tool_result" in event_types
         assert "step_completed" in event_types
+
+        # output.events must be populated and match the callback's event list
+        assert len(output.events) > 0
+        output_event_types = [e["type"] for e in output.events]
+        assert "step_started" in output_event_types
+        assert "tool_call" in output_event_types
+        assert "tool_result" in output_event_types
+        assert "step_completed" in output_event_types
+        assert output.events == events

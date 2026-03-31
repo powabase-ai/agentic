@@ -132,6 +132,7 @@ class Agent:
             # Track loop state
             step = 0
             all_tool_calls: list[ToolCallRecord] = []
+            collected_events: list[dict] = []
             total_usage: dict[str, int] = {
                 "prompt_tokens": 0,
                 "completion_tokens": 0,
@@ -139,6 +140,16 @@ class Agent:
             }
             # For doom loop detection: list of (tool_name, arguments_str) tuples
             recent_calls: list[tuple[str, str]] = []
+
+            # Wrap on_event to also collect into local list
+            original_on_event = context.on_event
+
+            def collecting_on_event(event: dict) -> None:
+                collected_events.append(event)
+                if original_on_event:
+                    original_on_event(event)
+
+            context.on_event = collecting_on_event
 
             while True:
                 step += 1
@@ -201,19 +212,18 @@ class Agent:
                     ]
                 messages.append(msg_dict)
 
-                # Emit step_completed event
-                context.emit_event(
-                    {
-                        "type": "step_completed",
-                        "step": step,
-                        "finish_reason": finish_reason,
-                        "has_tool_calls": has_tool_calls,
-                    }
-                )
-
                 # Check if we should stop: no tools provided, text response,
                 # no tool calls, or last step
                 if finish_reason == "stop" or not has_tool_calls or is_last_step:
+                    # Emit step_completed before breaking (no tool calls to wait for)
+                    context.emit_event(
+                        {
+                            "type": "step_completed",
+                            "step": step,
+                            "finish_reason": finish_reason,
+                            "has_tool_calls": has_tool_calls,
+                        }
+                    )
                     break
 
                 # Execute each tool call
@@ -282,6 +292,16 @@ class Agent:
                     # Doom loop detection: track recent calls
                     recent_calls.append((tool_name, arguments_str))
 
+                # Emit step_completed after all tool calls are done
+                context.emit_event(
+                    {
+                        "type": "step_completed",
+                        "step": step,
+                        "finish_reason": finish_reason,
+                        "has_tool_calls": has_tool_calls,
+                    }
+                )
+
                 # Check for doom loop: last 3 calls identical
                 if len(recent_calls) >= 3:
                     last_three = recent_calls[-3:]
@@ -296,6 +316,7 @@ class Agent:
                             usage=total_usage,
                             steps=step,
                             tool_calls=all_tool_calls,
+                            events=collected_events,
                         )
 
             # Build final output
@@ -311,6 +332,7 @@ class Agent:
                 usage=total_usage,
                 steps=step,
                 tool_calls=all_tool_calls,
+                events=collected_events,
             )
 
         except Exception as e:
