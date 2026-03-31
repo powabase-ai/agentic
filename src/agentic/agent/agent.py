@@ -6,6 +6,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncGenerator, Generator
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any
 
@@ -383,64 +384,52 @@ class Agent:
                     break
 
                 # ===== PHASE 4: TOOL EXECUTION =====
+                # Partition into concurrent-safe and exclusive
+                concurrent_calls = []
+                exclusive_calls = []
                 for tc in assistant_msg.tool_calls:
-                    # Check abort between tools
+                    tool_name = tc.function.name
+                    tool_def = tools.get(tool_name) if tools else None
+                    if tool_def and tool_def.is_concurrency_safe:
+                        concurrent_calls.append(tc)
+                    else:
+                        exclusive_calls.append(tc)
+
+                # Execute concurrent-safe tools in parallel
+                if concurrent_calls:
+                    with ThreadPoolExecutor(max_workers=len(concurrent_calls)) as pool:
+                        futures = {}
+                        for tc in concurrent_calls:
+                            futures[
+                                pool.submit(
+                                    self._execute_single_tool,
+                                    tc,
+                                    tools,
+                                    context,
+                                    step,
+                                )
+                            ] = tc
+                        for future in as_completed(futures):
+                            tc = futures[future]
+                            result, record = future.result()
+                            all_tool_calls.append(record)
+                            working_messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tc.id,
+                                    "content": result,
+                                }
+                            )
+                            recent_calls.append(
+                                (tc.function.name, tc.function.arguments)
+                            )
+
+                # Execute exclusive tools sequentially
+                for tc in exclusive_calls:
                     if context.is_aborted:
                         break
-
-                    tool_name = tc.function.name
-                    arguments_str = tc.function.arguments
-                    try:
-                        arguments = json.loads(arguments_str) if arguments_str else {}
-                    except json.JSONDecodeError:
-                        arguments = {}
-
-                    # Emit tool_call event
-                    context.emit_event(
-                        {
-                            "type": "tool_call",
-                            "step": step,
-                            "tool_name": tool_name,
-                            "arguments": arguments,
-                            "call_id": tc.id,
-                        }
-                    )
-
-                    # Execute tool
-                    tool_start = time.monotonic()
-                    tool_def = tools.get(tool_name) if tools else None
-                    if tool_def:
-                        try:
-                            result = tool_def.execute(arguments, context)
-                        except Exception as tool_err:
-                            result = f"Error: {tool_err}"
-                    else:
-                        result = f"Error: Unknown tool '{tool_name}'"
-                    tool_duration_ms = int((time.monotonic() - tool_start) * 1000)
-
-                    # Record tool call
-                    record = ToolCallRecord(
-                        step=step,
-                        tool_name=tool_name,
-                        arguments=arguments,
-                        result=result,
-                        duration_ms=tool_duration_ms,
-                    )
+                    result, record = self._execute_single_tool(tc, tools, context, step)
                     all_tool_calls.append(record)
-
-                    # Emit tool_result event
-                    context.emit_event(
-                        {
-                            "type": "tool_result",
-                            "step": step,
-                            "tool_name": tool_name,
-                            "call_id": tc.id,
-                            "result_preview": result[:200] if result else "",
-                            "duration_ms": tool_duration_ms,
-                        }
-                    )
-
-                    # Append tool result message for next LLM call
                     working_messages.append(
                         {
                             "role": "tool",
@@ -448,9 +437,7 @@ class Agent:
                             "content": result,
                         }
                     )
-
-                    # Doom loop detection: track recent calls
-                    recent_calls.append((tool_name, arguments_str))
+                    recent_calls.append((tc.function.name, tc.function.arguments))
 
                 # Emit step_completed after all tool calls are done
                 context.emit_event(
@@ -752,6 +739,73 @@ class Agent:
         async for chunk in response:
             if chunk.choices and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
+
+    def _execute_single_tool(self, tc, tools, context, step):
+        """Execute a single tool call. Returns (result_str, ToolCallRecord).
+
+        Thread-safe: only reads from `tools` dict and `tc` (both immutable
+        during execution). `context.emit_event()` is GIL-protected.
+        """
+        tool_name = tc.function.name
+        arguments_str = tc.function.arguments
+        try:
+            arguments = json.loads(arguments_str) if arguments_str else {}
+        except json.JSONDecodeError:
+            arguments = {}
+
+        context.emit_event(
+            {
+                "type": "tool_call",
+                "step": step,
+                "tool_name": tool_name,
+                "arguments": arguments,
+                "call_id": tc.id,
+            }
+        )
+
+        tool_start = time.monotonic()
+        tool_def = tools.get(tool_name) if tools else None
+        if tool_def:
+            try:
+                result = tool_def.execute(arguments, context)
+            except Exception as tool_err:
+                result = f"Error: {tool_err}"
+        else:
+            result = f"Error: Unknown tool '{tool_name}'"
+        tool_duration_ms = int((time.monotonic() - tool_start) * 1000)
+
+        # Safety cap on result size
+        if (
+            tool_def
+            and tool_def.max_result_chars is not None
+            and len(result) > tool_def.max_result_chars
+        ):
+            original_len = len(result)
+            result = (
+                result[: tool_def.max_result_chars]
+                + f"\n\n[Truncated: {original_len} chars total]"
+            )
+
+        record = ToolCallRecord(
+            step=step,
+            tool_name=tool_name,
+            arguments=arguments,
+            result=result,
+            duration_ms=tool_duration_ms,
+        )
+
+        context.emit_event(
+            {
+                "type": "tool_result",
+                "step": step,
+                "tool_name": tool_name,
+                "call_id": tc.id,
+                "result_preview": result[:200] if result else "",
+                "duration_ms": tool_duration_ms,
+            }
+        )
+
+        return result, record
 
     @staticmethod
     def _extract_usage(response) -> dict[str, int] | None:
