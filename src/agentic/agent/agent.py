@@ -12,7 +12,12 @@ from typing import Any
 import litellm
 
 from agentic.agent.cache import sort_tools_for_cache
-from agentic.agent.compaction import compact_messages, estimate_token_count
+from agentic.agent.compaction import (
+    compact_messages,
+    estimate_token_count,
+    prune_messages,
+)
+from agentic.agent.errors import classify_error, classify_finish_reason
 from agentic.agent.loop_state import LoopState
 from agentic.agent.normalization import normalize_messages
 from agentic.agent.output import AgentOutput, ToolCallRecord
@@ -81,6 +86,7 @@ class Agent:
         context: ExecutionContext | None = None,
         tools: dict[str, ToolDefinition] | None = None,
         max_steps: int = 25,
+        fallback_model: str | None = None,
     ) -> AgentOutput:
         """
         Execute the agent with the given input using a ReAct loop.
@@ -214,7 +220,70 @@ class Agent:
                     call_kwargs["tools"] = step_tools
 
                 # Call LLM
-                response = litellm.completion(**call_kwargs)
+                try:
+                    response = litellm.completion(**call_kwargs)
+                except Exception as llm_error:
+                    error_type = classify_error(llm_error)
+
+                    # Recovery: model fallback on rate limit
+                    if (
+                        error_type == "rate_limit"
+                        and fallback_model
+                        and state.current_model != fallback_model
+                    ):
+                        context.emit_event(
+                            {
+                                "type": "model_fallback",
+                                "step": step,
+                                "from": state.current_model,
+                                "to": fallback_model,
+                            }
+                        )
+                        state = state.with_fallback_model(fallback_model)
+                        continue
+
+                    # Recovery: reactive compact on prompt too long
+                    if (
+                        error_type == "prompt_too_long"
+                        and not state.has_attempted_compact
+                        and state.compact_failure_count < 3
+                    ):
+                        context.emit_event({"type": "reactive_compact", "step": step})
+                        try:
+                            pruned = prune_messages(list(state.messages))
+                            compacted = compact_messages(pruned)
+                            state = state.recover(
+                                messages=compacted,
+                                reason="reactive_compact",
+                                has_attempted_compact=True,
+                            )
+                            continue
+                        except Exception:
+                            state = state.recover(
+                                messages=state.messages,
+                                reason="compact_failed",
+                                compact_failure_count=state.compact_failure_count + 1,
+                            )
+
+                    # Recovery: model fallback on server error
+                    if (
+                        error_type == "model_error"
+                        and fallback_model
+                        and state.current_model != fallback_model
+                    ):
+                        context.emit_event(
+                            {
+                                "type": "model_fallback",
+                                "step": step,
+                                "from": state.current_model,
+                                "to": fallback_model,
+                            }
+                        )
+                        state = state.with_fallback_model(fallback_model)
+                        continue
+
+                    # Unrecoverable — re-raise to outer exception handler
+                    raise
 
                 # Accumulate usage
                 step_usage = self._extract_usage(response)
@@ -277,6 +346,31 @@ class Agent:
 
                 # ===== PHASE 3: DECISION =====
                 if finish_reason == "stop" or not has_tool_calls or is_last_step:
+                    # Check for truncated output (finish_reason = "length" or "max_tokens")
+                    output_issue = classify_finish_reason(finish_reason)
+                    if output_issue == "max_output_tokens" and not is_last_step:
+                        if state.output_recovery_count < 3:
+                            recovery_msg = {
+                                "role": "user",
+                                "content": (
+                                    "Your output was truncated. Continue exactly "
+                                    "where you left off — no recap, no apology."
+                                ),
+                                "_injected": True,
+                            }
+                            context.emit_event(
+                                {
+                                    "type": "output_recovery",
+                                    "step": step,
+                                    "attempt": state.output_recovery_count + 1,
+                                }
+                            )
+                            state = state.with_output_recovery(
+                                messages=working_messages + [recovery_msg]
+                            )
+                            continue
+                        # 3 attempts exhausted — return partial content (fall through)
+
                     # Emit step_completed before returning
                     context.emit_event(
                         {
