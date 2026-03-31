@@ -1,6 +1,12 @@
 import pytest
 
-from agentic.agent.tools import BuiltinTool, CustomTool, ToolDefinition
+from agentic.agent.tools import (
+    BuiltinTool,
+    CustomTool,
+    DelegateTool,
+    KnowledgeSearchTool,
+    ToolDefinition,
+)
 
 
 class TestToolDefinition:
@@ -184,3 +190,65 @@ class TestKnowledgeSearchTool:
         params = schema["function"]["parameters"]
         assert "knowledge_base_names" in params["properties"]
         assert params["properties"]["knowledge_base_names"]["type"] == "array"
+
+
+class TestToolMetadataFlags:
+    def test_tool_definition_defaults_fail_closed(self):
+        tool = ToolDefinition(name="t", description="", input_schema={})
+        assert tool.is_concurrency_safe is False
+        assert tool.is_read_only is False
+        assert tool.is_destructive is False
+        assert tool.max_result_chars == 50000
+
+    def test_builtin_inherits_defaults(self):
+        tool = BuiltinTool(
+            name="t", description="", input_schema={}, handler=lambda a, c: ""
+        )
+        assert tool.is_concurrency_safe is False
+
+    def test_builtin_override_flags(self):
+        tool = BuiltinTool(
+            name="db",
+            description="",
+            input_schema={},
+            handler=lambda a, c: "",
+            is_concurrency_safe=True,
+            is_read_only=True,
+        )
+        assert tool.is_concurrency_safe is True
+        assert tool.is_read_only is True
+
+    def test_custom_tool_override_flags(self):
+        tool = CustomTool(
+            name="api",
+            description="",
+            input_schema={},
+            endpoint="",
+            is_concurrency_safe=True,
+            is_destructive=True,
+        )
+        assert tool.is_concurrency_safe is True
+        assert tool.is_destructive is True
+
+    def test_knowledge_search_defaults(self):
+        tool = KnowledgeSearchTool(name="search", description="")
+        assert tool.is_concurrency_safe is True
+        assert tool.is_read_only is True
+        assert tool.max_result_chars is None
+
+    def test_delegate_defaults(self):
+        from unittest.mock import MagicMock
+
+        tool = DelegateTool(name="d", description="", agent=MagicMock())
+        assert tool.is_concurrency_safe is False
+        assert tool.max_result_chars is None
+
+    def test_max_result_chars_on_builtin(self):
+        tool = BuiltinTool(
+            name="t",
+            description="",
+            input_schema={},
+            handler=lambda a, c: "",
+            max_result_chars=1000,
+        )
+        assert tool.max_result_chars == 1000

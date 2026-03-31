@@ -22,6 +22,12 @@ class ToolDefinition:
     description: str
     input_schema: dict[str, Any]
 
+    # Execution metadata (fail-closed defaults)
+    is_concurrency_safe: bool = False  # Safe to run in parallel?
+    is_read_only: bool = False  # Does not modify state?
+    is_destructive: bool = False  # Irreversible action?
+    max_result_chars: int | None = 50000  # None = unlimited
+
     def execute(
         self, arguments: dict[str, Any], context: ExecutionContext | None
     ) -> str:
@@ -88,6 +94,12 @@ class KnowledgeSearchTool(ToolDefinition):
     # Override parent's required input_schema with a default so callers can omit it.
     # __post_init__ auto-generates the schema when an empty dict is passed.
     input_schema: dict[str, Any] = field(default_factory=dict)
+
+    # Metadata overrides: knowledge search is safe to parallelise and read-only
+    is_concurrency_safe: bool = True
+    is_read_only: bool = True
+    max_result_chars: int | None = None  # Unlimited
+
     knowledge_base_configs: list[dict[str, Any]] = field(default_factory=list)
     max_context_tokens: int = 8000
     include_kb_filter: bool = False
@@ -142,6 +154,10 @@ class DelegateTool(ToolDefinition):
 
     # Override parent's input_schema with auto-generated default
     input_schema: dict[str, Any] = field(default_factory=dict)
+
+    # Metadata override: delegate results can be arbitrarily large
+    max_result_chars: int | None = None  # Unlimited
+
     agent: Any = field(
         default=None, repr=False
     )  # Agent instance (Any to avoid circular import)
