@@ -10,6 +10,7 @@ from agentic.workflow.blocks.function import (
     _PIP_TO_IMPORT,
     _load_custom_packages,
     _load_imports,
+    _parse_imports_from_code,
     _parse_package_specs,
 )
 
@@ -71,13 +72,14 @@ class TestFunctionBlockImports:
         assert result.data["output"] == '{"a": 1}'
 
     @pytest.mark.asyncio
-    async def test_execute_with_no_imports_key_uses_legacy(self):
+    async def test_execute_with_no_imports_key_parses_code(self):
+        """When no 'imports' key is present, imports are parsed from the code."""
         from agentic.workflow.block import BlockInput
         from agentic.workflow.blocks.function import FunctionBlock
 
         block = FunctionBlock(
             config={
-                "code": "output = type(np).__name__",
+                "code": "import numpy as np\noutput = type(np).__name__",
             },
         )
         result = await block.execute(BlockInput(block_outputs={}))
@@ -189,6 +191,212 @@ class TestCustomPackages:
                 "code": "output = json.dumps({'pi': round(math.pi, 2)})",
                 "imports": ["math"],
                 "custom_packages": "json",
+            },
+        )
+        result = await block.execute(BlockInput(block_outputs={}))
+        assert result.data["output"] == '{"pi": 3.14}'
+
+
+class TestParseImportsFromCode:
+    def test_simple_import(self):
+        registry, custom = _parse_imports_from_code("import json\nimport math")
+        assert "json" in registry
+        assert "math" in registry
+        assert custom == []
+
+    def test_from_import(self):
+        registry, custom = _parse_imports_from_code("from datetime import timedelta")
+        assert "datetime" in registry
+        assert custom == []
+
+    def test_aliased_import(self):
+        registry, custom = _parse_imports_from_code("import numpy as np")
+        assert "numpy" in registry
+        assert custom == []
+
+    def test_multi_import(self):
+        registry, custom = _parse_imports_from_code("import json, math, re")
+        assert "json" in registry
+        assert "math" in registry
+        assert "re" in registry
+
+    def test_custom_module(self):
+        registry, custom = _parse_imports_from_code("import openai")
+        assert registry == []
+        assert "openai" in custom
+
+    def test_mixed_registry_and_custom(self):
+        code = "import json\nimport openai\nfrom datetime import date"
+        registry, custom = _parse_imports_from_code(code)
+        assert "json" in registry
+        assert "datetime" in registry
+        assert "openai" in custom
+
+    def test_dotted_import_uses_root(self):
+        registry, custom = _parse_imports_from_code("from urllib.parse import urlparse")
+        assert "urllib" in registry
+        assert custom == []
+
+    def test_empty_code(self):
+        registry, custom = _parse_imports_from_code("")
+        assert registry == []
+        assert custom == []
+
+    def test_no_imports(self):
+        registry, custom = _parse_imports_from_code("output = 42")
+        assert registry == []
+        assert custom == []
+
+    def test_import_in_comment_ignored(self):
+        # Regex only matches lines starting with import/from (possibly indented)
+        # A comment like "# import os" won't match because of the #
+        registry, custom = _parse_imports_from_code("# import os\noutput = 1")
+        assert registry == []
+        assert custom == []
+
+
+class TestFunctionBlockInputDataIsolation:
+    @pytest.mark.asyncio
+    async def test_input_data_is_deep_copy_of_block_outputs(self):
+        """input_data in the sandbox must be a deep copy, not a reference
+        to block_outputs, to prevent circular references when user code
+        stores input_data in its output."""
+        from agentic.workflow.block import BlockInput
+        from agentic.workflow.blocks.function import FunctionBlock
+
+        original_outputs = {"b1": {"output": "hello"}}
+        block = FunctionBlock(
+            config={
+                "code": (
+                    "# Store input_data in output — should NOT create circular ref\n"
+                    "output = {'received': input_data}\n"
+                ),
+            },
+        )
+        block_input = BlockInput(block_outputs=original_outputs)
+        result = await block.execute(block_input)
+
+        received = result.data["output"]["received"]
+        # Must contain the same data
+        assert received == original_outputs
+        # Must NOT be the same object (deep copy)
+        assert received is not original_outputs
+        assert received["b1"] is not original_outputs["b1"]
+
+
+class TestCodeParsedImportExecution:
+    @pytest.mark.asyncio
+    async def test_import_json_in_code(self):
+        from agentic.workflow.block import BlockInput
+        from agentic.workflow.blocks.function import FunctionBlock
+
+        block = FunctionBlock(
+            config={
+                "code": 'import json\noutput = json.dumps({"a": 1})',
+            },
+        )
+        result = await block.execute(BlockInput(block_outputs={}))
+        assert result.data["output"] == '{"a": 1}'
+
+    @pytest.mark.asyncio
+    async def test_from_datetime_import(self):
+        from agentic.workflow.block import BlockInput
+        from agentic.workflow.blocks.function import FunctionBlock
+
+        block = FunctionBlock(
+            config={
+                "code": "from datetime import date\noutput = str(date(2024, 1, 1))",
+            },
+        )
+        result = await block.execute(BlockInput(block_outputs={}))
+        assert result.data["output"] == "2024-01-01"
+
+    @pytest.mark.asyncio
+    async def test_import_numpy_as_np(self):
+        from agentic.workflow.block import BlockInput
+        from agentic.workflow.blocks.function import FunctionBlock
+
+        block = FunctionBlock(
+            config={
+                "code": "import numpy as np\noutput = float(np.mean([1, 2, 3]))",
+            },
+        )
+        result = await block.execute(BlockInput(block_outputs={}))
+        assert result.data["output"] == 2.0
+
+    @pytest.mark.asyncio
+    async def test_import_requests_preinstalled(self):
+        from agentic.workflow.block import BlockInput
+        from agentic.workflow.blocks.function import FunctionBlock
+
+        block = FunctionBlock(
+            config={
+                "code": "import requests\noutput = type(requests).__name__",
+            },
+        )
+        result = await block.execute(BlockInput(block_outputs={}))
+        assert result.data["output"] == "module"
+
+    @pytest.mark.asyncio
+    async def test_disallowed_import_blocked(self):
+        """Importing a module not in the code's import statements is blocked."""
+        from agentic.workflow.block import BlockInput
+        from agentic.workflow.blocks.function import FunctionBlock
+
+        block = FunctionBlock(
+            config={
+                # Code uses subprocess but doesn't import it at top level
+                "code": "import json\nx = __import__('subprocess')\noutput = 1",
+            },
+        )
+        result = await block.execute(BlockInput(block_outputs={}))
+        assert result.status == "error"
+        assert "not allowed" in result.error
+
+    @pytest.mark.asyncio
+    async def test_backward_compat_with_imports_key(self):
+        """Old workflows with explicit 'imports' key still work."""
+        from agentic.workflow.block import BlockInput
+        from agentic.workflow.blocks.function import FunctionBlock
+
+        block = FunctionBlock(
+            config={
+                "code": 'output = json.dumps({"x": 1})',
+                "imports": ["json"],
+            },
+        )
+        result = await block.execute(BlockInput(block_outputs={}))
+        assert result.data["output"] == '{"x": 1}'
+
+    @pytest.mark.asyncio
+    async def test_custom_module_pip_installed(self):
+        """Custom modules not in registry trigger pip install."""
+        from agentic.workflow.block import BlockInput
+        from agentic.workflow.blocks.function import FunctionBlock
+
+        block = FunctionBlock(
+            config={
+                "code": "import some_fake_pkg\noutput = 1",
+            },
+        )
+        with patch(
+            "agentic.workflow.blocks.function._pip_install", return_value=False
+        ) as mock_pip:
+            result = await block.execute(BlockInput(block_outputs={}))
+        mock_pip.assert_called_once_with("some_fake_pkg")
+
+    @pytest.mark.asyncio
+    async def test_multiple_imports_in_code(self):
+        from agentic.workflow.block import BlockInput
+        from agentic.workflow.blocks.function import FunctionBlock
+
+        block = FunctionBlock(
+            config={
+                "code": (
+                    "import json\n"
+                    "import math\n"
+                    "output = json.dumps({'pi': round(math.pi, 2)})"
+                ),
             },
         )
         result = await block.execute(BlockInput(block_outputs={}))

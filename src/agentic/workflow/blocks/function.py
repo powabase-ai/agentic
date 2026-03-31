@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib
 import logging
 import re
@@ -24,6 +25,18 @@ IMPORT_REGISTRY: dict[str, tuple[str, str | None, bool]] = {
     "datetime": ("datetime", None, True),
     "collections": ("collections", None, True),
     "itertools": ("itertools", None, True),
+    "functools": ("functools", None, True),
+    "hashlib": ("hashlib", None, True),
+    "base64": ("base64", None, True),
+    "urllib": ("urllib", None, True),
+    "csv": ("csv", None, True),
+    "io": ("io", None, True),
+    "uuid": ("uuid", None, True),
+    "copy": ("copy", None, True),
+    "string": ("string", None, True),
+    "textwrap": ("textwrap", None, True),
+    "operator": ("operator", None, True),
+    "typing": ("typing", None, True),
     # Third-party
     "numpy": ("numpy", "np", False),
     "pandas": ("pandas", "pd", False),
@@ -32,6 +45,13 @@ IMPORT_REGISTRY: dict[str, tuple[str, str | None, bool]] = {
     "sklearn": ("sklearn", None, False),
     "matplotlib": ("matplotlib", None, False),
     "requests": ("requests", None, False),
+    "httpx": ("httpx", None, False),
+    "pydantic": ("pydantic", None, False),
+    "yaml": ("yaml", None, False),
+    "bs4": ("bs4", None, False),
+    "PIL": ("PIL", None, False),
+    "dateutil": ("dateutil", None, False),
+    "tiktoken": ("tiktoken", None, False),
 }
 
 LEGACY_DEFAULT_IMPORTS = ["numpy", "pandas", "scipy", "seaborn", "sklearn"]
@@ -66,6 +86,39 @@ _PIP_TO_IMPORT: dict[str, str] = {
     "opencv-python": "cv2",
     "python-dateutil": "dateutil",
 }
+
+# Reverse mapping: import name -> pip package name (for auto-install)
+_IMPORT_TO_PIP: dict[str, str] = {v: k for k, v in _PIP_TO_IMPORT.items()}
+
+
+def _parse_imports_from_code(code: str) -> tuple[list[str], list[str]]:
+    """Extract module names from import statements in code.
+
+    Returns (registry_keys, custom_modules) where:
+    - registry_keys: modules found in IMPORT_REGISTRY
+    - custom_modules: everything else (will be imported directly or pip-installed)
+    """
+    import_pattern = re.compile(
+        r"^\s*(?:import\s+([\w.]+(?:\s*,\s*[\w.]+)*)"
+        r"|from\s+([\w.]+)\s+import\s+)",
+        re.MULTILINE,
+    )
+    modules: set[str] = set()
+    for match in import_pattern.finditer(code):
+        if match.group(1):  # import X, Y
+            for name in match.group(1).split(","):
+                modules.add(name.strip().split(".")[0])
+        elif match.group(2):  # from X import ...
+            modules.add(match.group(2).strip().split(".")[0])
+
+    registry_keys = []
+    custom_modules = []
+    for mod in modules:
+        if mod in IMPORT_REGISTRY:
+            registry_keys.append(mod)
+        else:
+            custom_modules.append(mod)
+    return registry_keys, custom_modules
 
 
 def _parse_package_specs(raw: str) -> list[tuple[str, str]]:
@@ -173,26 +226,63 @@ class FunctionBlock(BaseBlock):
         resolved_code = code
 
         # Build sandbox environment
-        sandbox: dict[str, Any] = {"__builtins__": _SAFE_BUILTINS}
+        sandbox: dict[str, Any] = {"__builtins__": dict(_SAFE_BUILTINS)}
         # Expose block outputs as variables
         for block_id, output in block_input.block_outputs.items():
             safe_name = block_id.replace("-", "_")
             sandbox[safe_name] = output
         # Expose input data
-        sandbox["input_data"] = block_input.block_outputs
-        # Load selected imports (fall back to legacy defaults for old workflows)
-        selected = self.config.get("imports")
-        if selected is None:
-            selected = LEGACY_DEFAULT_IMPORTS
-        sandbox.update(_load_imports(selected))
+        sandbox["input_data"] = copy.deepcopy(block_input.block_outputs)
 
-        # Load custom packages (pip-installed on demand)
-        custom_raw = self.config.get("custom_packages", "")
-        if not isinstance(custom_raw, str):
-            logger.warning("custom_packages must be a string, got %s", type(custom_raw).__name__)
-            custom_raw = ""
-        if custom_raw:
-            sandbox.update(_load_custom_packages(custom_raw))
+        # Backward compat: old workflows with explicit imports config
+        selected = self.config.get("imports")
+        if selected is not None:
+            sandbox.update(_load_imports(selected))
+            custom_raw = self.config.get("custom_packages", "")
+            if not isinstance(custom_raw, str):
+                logger.warning(
+                    "custom_packages must be a string, got %s",
+                    type(custom_raw).__name__,
+                )
+                custom_raw = ""
+            if custom_raw:
+                sandbox.update(_load_custom_packages(custom_raw))
+        else:
+            # New behavior: parse imports from code
+            registry_keys, custom_modules = _parse_imports_from_code(code)
+            sandbox.update(_load_imports(registry_keys))
+            if custom_modules:
+                # Map import names to pip names where needed
+                pip_specs = []
+                for mod in custom_modules:
+                    pip_specs.append(_IMPORT_TO_PIP.get(mod, mod))
+                sandbox.update(_load_custom_packages(",".join(pip_specs)))
+
+        # Build a controlled __import__ that only allows modules the user
+        # explicitly imported or that are in the registry / stdlib safe-list.
+        allowed_modules = set(IMPORT_REGISTRY.keys())
+        if selected is None:
+            # Add all parsed imports so user's import statements work in exec
+            allowed_modules.update(registry_keys)
+            allowed_modules.update(custom_modules)
+        else:
+            # Old path: allow whatever was selected + custom packages
+            allowed_modules.update(selected)
+            custom_raw = self.config.get("custom_packages", "")
+            if isinstance(custom_raw, str) and custom_raw.strip():
+                for mod_name, _ in _parse_package_specs(custom_raw):
+                    allowed_modules.add(mod_name.split(".")[0])
+
+        def _controlled_import(name, globals=None, locals=None, fromlist=(), level=0):
+            root = name.split(".")[0]
+            if root not in allowed_modules:
+                raise ImportError(
+                    f"Import of '{name}' is not allowed. "
+                    f"Add it to your import statements at the top of the code."
+                )
+            return importlib.__import__(name, globals, locals, fromlist, level)
+
+        sandbox["__builtins__"]["__import__"] = _controlled_import
 
         try:
             exec(resolved_code, sandbox)  # noqa: S102

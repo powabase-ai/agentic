@@ -11,7 +11,7 @@ from agentic.workflow.variable_resolver import resolve_variable
 
 logger = logging.getLogger(__name__)
 
-_VAR_PATTERN = re.compile(r"<(\w+(?:\.\w+)+)>")
+_VAR_PATTERN = re.compile(r"<([\w -]+\.[\w.]+)>")
 
 
 class ConditionBlock(BaseBlock):
@@ -46,11 +46,14 @@ class ConditionBlock(BaseBlock):
         variables = dict(block_input.block_outputs)
         variables.update(block_input.data)
 
+        branch_diagnostics = []
+
         for idx, branch in enumerate(branches):
             raw_expr = branch.get("expression", "True")
             handle_id = "if" if idx == 0 else f"elif_{idx}"
 
             ref_counter = 0
+            branch_vars = {}
 
             def _replace_ref(match: re.Match) -> str:
                 nonlocal ref_counter
@@ -60,7 +63,9 @@ class ConditionBlock(BaseBlock):
                     return value
                 placeholder = f"_ref_{ref_counter}"
                 ref_counter += 1
-                variables[placeholder] = _coerce_value(value)
+                coerced = _coerce_value(value)
+                variables[placeholder] = coerced
+                branch_vars[placeholder] = coerced
                 return placeholder
 
             resolved = _VAR_PATTERN.sub(_replace_ref, str(raw_expr))
@@ -76,7 +81,22 @@ class ConditionBlock(BaseBlock):
                 result = bool(evaluate_expression(resolved, variables))
             except Exception as e:
                 logger.error("Branch %s eval failed: %s", handle_id, e)
+                branch_diagnostics.append({
+                    "branch": handle_id,
+                    "raw": raw_expr,
+                    "resolved": resolved,
+                    "variables": branch_vars,
+                    "error": str(e),
+                })
                 continue
+
+            branch_diagnostics.append({
+                "branch": handle_id,
+                "raw": raw_expr,
+                "resolved": resolved,
+                "variables": branch_vars,
+                "result": result,
+            })
 
             if result:
                 return BlockOutput(
@@ -84,9 +104,15 @@ class ConditionBlock(BaseBlock):
                         "output": True,
                         "result": handle_id,
                         "route": handle_id,
+                        "_debug": branch_diagnostics,
                     }
                 )
 
         return BlockOutput(
-            data={"output": False, "result": "else", "route": "else"}
+            data={
+                "output": False,
+                "result": "else",
+                "route": "else",
+                "_debug": branch_diagnostics,
+            }
         )
