@@ -130,3 +130,73 @@ class KnowledgeSearchTool(ToolDefinition):
             max_tokens=self.max_context_tokens,
             session_history=session_history,
         )
+
+
+@dataclass
+class DelegateTool(ToolDefinition):
+    """Delegates to a sub-agent, running a nested ReAct loop.
+
+    Used by the orchestration supervisor to invoke specialist agents.
+    The delegate creates a child ExecutionContext and calls agent.run().
+    """
+
+    # Override parent's input_schema with auto-generated default
+    input_schema: dict[str, Any] = field(default_factory=dict)
+    agent: Any = field(
+        default=None, repr=False
+    )  # Agent instance (Any to avoid circular import)
+    agent_tools: dict[str, ToolDefinition] = field(default_factory=dict)
+    max_steps: int = 10
+
+    def __post_init__(self):
+        if not self.input_schema:
+            self.input_schema = {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "What you need this agent to do",
+                    },
+                },
+                "required": ["task"],
+            }
+
+    def execute(
+        self, arguments: dict[str, Any], context: ExecutionContext | None
+    ) -> str:
+        if context is None:
+            from agentic.execution.context import ExecutionContext as EC
+
+            context = EC()
+
+        # Create child context (raises MaxDepthExceeded if at limit)
+        child_ctx = context.child_context()
+
+        context.emit_event(
+            {
+                "type": "delegation_started",
+                "agent": self.agent.name if self.agent else self.name,
+                "task": arguments.get("task", ""),
+                "child_execution_id": child_ctx.execution_id,
+            }
+        )
+
+        output = self.agent.run(
+            input=arguments["task"],
+            context=child_ctx,
+            tools=self.agent_tools if self.agent_tools else None,
+            max_steps=self.max_steps,
+        )
+
+        context.emit_event(
+            {
+                "type": "delegation_completed",
+                "agent": self.agent.name if self.agent else self.name,
+                "child_execution_id": child_ctx.execution_id,
+                "status": output.status.value,
+                "steps": output.steps,
+                "usage": output.usage,
+            }
+        )
+
+        return output.content or output.error or ""

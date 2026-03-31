@@ -37,6 +37,7 @@ from agentic.agent import Agent, AgentOutput, AgentSession, ToolCallRecord
 from agentic.agent.tools import (
     BuiltinTool,
     CustomTool,
+    DelegateTool,
     KnowledgeSearchTool,
     ToolDefinition,
 )
@@ -96,6 +97,7 @@ __all__ = [
     "ToolDefinition",
     "BuiltinTool",
     "CustomTool",
+    "DelegateTool",
     "KnowledgeSearchTool",
     # Orchestration (placeholder)
     "Orchestration",

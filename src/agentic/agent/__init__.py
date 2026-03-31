@@ -13,6 +13,7 @@ from agentic.agent.session import AgentSession
 from agentic.agent.tools import (
     BuiltinTool,
     CustomTool,
+    DelegateTool,
     KnowledgeSearchTool,
     ToolDefinition,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "AgentSession",
     "BuiltinTool",
     "CustomTool",
+    "DelegateTool",
     "KnowledgeSearchTool",
     "ToolCallRecord",
     "ToolDefinition",
