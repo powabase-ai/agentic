@@ -2,20 +2,23 @@
 Agent - single LLM-powered agent definition and execution.
 """
 
+import json
 import logging
+import time
 from collections.abc import AsyncGenerator, Generator
 from datetime import datetime
 from typing import Any
 
 import litellm
 
-logger = logging.getLogger(__name__)
-
-from agentic.agent.output import AgentOutput
+from agentic.agent.output import AgentOutput, ToolCallRecord
 from agentic.agent.session import AgentSession
+from agentic.agent.tools import ToolDefinition
 from agentic.execution.context import ExecutionContext
 from agentic.execution.status import ExecutionStatus
 from agentic.knowledge.model_config import AGENT_DEFAULT_MODEL
+
+logger = logging.getLogger(__name__)
 
 
 class Agent:
@@ -72,9 +75,17 @@ class Agent:
         input: str | list[dict[str, Any]],
         session: AgentSession | None = None,
         context: ExecutionContext | None = None,
+        tools: dict[str, ToolDefinition] | None = None,
+        max_steps: int = 25,
     ) -> AgentOutput:
         """
-        Execute the agent with the given input.
+        Execute the agent with the given input using a ReAct loop.
+
+        When tools are provided, the agent enters a ReAct (Reason + Act) loop:
+        the LLM can request tool calls, receive results, and iterate until it
+        produces a final text response or hits the max step limit.
+
+        Without tools, behaves identically to a single LLM call (backward compat).
 
         Args:
             input: The user input. Can be a string or a list of message dicts
@@ -83,6 +94,10 @@ class Agent:
                      previous messages from the session will be included.
             context: Optional execution context. If not provided, a new one
                      will be created with a generated execution_id.
+            tools: Optional dict of tool name -> ToolDefinition for the agent
+                   to use during execution.
+            max_steps: Maximum number of LLM calls before forcing a text-only
+                       response. Default: 25.
 
         Returns:
             AgentOutput containing the response and execution metadata.
@@ -92,13 +107,10 @@ class Agent:
             >>> print(output.content)
             "Hello! How can I help you today?"
 
-            >>> # Multi-turn conversation
-            >>> session = AgentSession()
-            >>> output1 = agent.run("My name is Alice", session=session)
-            >>> session.add_output(output1)
-            >>> output2 = agent.run("What's my name?", session=session)
-            >>> print(output2.content)
-            "Your name is Alice."
+            >>> # With tools
+            >>> from agentic.agent.tools import BuiltinTool
+            >>> tool = BuiltinTool(name="get_time", ...)
+            >>> output = agent.run("What time?", tools={"get_time": tool})
         """
         # Create execution context if not provided
         if context is None:
@@ -112,21 +124,182 @@ class Agent:
             # Build messages list
             messages = self._build_messages(input, session)
 
-            # Call LLM via litellm
-            response = litellm.completion(
-                model=self.model,
-                messages=messages,
-                num_retries=3,
-            )
+            # Convert tools to LiteLLM function schemas
+            tool_schemas = None
+            if tools:
+                tool_schemas = [t.to_function_schema() for t in tools.values()]
 
-            # Extract response content
-            content = response.choices[0].message.content
+            # Track loop state
+            step = 0
+            all_tool_calls: list[ToolCallRecord] = []
+            total_usage: dict[str, int] = {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            }
+            # For doom loop detection: list of (tool_name, arguments_str) tuples
+            recent_calls: list[tuple[str, str]] = []
 
-            # Extract usage (including extended token details)
-            usage = self._extract_usage(response)
+            while True:
+                step += 1
+                is_last_step = step >= max_steps
 
-            # Add assistant message to messages list
-            messages.append({"role": "assistant", "content": content})
+                # Emit step_started event
+                context.emit_event(
+                    {"type": "step_started", "step": step, "is_last_step": is_last_step}
+                )
+
+                # On last step, don't pass tools to force a text-only response
+                step_tools = None if is_last_step else tool_schemas
+
+                # Build call kwargs
+                call_kwargs: dict[str, Any] = {
+                    "model": self.model,
+                    "messages": messages,
+                    "num_retries": 3,
+                    "stream": False,
+                }
+                if step_tools:
+                    call_kwargs["tools"] = step_tools
+
+                # Call LLM
+                response = litellm.completion(**call_kwargs)
+
+                # Accumulate usage
+                step_usage = self._extract_usage(response)
+                if step_usage:
+                    for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                        total_usage[k] += step_usage.get(k, 0)
+
+                assistant_msg = response.choices[0].message
+                finish_reason = response.choices[0].finish_reason
+
+                # Determine if the LLM requested tool calls
+                has_tool_calls = (
+                    tools
+                    and assistant_msg.tool_calls
+                    and isinstance(assistant_msg.tool_calls, list)
+                    and len(assistant_msg.tool_calls) > 0
+                )
+
+                # Append assistant message to conversation
+                msg_dict: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": assistant_msg.content,
+                }
+                if has_tool_calls:
+                    msg_dict["tool_calls"] = [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in assistant_msg.tool_calls
+                    ]
+                messages.append(msg_dict)
+
+                # Emit step_completed event
+                context.emit_event(
+                    {
+                        "type": "step_completed",
+                        "step": step,
+                        "finish_reason": finish_reason,
+                        "has_tool_calls": has_tool_calls,
+                    }
+                )
+
+                # Check if we should stop: no tools provided, text response,
+                # no tool calls, or last step
+                if finish_reason == "stop" or not has_tool_calls or is_last_step:
+                    break
+
+                # Execute each tool call
+                for tc in assistant_msg.tool_calls:
+                    tool_name = tc.function.name
+                    arguments_str = tc.function.arguments
+                    try:
+                        arguments = json.loads(arguments_str) if arguments_str else {}
+                    except json.JSONDecodeError:
+                        arguments = {}
+
+                    # Emit tool_call event
+                    context.emit_event(
+                        {
+                            "type": "tool_call",
+                            "step": step,
+                            "tool_name": tool_name,
+                            "arguments": arguments,
+                            "call_id": tc.id,
+                        }
+                    )
+
+                    # Execute tool
+                    tool_start = time.monotonic()
+                    tool_def = tools.get(tool_name) if tools else None
+                    if tool_def:
+                        try:
+                            result = tool_def.execute(arguments, context)
+                        except Exception as tool_err:
+                            result = f"Error: {tool_err}"
+                    else:
+                        result = f"Error: Unknown tool '{tool_name}'"
+                    tool_duration_ms = int((time.monotonic() - tool_start) * 1000)
+
+                    # Record tool call
+                    record = ToolCallRecord(
+                        step=step,
+                        tool_name=tool_name,
+                        arguments=arguments,
+                        result=result,
+                        duration_ms=tool_duration_ms,
+                    )
+                    all_tool_calls.append(record)
+
+                    # Emit tool_result event
+                    context.emit_event(
+                        {
+                            "type": "tool_result",
+                            "step": step,
+                            "tool_name": tool_name,
+                            "call_id": tc.id,
+                            "result_preview": result[:200] if result else "",
+                            "duration_ms": tool_duration_ms,
+                        }
+                    )
+
+                    # Append tool result message for next LLM call
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": result,
+                        }
+                    )
+
+                    # Doom loop detection: track recent calls
+                    recent_calls.append((tool_name, arguments_str))
+
+                # Check for doom loop: last 3 calls identical
+                if len(recent_calls) >= 3:
+                    last_three = recent_calls[-3:]
+                    if last_three[0] == last_three[1] == last_three[2]:
+                        return AgentOutput(
+                            execution_id=context.execution_id,
+                            status=ExecutionStatus.FAILED,
+                            started_at=started_at,
+                            completed_at=datetime.now(),
+                            error="Doom loop detected: 3 identical tool calls in a row",
+                            messages=messages,
+                            usage=total_usage,
+                            steps=step,
+                            tool_calls=all_tool_calls,
+                        )
+
+            # Build final output
+            content = assistant_msg.content
 
             return AgentOutput(
                 execution_id=context.execution_id,
@@ -135,7 +308,9 @@ class Agent:
                 completed_at=datetime.now(),
                 content=content,
                 messages=messages,
-                usage=usage,
+                usage=total_usage,
+                steps=step,
+                tool_calls=all_tool_calls,
             )
 
         except Exception as e:
