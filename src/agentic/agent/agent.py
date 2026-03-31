@@ -141,6 +141,8 @@ class Agent:
             }
             # For doom loop detection: list of (tool_name, arguments_str) tuples
             recent_calls: list[tuple[str, str]] = []
+            # Budget exhaustion flag (set when budget is exceeded mid-loop)
+            budget_exhausted = False
 
             # Wrap on_event to also collect into local list
             original_on_event = context.on_event
@@ -154,7 +156,7 @@ class Agent:
 
             while True:
                 step += 1
-                is_last_step = step >= max_steps
+                is_last_step = step >= max_steps or budget_exhausted
 
                 # Emit step_started event
                 context.emit_event(
@@ -182,6 +184,23 @@ class Agent:
                 if step_usage:
                     for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
                         total_usage[k] += step_usage.get(k, 0)
+
+                # Budget enforcement: consume tokens and check limits
+                if context.budget and step_usage:
+                    context.budget.consume(step_usage.get("total_tokens", 0))
+                    if context.budget.exceeded:
+                        budget_exhausted = True
+                    elif context.budget.remaining < (context.budget.max_tokens * 0.15):
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": (
+                                    f"BUDGET WARNING: You have approximately "
+                                    f"{context.budget.remaining} tokens remaining. "
+                                    "Wrap up your work efficiently. Avoid unnecessary tool calls."
+                                ),
+                            }
+                        )
 
                 assistant_msg = response.choices[0].message
                 finish_reason = response.choices[0].finish_reason
