@@ -149,6 +149,31 @@ class KnowledgeSearchTool(ToolDefinition):
 
 
 @dataclass
+class McpTool(ToolDefinition):
+    """Tool backed by an MCP server."""
+
+    input_schema: dict[str, Any] = field(default_factory=dict)
+    server_name: str = ""
+    server_url: str = ""
+    server_headers: dict[str, str] = field(default_factory=dict)
+    transport: str = "http"
+    mcp_tool_name: str = ""
+
+    def execute(
+        self, arguments: dict[str, Any], context: ExecutionContext | None
+    ) -> str:
+        from agentic.mcp.client import call_mcp_tool
+
+        return call_mcp_tool(
+            server_url=self.server_url,
+            server_headers=self.server_headers,
+            tool_name=self.mcp_tool_name,
+            arguments=arguments,
+            timeout=30,
+        )
+
+
+@dataclass
 class DelegateTool(ToolDefinition):
     """Delegates to a sub-agent, running a nested ReAct loop.
 

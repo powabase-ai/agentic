@@ -39,6 +39,7 @@ from agentic.agent.tools import (
     CustomTool,
     DelegateTool,
     KnowledgeSearchTool,
+    McpTool,
     ToolDefinition,
 )
 
@@ -103,6 +104,7 @@ __all__ = [
     "CustomTool",
     "DelegateTool",
     "KnowledgeSearchTool",
+    "McpTool",
     # Orchestration
     "Orchestration",
     "OrchestrationEntity",
