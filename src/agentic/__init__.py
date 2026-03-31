@@ -75,11 +75,15 @@ from agentic.knowledge import (
     RetrievedItem,
 )
 
-# Orchestration module - placeholder
+# Orchestration module
 from agentic.orchestration import (
     Orchestration,
+    OrchestrationEntity,
     OrchestrationOutput,
     OrchestrationSession,
+    StrategyEngine,
+    SupervisorEngine,
+    get_strategy_engine,
 )
 
 # Workflow module - placeholder
@@ -99,10 +103,14 @@ __all__ = [
     "CustomTool",
     "DelegateTool",
     "KnowledgeSearchTool",
-    # Orchestration (placeholder)
+    # Orchestration
     "Orchestration",
+    "OrchestrationEntity",
     "OrchestrationOutput",
     "OrchestrationSession",
+    "StrategyEngine",
+    "SupervisorEngine",
+    "get_strategy_engine",
     # Workflow (placeholder)
     "Workflow",
     "WorkflowOutput",
