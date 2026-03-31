@@ -1,7 +1,12 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from agentic.agent.compaction import compact_messages, estimate_token_count
+from agentic.agent.compaction import (
+    compact_messages,
+    estimate_token_count,
+    get_context_threshold,
+    prune_messages,
+)
 
 
 class TestEstimateTokenCount:
@@ -110,3 +115,109 @@ class TestCompactMessages:
 
         result = compact_messages(messages, keep_last_n=2)
         assert result == messages  # Fallback to original on error
+
+
+class TestPruneMessages:
+    def test_prune_removes_old_tool_results(self):
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "q1"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "tc1",
+                        "type": "function",
+                        "function": {"name": "search", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "tc1", "content": "x" * 10000},
+            {"role": "assistant", "content": "answer 1"},
+            {"role": "user", "content": "q2"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "tc2",
+                        "type": "function",
+                        "function": {"name": "search", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "tc2", "content": "y" * 10000},
+            {"role": "assistant", "content": "answer 2"},
+        ]
+        pruned = prune_messages(messages, keep_last_n_turns=1)
+        tc1_result = next(m for m in pruned if m.get("tool_call_id") == "tc1")
+        assert "[Previous tool result removed" in tc1_result["content"]
+        assert len(tc1_result["content"]) < 100
+        tc2_result = next(m for m in pruned if m.get("tool_call_id") == "tc2")
+        assert tc2_result["content"] == "y" * 10000
+
+    def test_prune_preserves_system_message(self):
+        messages = [
+            {"role": "system", "content": "System prompt."},
+            {"role": "user", "content": "q1"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "tc1",
+                        "type": "function",
+                        "function": {"name": "t", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "tc1", "content": "big result"},
+            {"role": "assistant", "content": "done"},
+        ]
+        pruned = prune_messages(messages, keep_last_n_turns=0)
+        assert pruned[0]["role"] == "system"
+        assert pruned[0]["content"] == "System prompt."
+
+    def test_prune_preserves_user_and_assistant(self):
+        messages = [
+            {"role": "user", "content": "hello"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "tc1",
+                        "type": "function",
+                        "function": {"name": "t", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "tc1", "content": "result"},
+            {"role": "assistant", "content": "world"},
+        ]
+        pruned = prune_messages(messages, keep_last_n_turns=0)
+        user_msgs = [m for m in pruned if m["role"] == "user"]
+        assistant_msgs = [m for m in pruned if m["role"] == "assistant"]
+        assert len(user_msgs) == 1
+        assert len(assistant_msgs) == 2
+
+    def test_prune_no_tool_results_unchanged(self):
+        messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]
+        pruned = prune_messages(messages, keep_last_n_turns=1)
+        assert pruned == messages
+
+
+class TestGetContextThreshold:
+    def test_returns_threshold(self):
+        threshold = get_context_threshold("claude-sonnet-4-6")
+        assert isinstance(threshold, int)
+        assert threshold > 0
+
+    def test_default_for_unknown_model(self):
+        threshold = get_context_threshold("unknown-model-xyz")
+        assert isinstance(threshold, int)
+        assert threshold > 0
