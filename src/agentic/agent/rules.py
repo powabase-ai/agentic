@@ -62,7 +62,14 @@ def _check_positive(op: str, field_value: str, value: str) -> bool:
     if op == "STARTS_WITH":
         return field_value.startswith(value)
     if op == "MATCHES":
-        return bool(re.search(value, field_value))
+        if len(value) > 500:  # Reject overly complex patterns
+            return False
+        try:
+            pattern = re.compile(value, re.DOTALL)
+            # Use fullmatch with a simpler approach to limit backtracking
+            return bool(pattern.search(field_value[:10000]))  # Limit input length too
+        except re.error:
+            return False
     if op == "IN":
         try:
             # Support both JSON-style ["a", "b"] and Python-style ['a', 'b']

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import logging
 from typing import Any
 
@@ -10,13 +11,11 @@ import requests
 from agentic.mcp.types import McpToolInfo
 
 logger = logging.getLogger(__name__)
-_request_id = 0
+_request_id_counter = itertools.count(1)
 
 
 def _next_id() -> int:
-    global _request_id
-    _request_id += 1
-    return _request_id
+    return next(_request_id_counter)
 
 
 def _jsonrpc_request(method: str, params: dict | None = None) -> dict:

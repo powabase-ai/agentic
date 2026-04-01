@@ -115,6 +115,56 @@ class TestEvaluateRules:
         allowed, reason = evaluate_rules({"query": "anything"}, [])
         assert allowed is True
 
+    def test_matches_overly_long_pattern_rejected(self):
+        """Regex patterns longer than 500 chars should be rejected without executing."""
+        long_pattern = "a" * 501
+        rules = [
+            {
+                "condition": f"query MATCHES '{long_pattern}'",
+                "action": "deny",
+                "message": "Long",
+            }
+        ]
+        import time
+
+        start = time.monotonic()
+        allowed, _ = evaluate_rules({"query": "a" * 1000}, rules)
+        elapsed = time.monotonic() - start
+        assert allowed is True  # Rejected before execution
+        assert elapsed < 1  # Fast rejection
+
+    def test_matches_input_length_limit(self):
+        """Input longer than 10000 chars is truncated to prevent slow matching."""
+        # A pattern that only matches at position 10001+ would not match the truncated input
+        rules = [
+            {
+                "condition": "query MATCHES 'NEEDLE'",
+                "action": "deny",
+                "message": "Found",
+            }
+        ]
+        # NEEDLE at position 10001 should not be matched (input truncated to 10000)
+        query = "a" * 10001 + "NEEDLE"
+        import time
+
+        start = time.monotonic()
+        allowed, _ = evaluate_rules({"query": query}, rules)
+        elapsed = time.monotonic() - start
+        assert allowed is True  # NEEDLE beyond truncation point — not matched
+        assert elapsed < 2
+
+    def test_matches_invalid_regex(self):
+        """Invalid regex should not crash."""
+        rules = [
+            {
+                "condition": "query MATCHES '[invalid'",
+                "action": "deny",
+                "message": "Bad",
+            }
+        ]
+        allowed, _ = evaluate_rules({"query": "test"}, rules)
+        assert allowed is True  # Invalid regex doesn't match
+
     def test_first_deny_wins(self):
         rules = [
             {

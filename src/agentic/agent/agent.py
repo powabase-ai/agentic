@@ -16,6 +16,7 @@ from agentic.agent.cache import sort_tools_for_cache
 from agentic.agent.compaction import (
     compact_messages,
     estimate_token_count,
+    get_context_threshold,
     prune_messages,
 )
 from agentic.agent.errors import classify_error, classify_finish_reason
@@ -203,6 +204,26 @@ class Agent:
                     list(state.messages), available_tool_names
                 )
 
+                # Proactive context management — prune/compact before LLM call if near threshold
+                token_estimate = estimate_token_count(normalized)
+                threshold = get_context_threshold(state.current_model)
+                if token_estimate > threshold:
+                    pruned = prune_messages(normalized)
+                    if estimate_token_count(pruned) > threshold:
+                        if state.compact_failure_count < 3:
+                            try:
+                                pruned = compact_messages(pruned)
+                            except Exception:
+                                logger.warning("Proactive compaction failed")
+                    normalized = pruned
+                    context.emit_event(
+                        {
+                            "type": "proactive_compact",
+                            "step": step,
+                            "tokens_before": token_estimate,
+                        }
+                    )
+
                 # Emit step_started event
                 context.emit_event(
                     {"type": "step_started", "step": step, "is_last_step": is_last_step}
@@ -259,6 +280,7 @@ class Agent:
                                 messages=compacted,
                                 reason="reactive_compact",
                                 has_attempted_compact=True,
+                                compact_failure_count=0,
                             )
                             continue
                         except Exception:
@@ -471,7 +493,9 @@ class Agent:
                     )
 
                 # Compaction check: summarize history if context is growing large
-                if estimate_token_count(working_messages) > 100000:
+                if estimate_token_count(working_messages) > get_context_threshold(
+                    state.current_model
+                ):
                     context.emit_event(
                         {
                             "type": "compaction",
