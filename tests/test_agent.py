@@ -381,6 +381,80 @@ class TestAgentAstream:
         assert full_content == "Hello World!"
 
 
+class TestToolCallRecord:
+    def test_create(self):
+        from agentic.agent.output import ToolCallRecord
+
+        record = ToolCallRecord(
+            step=1,
+            tool_name="search",
+            arguments={"q": "hello"},
+            result="found it",
+            duration_ms=150,
+        )
+        assert record.step == 1
+        assert record.tool_name == "search"
+        assert record.duration_ms == 150
+
+    def test_to_dict(self):
+        from agentic.agent.output import ToolCallRecord
+
+        record = ToolCallRecord(
+            step=2,
+            tool_name="db",
+            arguments={"sql": "SELECT 1"},
+            result="1",
+            duration_ms=50,
+        )
+        d = record.to_dict()
+        assert d["step"] == 2
+        assert d["tool_name"] == "db"
+        assert d["arguments"] == {"sql": "SELECT 1"}
+
+    def test_to_dict_with_usage(self):
+        from agentic.agent.output import ToolCallRecord
+
+        record = ToolCallRecord(
+            step=1,
+            tool_name="x",
+            arguments={},
+            result="ok",
+            duration_ms=10,
+            usage={"prompt_tokens": 100, "completion_tokens": 50},
+        )
+        d = record.to_dict()
+        assert "usage" in d
+        assert d["usage"]["prompt_tokens"] == 100
+
+    def test_to_dict_without_usage(self):
+        from agentic.agent.output import ToolCallRecord
+
+        record = ToolCallRecord(
+            step=1,
+            tool_name="x",
+            arguments={},
+            result="ok",
+            duration_ms=10,
+        )
+        d = record.to_dict()
+        assert "usage" not in d
+
+
+class TestAgentOutputNewFields:
+    def test_default_values(self):
+        output = AgentOutput(execution_id="test")
+        assert output.steps == 0
+        assert output.tool_calls == []
+        assert output.events == []
+
+    def test_total_usage_aggregation(self):
+        output = AgentOutput(
+            execution_id="test",
+            usage={"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+        )
+        assert output.total_tokens() == 150
+
+
 class TestExecutionStatus:
     """Tests for ExecutionStatus enum."""
 

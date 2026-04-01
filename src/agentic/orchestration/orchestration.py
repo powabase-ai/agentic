@@ -1,56 +1,114 @@
-"""
-Orchestration - multi-agent coordination patterns.
+"""Orchestration - multi-agent coordination patterns."""
 
-Status: Not yet implemented.
-"""
+from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from agentic.agent.agent import Agent
+    from agentic.agent.tools import ToolDefinition
+    from agentic.execution.context import ExecutionContext
+    from agentic.orchestration.output import OrchestrationOutput
+    from agentic.orchestration.session import OrchestrationSession
+
+
+@dataclass
+class OrchestrationEntity:
+    """An entity (agent or tool) participating in an orchestration."""
+
+    entity_type: str  # "agent" or "tool"
+    agent: Agent | None = None
+    tool: ToolDefinition | None = None
+    role_description: str | None = None
+    config: dict[str, Any] = field(default_factory=dict)
+    position: int | None = None
+    agent_tools: dict[str, ToolDefinition] | None = None
 
 
 class Orchestration:
     """
     Multi-agent coordination.
 
-    Orchestration coordinates multiple agents using one of four modes:
-    - Sequential: Agents run one after another, passing output forward
+    Orchestration coordinates multiple agents using a strategy engine:
     - Supervisor: A coordinator agent delegates tasks to specialists
-    - Router: Routes input to a single best agent based on criteria
-    - Parallel: Multiple agents run simultaneously on the same input
 
-    Status: Not yet implemented.
-
-    Planned Example:
+    Example:
         >>> from agentic import Agent, Orchestration
         >>>
         >>> researcher = Agent(name="researcher", ...)
         >>> writer = Agent(name="writer", ...)
         >>>
         >>> orch = Orchestration(
-        ...     mode="sequential",
-        ...     agents=[researcher, writer],
+        ...     name="research_write",
+        ...     description="Research then write",
+        ...     strategy="supervisor",
         ... )
+        >>> orch.add_entity(entity_type="agent", agent=researcher, role_description="...")
+        >>> orch.add_entity(entity_type="agent", agent=writer, role_description="...")
         >>> output = orch.run("Write an article about AI")
-
-    See Also:
-        - docs/CONCEPTS.md for detailed documentation on orchestration modes
     """
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """
-        Initialize an Orchestration.
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        strategy: str = "supervisor",
+        orchestrator_config: dict[str, Any] | None = None,
+        settings: dict[str, Any] | None = None,
+    ) -> None:
+        self.name = name
+        self.description = description
+        self.strategy = strategy
+        self.orchestrator_config: dict[str, Any] = orchestrator_config or {}
+        self.settings: dict[str, Any] = settings or {}
+        self.entities: list[OrchestrationEntity] = []
 
-        Raises:
-            NotImplementedError: Orchestration is not yet implemented.
-        """
-        raise NotImplementedError(
-            "Orchestration is not yet implemented. "
-            "See docs/CONCEPTS.md for planned features and roadmap."
+    def add_entity(
+        self,
+        entity_type: str,
+        agent: Agent | None = None,
+        tool: ToolDefinition | None = None,
+        role_description: str | None = None,
+        config: dict[str, Any] | None = None,
+        position: int | None = None,
+        agent_tools: dict[str, ToolDefinition] | None = None,
+    ) -> None:
+        """Add an agent or tool entity to this orchestration."""
+        entity = OrchestrationEntity(
+            entity_type=entity_type,
+            agent=agent,
+            tool=tool,
+            role_description=role_description,
+            config=config or {},
+            position=position,
+            agent_tools=agent_tools,
         )
+        self.entities.append(entity)
 
-    def run(self, *args: Any, **kwargs: Any) -> Any:
-        """Execute the orchestration. Not yet implemented."""
-        raise NotImplementedError("Orchestration.run() is not yet implemented.")
+    def run(
+        self,
+        input: str,
+        session: OrchestrationSession | None = None,
+        context: ExecutionContext | None = None,
+    ) -> OrchestrationOutput:
+        """Execute the orchestration with the given input."""
+        from agentic.orchestration.engine import get_strategy_engine
 
-    async def arun(self, *args: Any, **kwargs: Any) -> Any:
+        engine = get_strategy_engine(self.strategy)
+        return engine.execute(self, input, session, context)
+
+    async def arun(
+        self,
+        input: str,
+        session: OrchestrationSession | None = None,
+        context: ExecutionContext | None = None,
+    ) -> OrchestrationOutput:
         """Execute the orchestration asynchronously. Not yet implemented."""
         raise NotImplementedError("Orchestration.arun() is not yet implemented.")
+
+    def __repr__(self) -> str:
+        return (
+            f"Orchestration(name={self.name!r}, strategy={self.strategy!r}, "
+            f"entities={len(self.entities)})"
+        )

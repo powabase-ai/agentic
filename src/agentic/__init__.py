@@ -33,10 +33,23 @@ See Also:
 """
 
 # Agent module - fully implemented
-from agentic.agent import Agent, AgentOutput, AgentSession
+from agentic.agent import Agent, AgentOutput, AgentSession, ToolCallRecord
+from agentic.agent.tools import (
+    BuiltinTool,
+    CustomTool,
+    DelegateTool,
+    KnowledgeSearchTool,
+    McpTool,
+    ToolDefinition,
+)
 
 # Execution infrastructure
-from agentic.execution import ExecutionContext, ExecutionStatus
+from agentic.execution import (
+    ExecutionContext,
+    ExecutionStatus,
+    MaxDepthExceeded,
+    TokenBudget,
+)
 
 # Ingest module - content ingestion (connectors & extractors)
 from agentic.ingest import (
@@ -63,11 +76,15 @@ from agentic.knowledge import (
     RetrievedItem,
 )
 
-# Orchestration module - placeholder
+# Orchestration module
 from agentic.orchestration import (
     Orchestration,
+    OrchestrationEntity,
     OrchestrationOutput,
     OrchestrationSession,
+    StrategyEngine,
+    SupervisorEngine,
+    get_strategy_engine,
 )
 
 # Workflow module - placeholder
@@ -80,10 +97,22 @@ __all__ = [
     "Agent",
     "AgentOutput",
     "AgentSession",
-    # Orchestration (placeholder)
+    "ToolCallRecord",
+    # Tools (implemented)
+    "ToolDefinition",
+    "BuiltinTool",
+    "CustomTool",
+    "DelegateTool",
+    "KnowledgeSearchTool",
+    "McpTool",
+    # Orchestration
     "Orchestration",
+    "OrchestrationEntity",
     "OrchestrationOutput",
     "OrchestrationSession",
+    "StrategyEngine",
+    "SupervisorEngine",
+    "get_strategy_engine",
     # Workflow (placeholder)
     "Workflow",
     "WorkflowOutput",
@@ -91,6 +120,8 @@ __all__ = [
     # Execution infrastructure
     "ExecutionContext",
     "ExecutionStatus",
+    "TokenBudget",
+    "MaxDepthExceeded",
     # Knowledge (base classes)
     "KnowledgeStore",
     "IndexingAlgorithm",

@@ -8,11 +8,26 @@ This module provides the core Agent functionality:
 """
 
 from agentic.agent.agent import Agent
-from agentic.agent.output import AgentOutput
+from agentic.agent.output import AgentOutput, ToolCallRecord
 from agentic.agent.session import AgentSession
+from agentic.agent.tools import (
+    BuiltinTool,
+    CustomTool,
+    DelegateTool,
+    KnowledgeSearchTool,
+    McpTool,
+    ToolDefinition,
+)
 
 __all__ = [
     "Agent",
     "AgentOutput",
     "AgentSession",
+    "BuiltinTool",
+    "CustomTool",
+    "DelegateTool",
+    "KnowledgeSearchTool",
+    "McpTool",
+    "ToolCallRecord",
+    "ToolDefinition",
 ]
