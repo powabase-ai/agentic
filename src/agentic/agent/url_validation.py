@@ -12,15 +12,21 @@ class SSRFError(ValueError):
 
 # Private/internal IP ranges that should never be accessed
 _BLOCKED_NETWORKS = [
+    # IPv4
     ipaddress.ip_network("127.0.0.0/8"),  # Loopback
     ipaddress.ip_network("10.0.0.0/8"),  # Private Class A
     ipaddress.ip_network("172.16.0.0/12"),  # Private Class B
     ipaddress.ip_network("192.168.0.0/16"),  # Private Class C
     ipaddress.ip_network("169.254.0.0/16"),  # Link-local (AWS metadata)
     ipaddress.ip_network("0.0.0.0/8"),  # "This" network
+    # IPv6
+    ipaddress.ip_network("::1/128"),  # IPv6 loopback
+    ipaddress.ip_network("fe80::/10"),  # IPv6 link-local
+    ipaddress.ip_network("fc00::/7"),  # IPv6 unique local
+    ipaddress.ip_network("::ffff:0:0/96"),  # IPv4-mapped IPv6
 ]
 
-_BLOCKED_HOSTNAMES = {"localhost", "0.0.0.0"}
+_BLOCKED_HOSTNAMES = {"localhost", "0.0.0.0", "::1"}
 
 _ALLOWED_SCHEMES = {"http", "https"}
 

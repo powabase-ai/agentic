@@ -105,8 +105,8 @@ def _execute_http_hook(
         try:
             validate_url(url)
         except SSRFError as e:
-            logger.warning("Hook URL blocked by SSRF protection: %s", e)
-            return HookResult()  # Fail-open — blocked URL treated as no-op
+            logger.error("Hook URL blocked by SSRF protection: %s", e)
+            return HookResult(blocked=True, message=f"Hook URL blocked: {e}")
 
         response = requests.post(url, json=payload, headers=headers, timeout=timeout)
         if response.status_code == 200:

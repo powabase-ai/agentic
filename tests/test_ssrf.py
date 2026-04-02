@@ -59,3 +59,19 @@ class TestValidateUrl:
     def test_blocks_no_scheme(self):
         with pytest.raises(SSRFError):
             validate_url("example.com/api")
+
+    def test_blocks_ipv6_loopback(self):
+        with pytest.raises(SSRFError, match="internal"):
+            validate_url("http://[::1]/admin")
+
+    def test_blocks_ipv6_link_local(self):
+        with pytest.raises(SSRFError, match="internal"):
+            validate_url("http://[fe80::1]/admin")
+
+    def test_blocks_ipv6_unique_local(self):
+        with pytest.raises(SSRFError, match="internal"):
+            validate_url("http://[fd00::1]/internal")
+
+    def test_blocks_ipv4_mapped_ipv6(self):
+        with pytest.raises(SSRFError, match="internal"):
+            validate_url("http://[::ffff:127.0.0.1]/admin")
