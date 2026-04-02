@@ -100,6 +100,14 @@ def _execute_http_hook(
         payload["output"] = output
 
     try:
+        from agentic.agent.url_validation import SSRFError, validate_url
+
+        try:
+            validate_url(url)
+        except SSRFError as e:
+            logger.warning("Hook URL blocked by SSRF protection: %s", e)
+            return HookResult()  # Fail-open — blocked URL treated as no-op
+
         response = requests.post(url, json=payload, headers=headers, timeout=timeout)
         if response.status_code == 200:
             body = response.json()
