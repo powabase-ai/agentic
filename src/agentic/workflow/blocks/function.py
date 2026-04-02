@@ -6,8 +6,6 @@ import copy
 import importlib
 import logging
 import re
-import subprocess
-import sys
 from typing import Any
 
 from agentic.workflow.block import BaseBlock, BlockInput, BlockOutput
@@ -87,7 +85,7 @@ _PIP_TO_IMPORT: dict[str, str] = {
     "python-dateutil": "dateutil",
 }
 
-# Reverse mapping: import name -> pip package name (for auto-install)
+# Reverse mapping: import name -> pip package name (for name resolution)
 _IMPORT_TO_PIP: dict[str, str] = {v: k for k, v in _PIP_TO_IMPORT.items()}
 
 
@@ -96,7 +94,7 @@ def _parse_imports_from_code(code: str) -> tuple[list[str], list[str]]:
 
     Returns (registry_keys, custom_modules) where:
     - registry_keys: modules found in IMPORT_REGISTRY
-    - custom_modules: everything else (will be imported directly or pip-installed)
+    - custom_modules: everything else (will be imported if pre-installed)
     """
     import_pattern = re.compile(
         r"^\s*(?:import\s+([\w.]+(?:\s*,\s*[\w.]+)*)"
@@ -139,47 +137,24 @@ def _parse_package_specs(raw: str) -> list[tuple[str, str]]:
 
 
 def _pip_install(pip_spec: str) -> bool:
-    """Attempt to pip-install a package. Returns True on success."""
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--quiet", pip_spec],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if result.returncode != 0:
-            logger.warning("pip install %s failed: %s", pip_spec, result.stderr.strip())
-            return False
-        return True
-    except (subprocess.TimeoutExpired, OSError) as e:
-        logger.warning("pip install %s failed: %s", pip_spec, e)
-        return False
+    """Pip install is disabled for security. Always returns False."""
+    logger.warning(
+        "pip install disabled for security — %s must be pre-installed", pip_spec
+    )
+    return False
 
 
 def _load_custom_packages(raw: str) -> dict[str, Any]:
-    """Parse custom_packages string, import (pip-installing if needed)."""
+    """Parse custom_packages string and import pre-installed modules."""
     result: dict[str, Any] = {}
-    for module_name, pip_spec in _parse_package_specs(raw):
-        # Try importing directly first (already installed)
+    for module_name, _pip_spec in _parse_package_specs(raw):
         try:
             mod = importlib.import_module(module_name)
             result[module_name] = mod
-            continue
         except ImportError:
-            pass
-        # Not installed — try pip install then retry
-        if _pip_install(pip_spec):
-            importlib.invalidate_caches()
-            try:
-                mod = importlib.import_module(module_name)
-                result[module_name] = mod
-                continue
-            except ImportError:
-                logger.warning(
-                    "Installed %s but could not import %s", pip_spec, module_name
-                )
-        else:
-            logger.warning("Could not install or import %s", pip_spec)
+            logger.warning(
+                "Package %s is not pre-installed and cannot be used", module_name
+            )
     return result
 
 
@@ -208,12 +183,26 @@ _SAFE_BUILTINS = {
     "str": str,
     "sum": sum,
     "tuple": tuple,
-    "type": type,
     "zip": zip,
     "None": None,
     "True": True,
     "False": False,
 }
+
+
+def _check_dunder_access(code: str) -> str | None:
+    """Reject code containing dunder attribute access.
+
+    Returns None if safe, error message if blocked.
+    Allows dunders inside string literals.
+    """
+    for i, line in enumerate(code.splitlines(), 1):
+        # Strip string literals from the line before checking
+        stripped = re.sub(r"'[^']*'|\"[^\"]*\"", "", line)
+        if re.search(r"__\w+__", stripped):
+            return f"Dunder attribute access is not allowed (line {i})"
+    return None
+
 
 class FunctionBlock(BaseBlock):
     block_type = "code"
@@ -224,6 +213,15 @@ class FunctionBlock(BaseBlock):
             return BlockOutput(data={"output": None})
 
         resolved_code = code
+
+        # Check for dunder attribute access (sandbox escape vector)
+        dunder_error = _check_dunder_access(resolved_code)
+        if dunder_error:
+            return BlockOutput(
+                data={"output": None, "error": dunder_error},
+                status="error",
+                error=dunder_error,
+            )
 
         # Build sandbox environment
         sandbox: dict[str, Any] = {"__builtins__": dict(_SAFE_BUILTINS)}

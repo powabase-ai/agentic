@@ -2,12 +2,10 @@
 
 import pytest
 
-from unittest.mock import patch
-
 from agentic.workflow.blocks.function import (
+    _PIP_TO_IMPORT,
     IMPORT_REGISTRY,
     LEGACY_DEFAULT_IMPORTS,
-    _PIP_TO_IMPORT,
     _load_custom_packages,
     _load_imports,
     _parse_imports_from_code,
@@ -79,11 +77,11 @@ class TestFunctionBlockImports:
 
         block = FunctionBlock(
             config={
-                "code": "import numpy as np\noutput = type(np).__name__",
+                "code": "import numpy as np\noutput = str(np.array([1,2,3]))",
             },
         )
         result = await block.execute(BlockInput(block_outputs={}))
-        assert result.data["output"] == "module"
+        assert result.data["output"] == "[1 2 3]"
 
     @pytest.mark.asyncio
     async def test_execute_with_empty_imports(self):
@@ -125,10 +123,7 @@ class TestCustomPackages:
         assert result["json"] is json
 
     def test_load_custom_packages_unknown(self):
-        with patch(
-            "agentic.workflow.blocks.function._pip_install", return_value=False
-        ):
-            result = _load_custom_packages("totally_nonexistent_pkg_xyz")
+        result = _load_custom_packages("totally_nonexistent_pkg_xyz")
         assert "totally_nonexistent_pkg_xyz" not in result
 
     def test_pip_to_import_mapping(self):
@@ -143,12 +138,10 @@ class TestCustomPackages:
         specs = _parse_package_specs("my-custom-pkg")
         assert specs == [("my_custom_pkg", "my-custom-pkg")]
 
-    def test_pip_install_called_on_missing(self):
-        with patch(
-            "agentic.workflow.blocks.function._pip_install", return_value=False
-        ) as mock_pip:
-            _load_custom_packages("some_missing_pkg")
-        mock_pip.assert_called_once_with("some_missing_pkg")
+    def test_pip_install_not_called_on_missing(self):
+        """pip install is disabled — missing packages are just skipped."""
+        result = _load_custom_packages("some_missing_pkg")
+        assert "some_missing_pkg" not in result
 
     @pytest.mark.asyncio
     async def test_execute_with_custom_packages(self):
@@ -331,22 +324,27 @@ class TestCodeParsedImportExecution:
 
         block = FunctionBlock(
             config={
-                "code": "import requests\noutput = type(requests).__name__",
+                "code": "import requests\noutput = str(requests.codes.ok)",
             },
         )
         result = await block.execute(BlockInput(block_outputs={}))
-        assert result.data["output"] == "module"
+        assert result.data["output"] == "200"
 
     @pytest.mark.asyncio
-    async def test_disallowed_import_blocked(self):
-        """Importing a module not in the code's import statements is blocked."""
+    async def test_undeclared_import_blocked_at_runtime(self):
+        """With explicit imports config, only declared modules can be imported
+        at runtime via the controlled import mechanism."""
         from agentic.workflow.block import BlockInput
         from agentic.workflow.blocks.function import FunctionBlock
 
+        # Old-path: explicit imports=["json"]. Code tries to also import os.
         block = FunctionBlock(
             config={
-                # Code uses subprocess but doesn't import it at top level
-                "code": "import json\nx = __import__('subprocess')\noutput = 1",
+                "code": (
+                    "import os\n"
+                    "output = 'escaped'"
+                ),
+                "imports": ["json"],
             },
         )
         result = await block.execute(BlockInput(block_outputs={}))
@@ -369,8 +367,8 @@ class TestCodeParsedImportExecution:
         assert result.data["output"] == '{"x": 1}'
 
     @pytest.mark.asyncio
-    async def test_custom_module_pip_installed(self):
-        """Custom modules not in registry trigger pip install."""
+    async def test_custom_module_no_pip_install(self):
+        """Custom modules not in registry are NOT pip-installed (disabled)."""
         from agentic.workflow.block import BlockInput
         from agentic.workflow.blocks.function import FunctionBlock
 
@@ -379,11 +377,9 @@ class TestCodeParsedImportExecution:
                 "code": "import some_fake_pkg\noutput = 1",
             },
         )
-        with patch(
-            "agentic.workflow.blocks.function._pip_install", return_value=False
-        ) as mock_pip:
-            result = await block.execute(BlockInput(block_outputs={}))
-        mock_pip.assert_called_once_with("some_fake_pkg")
+        # Should not attempt pip install — just fail gracefully
+        result = await block.execute(BlockInput(block_outputs={}))
+        assert result.status == "error"
 
     @pytest.mark.asyncio
     async def test_multiple_imports_in_code(self):
@@ -401,3 +397,109 @@ class TestCodeParsedImportExecution:
         )
         result = await block.execute(BlockInput(block_outputs={}))
         assert result.data["output"] == '{"pi": 3.14}'
+
+
+class TestSandboxSecurity:
+    """Verify sandbox escape vectors are blocked."""
+
+    @pytest.mark.asyncio
+    async def test_dunder_class_blocked(self):
+        """().__class__.__bases__ escape is rejected."""
+        from agentic.workflow.block import BlockInput
+        from agentic.workflow.blocks.function import FunctionBlock
+
+        block = FunctionBlock(config={"code": "x = ().__class__.__bases__"})
+        result = await block.execute(BlockInput(block_outputs={}))
+        assert result.status == "error"
+        assert "dunder" in result.error.lower() or "not allowed" in result.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_dunder_subclasses_blocked(self):
+        from agentic.workflow.block import BlockInput
+        from agentic.workflow.blocks.function import FunctionBlock
+
+        block = FunctionBlock(config={"code": "x = object.__subclasses__()"})
+        result = await block.execute(BlockInput(block_outputs={}))
+        assert result.status == "error"
+
+    @pytest.mark.asyncio
+    async def test_dunder_globals_blocked(self):
+        from agentic.workflow.block import BlockInput
+        from agentic.workflow.blocks.function import FunctionBlock
+
+        block = FunctionBlock(config={"code": "x = print.__globals__"})
+        result = await block.execute(BlockInput(block_outputs={}))
+        assert result.status == "error"
+
+    @pytest.mark.asyncio
+    async def test_dunder_import_in_code_blocked(self):
+        """Direct __import__ call in user code is blocked."""
+        from agentic.workflow.block import BlockInput
+        from agentic.workflow.blocks.function import FunctionBlock
+
+        block = FunctionBlock(config={"code": "x = __import__('os')"})
+        result = await block.execute(BlockInput(block_outputs={}))
+        assert result.status == "error"
+
+    @pytest.mark.asyncio
+    async def test_dunder_in_string_literal_allowed(self):
+        """Dunder in a string value should NOT be blocked (not code execution)."""
+        from agentic.workflow.block import BlockInput
+        from agentic.workflow.blocks.function import FunctionBlock
+
+        block = FunctionBlock(config={"code": "output = '__class__ is a string'"})
+        result = await block.execute(BlockInput(block_outputs={}))
+        assert result.data["output"] == "__class__ is a string"
+
+    @pytest.mark.asyncio
+    async def test_type_removed_from_builtins(self):
+        """type() is removed to prevent dynamic class creation."""
+        from agentic.workflow.block import BlockInput
+        from agentic.workflow.blocks.function import FunctionBlock
+
+        block = FunctionBlock(config={"code": "output = type(42)"})
+        result = await block.execute(BlockInput(block_outputs={}))
+        assert result.status == "error"
+
+
+class TestPipInstallDisabled:
+    """Verify pip install is fully disabled."""
+
+    @pytest.mark.asyncio
+    async def test_custom_packages_no_pip_install(self):
+        """custom_packages config never triggers pip install (subprocess removed)."""
+        from agentic.workflow.blocks import function as fn_module
+
+        # subprocess should not even be importable from the module
+        assert not hasattr(fn_module, "subprocess")
+
+    @pytest.mark.asyncio
+    async def test_unknown_import_no_pip_install(self):
+        """Unknown imports parsed from code never trigger pip install."""
+        from agentic.workflow.block import BlockInput
+        from agentic.workflow.blocks.function import FunctionBlock
+
+        block = FunctionBlock(
+            config={
+                "code": "import evil_package\noutput = 1",
+            },
+        )
+        # Should just fail gracefully — no subprocess call possible
+        result = await block.execute(BlockInput(block_outputs={}))
+        assert result.status == "error"
+
+    @pytest.mark.asyncio
+    async def test_preinstalled_custom_package_still_works(self):
+        """Already-installed packages via custom_packages still import fine."""
+        from agentic.workflow.block import BlockInput
+        from agentic.workflow.blocks.function import FunctionBlock
+
+        block = FunctionBlock(
+            config={
+                "code": "output = json.dumps({'a': 1})",
+                "imports": [],
+                "custom_packages": "json",
+            },
+        )
+        result = await block.execute(BlockInput(block_outputs={}))
+        assert result.data["output"] == '{"a": 1}'
