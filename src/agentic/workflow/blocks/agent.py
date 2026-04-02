@@ -27,7 +27,9 @@ class AgentBlock(BaseBlock):
         raw = messages_raw if messages_raw else prompt_raw
         return str(resolve_value(raw, block_input.block_outputs))
 
-    def _build_system_prompt(self, block_input: BlockInput) -> str:
+    async def _build_system_prompt(self, block_input: BlockInput) -> str:
+        import asyncio
+
         system_prompt = self.config.get("system_prompt", "")
         system_prompt = str(resolve_value(system_prompt, block_input.block_outputs))
 
@@ -37,9 +39,15 @@ class AgentBlock(BaseBlock):
         if kb_configs and retrieve_fn:
             prompt_text = self._resolve_prompt(block_input)
             try:
-                rag_context = retrieve_fn(
-                    query=prompt_text, knowledge_base_configs=kb_configs
-                )
+                # Support both sync and async retrieve functions
+                if asyncio.iscoroutinefunction(retrieve_fn):
+                    rag_context = await retrieve_fn(
+                        query=prompt_text, knowledge_base_configs=kb_configs
+                    )
+                else:
+                    rag_context = retrieve_fn(
+                        query=prompt_text, knowledge_base_configs=kb_configs
+                    )
                 if rag_context:
                     system_prompt = f"{system_prompt}\n\nContext:\n{rag_context}"
             except Exception:
@@ -74,7 +82,7 @@ class AgentBlock(BaseBlock):
 
     async def execute(self, block_input: BlockInput) -> BlockOutput:
         model = self.config.get("model", "gpt-4o-mini")
-        system_prompt = self._build_system_prompt(block_input)
+        system_prompt = await self._build_system_prompt(block_input)
         prompt = self._resolve_prompt(block_input)
 
         agent = self._build_agent(model, system_prompt)
@@ -92,7 +100,7 @@ class AgentBlock(BaseBlock):
         self, block_input: BlockInput
     ) -> AsyncGenerator[str | BlockOutput]:
         model = self.config.get("model", "gpt-4o-mini")
-        system_prompt = self._build_system_prompt(block_input)
+        system_prompt = await self._build_system_prompt(block_input)
         prompt = self._resolve_prompt(block_input)
 
         agent = self._build_agent(model, system_prompt)
