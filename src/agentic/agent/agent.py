@@ -148,6 +148,23 @@ class Agent:
         started_at = datetime.now()
 
         try:
+            # OnRunStart hook — fire before anything else
+            if hooks:
+                from agentic.agent.hooks import run_hooks as _run_hooks
+
+                input_str = input if isinstance(input, str) else str(input)
+                on_start = _run_hooks(
+                    "OnRunStart", "", {"message": input_str}, None, hooks
+                )
+                if on_start.blocked:
+                    return AgentOutput(
+                        execution_id=context.execution_id,
+                        status=ExecutionStatus.FAILED,
+                        started_at=started_at,
+                        completed_at=datetime.now(),
+                        error=on_start.message or "Blocked by OnRunStart hook",
+                    )
+
             # Build messages list
             messages = self._build_messages(input, session)
 
@@ -547,6 +564,21 @@ class Agent:
                 elif pre_response.modified_output:
                     content = pre_response.modified_output
 
+            # OnRunComplete hook — fire-and-forget after successful run
+            if hooks:
+                from agentic.agent.hooks import run_hooks as _run_hooks_complete
+
+                context.emit_event(
+                    {"type": "on_run_complete", "status": "completed", "steps": step}
+                )
+                _run_hooks_complete(
+                    "OnRunComplete",
+                    "",
+                    {"status": "completed", "content": content or "", "steps": step},
+                    None,
+                    hooks,
+                )
+
             return AgentOutput(
                 execution_id=context.execution_id,
                 status=ExecutionStatus.COMPLETED,
@@ -611,8 +643,16 @@ class Agent:
                 model=self.model,
                 messages=messages,
                 num_retries=3,
-                **({"temperature": self.temperature} if self.temperature is not None else {}),
-                **({"max_tokens": self.max_tokens} if self.max_tokens is not None else {}),
+                **(
+                    {"temperature": self.temperature}
+                    if self.temperature is not None
+                    else {}
+                ),
+                **(
+                    {"max_tokens": self.max_tokens}
+                    if self.max_tokens is not None
+                    else {}
+                ),
             )
 
             # Extract response content
@@ -700,8 +740,16 @@ class Agent:
                 stream=True,
                 stream_options={"include_usage": True},
                 num_retries=3,
-                **({"temperature": self.temperature} if self.temperature is not None else {}),
-                **({"max_tokens": self.max_tokens} if self.max_tokens is not None else {}),
+                **(
+                    {"temperature": self.temperature}
+                    if self.temperature is not None
+                    else {}
+                ),
+                **(
+                    {"max_tokens": self.max_tokens}
+                    if self.max_tokens is not None
+                    else {}
+                ),
             )
 
             # Yield chunks as they arrive, capturing the final usage chunk
@@ -786,7 +834,11 @@ class Agent:
             messages=messages,
             stream=True,
             num_retries=3,
-            **({"temperature": self.temperature} if self.temperature is not None else {}),
+            **(
+                {"temperature": self.temperature}
+                if self.temperature is not None
+                else {}
+            ),
             **({"max_tokens": self.max_tokens} if self.max_tokens is not None else {}),
         )
 
@@ -885,6 +937,30 @@ class Agent:
                     )
                 if pre_result.modified_input:
                     arguments = pre_result.modified_input
+
+        # === OnDelegation hook for DelegateTool ===
+        if hooks and tool_def:
+            from agentic.agent.tools import DelegateTool as _DelegateTool
+
+            if isinstance(tool_def, _DelegateTool):
+                from agentic.agent.hooks import run_hooks as _run_hooks_delegation
+
+                delegation_result = _run_hooks_delegation(
+                    "OnDelegation", tool_name, arguments, None, hooks
+                )
+                if delegation_result.blocked:
+                    result = f"Delegation blocked: {delegation_result.message}"
+                    tool_duration_ms = int((time.monotonic() - tool_start) * 1000)
+                    return self._finish_tool(
+                        result,
+                        tool_def,
+                        tool_name,
+                        arguments,
+                        step,
+                        context,
+                        tc,
+                        tool_duration_ms,
+                    )
 
         # === Execute the tool ===
         if tool_def:
