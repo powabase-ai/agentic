@@ -97,6 +97,7 @@ class Agent:
         fallback_model: str | None = None,
         tool_rules: dict[str, list[dict]] | None = None,
         hooks: list | None = None,
+        response_format: dict | None = None,
     ) -> AgentOutput:
         """
         Execute the agent with the given input using a ReAct loop.
@@ -265,6 +266,8 @@ class Agent:
                 }
                 if step_tools:
                     call_kwargs["tools"] = step_tools
+                if response_format:
+                    call_kwargs["response_format"] = response_format
 
                 # Call LLM
                 try:
