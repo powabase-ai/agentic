@@ -36,6 +36,7 @@ def run_hooks(
     data: dict[str, Any],
     output: str | None,
     hooks: list[HookConfig],
+    context: Any = None,
 ) -> HookResult:
     """Execute matching hooks for an event. Returns aggregated result."""
     result = HookResult()
@@ -56,6 +57,8 @@ def run_hooks(
             hook_result = _execute_http_hook(
                 hook.config, event, tool_name, data, output
             )
+        elif hook.type == "approval":
+            hook_result = _execute_approval_hook(hook.config, tool_name, data, context)
         else:
             continue
 
@@ -128,3 +131,38 @@ def _execute_http_hook(
         logger.warning("Hook HTTP call failed (fail-open): %s", e)
 
     return HookResult()  # Fail-open
+
+
+def _execute_approval_hook(
+    config: dict,
+    tool_name: str,
+    data: dict,
+    context: Any,
+) -> HookResult:
+    if context is None:
+        return HookResult(blocked=True, message="Approval requires ExecutionContext")
+
+    context.emit_event(
+        {
+            "type": "approval_requested",
+            "tool_name": tool_name,
+            "tool_input": data,
+            "message": config.get("message", "Approval required"),
+        }
+    )
+
+    # Check if a decision was already set before we even asked
+    decision = context.get_approval_decision()
+    if decision is None:
+        approval_event = context.get_approval_event()
+        timeout = config.get("timeout", 300)
+        approval_event.wait(timeout=timeout)
+        decision = context.get_approval_decision()
+    if decision is None:
+        return HookResult(blocked=True, message="Approval timed out")
+    if not decision.get("approved"):
+        return HookResult(
+            blocked=True,
+            message=f"Denied by user: {decision.get('reason', '')}",
+        )
+    return HookResult(blocked=False)

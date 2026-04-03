@@ -5,6 +5,73 @@ import threading
 from agentic.execution.context import ExecutionContext
 
 
+class TestApprovalHookExecution:
+    def test_approval_hook_blocks_when_denied(self):
+        from agentic.agent.hooks import HookConfig, run_hooks
+
+        ctx = ExecutionContext()
+        ctx.set_approval_decision({"approved": False, "reason": "Too risky"})
+        hooks = [
+            HookConfig(
+                event="PreToolUse",
+                matcher="database_write",
+                type="approval",
+                config={"message": "Approve?"},
+            )
+        ]
+        result = run_hooks(
+            "PreToolUse", "database_write", {"table": "users"}, None, hooks, context=ctx
+        )
+        assert result.blocked is True
+        assert "Too risky" in result.message
+
+    def test_approval_hook_allows_when_approved(self):
+        from agentic.agent.hooks import HookConfig, run_hooks
+
+        ctx = ExecutionContext()
+        ctx.set_approval_decision({"approved": True})
+        hooks = [
+            HookConfig(
+                event="PreToolUse",
+                matcher="database_write",
+                type="approval",
+                config={"message": "Approve?"},
+            )
+        ]
+        result = run_hooks("PreToolUse", "database_write", {}, None, hooks, context=ctx)
+        assert result.blocked is False
+
+    def test_approval_hook_times_out(self):
+        from agentic.agent.hooks import HookConfig, run_hooks
+
+        ctx = ExecutionContext()
+        hooks = [
+            HookConfig(
+                event="PreToolUse",
+                matcher="database_write",
+                type="approval",
+                config={"message": "Approve?", "timeout": 0.1},
+            )
+        ]
+        result = run_hooks("PreToolUse", "database_write", {}, None, hooks, context=ctx)
+        assert result.blocked is True
+        assert "timed out" in result.message.lower()
+
+    def test_approval_hook_no_context_blocks(self):
+        from agentic.agent.hooks import HookConfig, run_hooks
+
+        hooks = [
+            HookConfig(
+                event="PreToolUse",
+                matcher=None,
+                type="approval",
+                config={},
+            )
+        ]
+        result = run_hooks("PreToolUse", "tool", {}, None, hooks, context=None)
+        assert result.blocked is True
+
+
 class TestApprovalGate:
     def test_get_approval_event_creates_event(self):
         """get_approval_event returns a threading.Event that is not yet set."""

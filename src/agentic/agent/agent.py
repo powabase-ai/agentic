@@ -155,7 +155,12 @@ class Agent:
 
                 input_str = input if isinstance(input, str) else str(input)
                 on_start = _run_hooks(
-                    "OnRunStart", "", {"message": input_str}, None, hooks
+                    "OnRunStart",
+                    "",
+                    {"message": input_str},
+                    None,
+                    hooks,
+                    context=context,
                 )
                 if on_start.blocked:
                     return AgentOutput(
@@ -558,7 +563,9 @@ class Agent:
             if hooks and content:
                 from agentic.agent.hooks import run_hooks
 
-                pre_response = run_hooks("PreResponse", "", {}, content, hooks)
+                pre_response = run_hooks(
+                    "PreResponse", "", {}, content, hooks, context=context
+                )
                 if pre_response.blocked:
                     content = (
                         f"[Response blocked: "
@@ -580,6 +587,7 @@ class Agent:
                     {"status": "completed", "content": content or "", "steps": step},
                     None,
                     hooks,
+                    context=context,
                 )
 
             return AgentOutput(
@@ -921,7 +929,9 @@ class Agent:
             if hooks:
                 from agentic.agent.hooks import run_hooks
 
-                pre_result = run_hooks("PreToolUse", tool_name, arguments, None, hooks)
+                pre_result = run_hooks(
+                    "PreToolUse", tool_name, arguments, None, hooks, context=context
+                )
                 if pre_result.blocked:
                     result = (
                         f"Error: Blocked by hook — "
@@ -949,7 +959,7 @@ class Agent:
                 from agentic.agent.hooks import run_hooks as _run_hooks_delegation
 
                 delegation_result = _run_hooks_delegation(
-                    "OnDelegation", tool_name, arguments, None, hooks
+                    "OnDelegation", tool_name, arguments, None, hooks, context=context
                 )
                 if delegation_result.blocked:
                     result = f"Delegation blocked: {delegation_result.message}"
@@ -979,7 +989,9 @@ class Agent:
         if hooks and tool_def:
             from agentic.agent.hooks import run_hooks
 
-            post_result = run_hooks("PostToolUse", tool_name, arguments, result, hooks)
+            post_result = run_hooks(
+                "PostToolUse", tool_name, arguments, result, hooks, context=context
+            )
             if post_result.modified_output:
                 result = post_result.modified_output
 
