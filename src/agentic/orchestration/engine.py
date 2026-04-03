@@ -24,10 +24,16 @@ class StrategyEngine:
 
 
 def get_strategy_engine(strategy: str) -> StrategyEngine:
-    from agentic.orchestration.strategies import SupervisorEngine
+    from agentic.orchestration.strategies import (
+        ParallelEngine,
+        SequentialEngine,
+        SupervisorEngine,
+    )
 
     engines: dict[str, StrategyEngine] = {
         "supervisor": SupervisorEngine(),
+        "sequential": SequentialEngine(),
+        "parallel": ParallelEngine(),
     }
     if strategy not in engines:
         raise ValueError(
