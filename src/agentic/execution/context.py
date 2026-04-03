@@ -89,6 +89,11 @@ class ExecutionContext:
         if self._approval_event:
             self._approval_event.set()
 
+    def reset_approval(self) -> None:
+        """Clear any prior approval state so the next approval gate starts fresh."""
+        self._approval_decision = None
+        self._approval_event = threading.Event()
+
     @property
     def is_aborted(self) -> bool:
         """Check if the execution has been aborted."""

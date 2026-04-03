@@ -1,6 +1,7 @@
 """Tests for approval gate primitives on ExecutionContext."""
 
 import threading
+import time
 
 from agentic.execution.context import ExecutionContext
 
@@ -10,7 +11,6 @@ class TestApprovalHookExecution:
         from agentic.agent.hooks import HookConfig, run_hooks
 
         ctx = ExecutionContext()
-        ctx.set_approval_decision({"approved": False, "reason": "Too risky"})
         hooks = [
             HookConfig(
                 event="PreToolUse",
@@ -19,9 +19,19 @@ class TestApprovalHookExecution:
                 config={"message": "Approve?"},
             )
         ]
+
+        # Supply the decision from a background thread after the hook emits the event
+        def deny_after_delay():
+            time.sleep(0.05)
+            ctx.set_approval_decision({"approved": False, "reason": "Too risky"})
+
+        t = threading.Thread(target=deny_after_delay, daemon=True)
+        t.start()
+
         result = run_hooks(
             "PreToolUse", "database_write", {"table": "users"}, None, hooks, context=ctx
         )
+        t.join(timeout=2.0)
         assert result.blocked is True
         assert "Too risky" in result.message
 
@@ -29,7 +39,6 @@ class TestApprovalHookExecution:
         from agentic.agent.hooks import HookConfig, run_hooks
 
         ctx = ExecutionContext()
-        ctx.set_approval_decision({"approved": True})
         hooks = [
             HookConfig(
                 event="PreToolUse",
@@ -38,7 +47,17 @@ class TestApprovalHookExecution:
                 config={"message": "Approve?"},
             )
         ]
+
+        # Supply the decision from a background thread after the hook emits the event
+        def approve_after_delay():
+            time.sleep(0.05)
+            ctx.set_approval_decision({"approved": True})
+
+        t = threading.Thread(target=approve_after_delay, daemon=True)
+        t.start()
+
         result = run_hooks("PreToolUse", "database_write", {}, None, hooks, context=ctx)
+        t.join(timeout=2.0)
         assert result.blocked is False
 
     def test_approval_hook_times_out(self):

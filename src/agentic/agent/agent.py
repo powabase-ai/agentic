@@ -271,7 +271,7 @@ class Agent:
                 }
                 if step_tools:
                     call_kwargs["tools"] = step_tools
-                if response_format:
+                if response_format is not None:
                     call_kwargs["response_format"] = response_format
 
                 # Call LLM

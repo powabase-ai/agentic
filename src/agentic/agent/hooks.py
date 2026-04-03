@@ -142,6 +142,8 @@ def _execute_approval_hook(
     if context is None:
         return HookResult(blocked=True, message="Approval requires ExecutionContext")
 
+    context.reset_approval()
+
     context.emit_event(
         {
             "type": "approval_requested",
