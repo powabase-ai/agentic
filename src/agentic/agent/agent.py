@@ -4,6 +4,7 @@ Agent - single LLM-powered agent definition and execution.
 
 import json
 import logging
+import threading
 import time
 from collections.abc import AsyncGenerator, Generator
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -98,6 +99,7 @@ class Agent:
         tool_rules: dict[str, list[dict]] | None = None,
         hooks: list | None = None,
         response_format: dict | None = None,
+        timeout_seconds: int | float | None = None,
     ) -> AgentOutput:
         """
         Execute the agent with the given input using a ReAct loop.
@@ -147,6 +149,15 @@ class Agent:
             )
 
         started_at = datetime.now()
+
+        # Hard timeout — fire abort_signal after timeout_seconds
+        timer: threading.Timer | None = None
+        if timeout_seconds:
+            if not context.abort_signal:
+                context.abort_signal = threading.Event()
+            timer = threading.Timer(timeout_seconds, context.abort_signal.set)
+            timer.daemon = True
+            timer.start()
 
         try:
             # OnRunStart hook — fire before anything else
@@ -368,6 +379,21 @@ class Agent:
                         state = state.recover(
                             messages=working_budget, reason="budget_warning"
                         )
+
+                # Check abort after (potentially slow) LLM call
+                if context.is_aborted:
+                    return AgentOutput(
+                        execution_id=context.execution_id,
+                        status=ExecutionStatus.CANCELLED,
+                        started_at=started_at,
+                        completed_at=datetime.now(),
+                        error="Execution aborted",
+                        messages=list(state.messages),
+                        usage=total_usage,
+                        steps=step,
+                        tool_calls=all_tool_calls,
+                        events=collected_events,
+                    )
 
                 assistant_msg = response.choices[0].message
                 finish_reason = response.choices[0].finish_reason
@@ -613,6 +639,9 @@ class Agent:
                 error=str(e),
                 messages=self._build_messages(input, session),
             )
+        finally:
+            if timer is not None:
+                timer.cancel()
 
     async def arun(
         self,
