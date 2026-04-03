@@ -120,6 +120,10 @@ def _execute_http_hook(
                 modified_input=body.get("modified_input"),
                 modified_output=body.get("modified_output"),
             )
+        else:
+            logger.warning(
+                "Hook HTTP returned status %s (fail-open)", response.status_code
+            )
     except Exception as e:
         logger.warning("Hook HTTP call failed (fail-open): %s", e)
 
