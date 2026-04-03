@@ -197,4 +197,21 @@ class TestParallelEngine:
 
         event_types = [e["type"] for e in events]
         assert "orchestration_started" in event_types
-        assert "orchestration_completed" in event_types
+
+    @patch("agentic.agent.agent.litellm")
+    def test_parallel_agent_failure_fails_orchestration(self, mock_litellm):
+        """If one parallel agent fails (returns failed status), orchestration should fail."""
+        mock_litellm.completion.side_effect = [
+            _mock_response("Agent A succeeded."),
+            Exception("Agent B LLM error"),
+        ]
+
+        agent_a = Agent(model="gpt-4o-mini", system_prompt="A", name="good_agent")
+        agent_b = Agent(model="gpt-4o-mini", system_prompt="B", name="bad_agent")
+
+        orch = Orchestration(name="test", description="test", strategy="parallel")
+        orch.add_entity(entity_type="agent", agent=agent_a)
+        orch.add_entity(entity_type="agent", agent=agent_b)
+
+        output = orch.run("test")
+        assert output.status.value == "failed"

@@ -299,6 +299,22 @@ class ParallelEngine(StrategyEngine):
                         for k in total_usage:
                             total_usage[k] += (agent_out.usage or {}).get(k, 0)
 
+            # Check for failed agents
+            failed = {
+                name: out
+                for name, out in agent_outputs.items()
+                if not out.status.is_success()
+            }
+            if failed:
+                output.status = ExecutionStatus.FAILED
+                output.error = f"Agents failed: {', '.join(failed.keys())}"
+                output.usage = total_usage
+                output.completed_at = datetime.now(UTC)
+                context.emit_event(
+                    {"type": "orchestration_completed", "status": "failed"}
+                )
+                return output
+
             if len(agent_outputs) == 1:
                 only_output = next(iter(agent_outputs.values()))
                 output.content = only_output.content
@@ -309,6 +325,13 @@ class ParallelEngine(StrategyEngine):
                 context.emit_event(
                     {"type": "orchestration_completed", "status": output.status.value}
                 )
+                return output
+
+            # Abort check before expensive merge step
+            if context.is_aborted:
+                output.status = ExecutionStatus.CANCELLED
+                output.error = "Aborted before merge"
+                output.completed_at = datetime.now(UTC)
                 return output
 
             merge_parts = ["Multiple agents analyzed the same input:\n"]
