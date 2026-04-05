@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -21,7 +22,9 @@ def _build_orchestrator_prompt(orchestration, entities) -> str:
         if entity.entity_type == "agent" and entity.agent:
             name = entity.agent.name or "unnamed"
             desc = entity.role_description or (entity.agent.system_prompt or "")[:200]
-            agent_descriptions.append(f"- delegate_to_{name}: {desc}")
+            agent_descriptions.append(
+                f"- delegate_to_{_sanitize_tool_name(name)}: {desc}"
+            )
 
     agent_list = (
         "\n".join(agent_descriptions) if agent_descriptions else "(no agents available)"
@@ -41,13 +44,18 @@ Your job is to:
 {additional}""".strip()
 
 
+def _sanitize_tool_name(name: str) -> str:
+    """Sanitize a name to be a valid LLM tool name (^[a-zA-Z0-9_-]+$)."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+
+
 def _build_delegate_tools(entities) -> dict[str, DelegateTool]:
     """Build delegate tools from agent entities."""
     tools: dict[str, DelegateTool] = {}
     for entity in entities:
         if entity.entity_type == "agent" and entity.agent:
             name = entity.agent.name or "unnamed"
-            tool_name = f"delegate_to_{name}"
+            tool_name = f"delegate_to_{_sanitize_tool_name(name)}"
             tools[tool_name] = DelegateTool(
                 name=tool_name,
                 description=entity.role_description or f"Delegate to {name}",
