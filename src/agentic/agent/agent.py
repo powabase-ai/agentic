@@ -279,17 +279,15 @@ class Agent:
                     "messages": normalized,
                     "num_retries": 3,
                     "stream": False,
-                    **({"temperature": self.temperature} if self.temperature is not None else {}),
-                    **({"max_tokens": self.max_tokens} if self.max_tokens is not None else {}),
                 }
-                if step_tools:
-                    call_kwargs["tools"] = step_tools
-                if response_format is not None:
-                    call_kwargs["response_format"] = response_format
                 if self.temperature is not None:
                     call_kwargs["temperature"] = self.temperature
                 if self.max_tokens is not None:
                     call_kwargs["max_tokens"] = self.max_tokens
+                if step_tools:
+                    call_kwargs["tools"] = step_tools
+                if response_format is not None:
+                    call_kwargs["response_format"] = response_format
 
                 # Call LLM
                 try:
