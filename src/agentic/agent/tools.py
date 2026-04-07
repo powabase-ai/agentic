@@ -75,6 +75,13 @@ class CustomTool(ToolDefinition):
     def execute(
         self, arguments: dict[str, Any], context: ExecutionContext | None
     ) -> str:
+        from agentic.agent.url_validation import SSRFError, validate_url
+
+        try:
+            validate_url(self.endpoint)
+        except SSRFError as e:
+            return f"Error: URL blocked — {e}"
+
         response = requests.request(
             self.method,
             self.endpoint,

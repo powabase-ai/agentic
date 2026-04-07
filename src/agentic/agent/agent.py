@@ -4,6 +4,7 @@ Agent - single LLM-powered agent definition and execution.
 
 import json
 import logging
+import threading
 import time
 from collections.abc import AsyncGenerator, Generator
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -97,6 +98,8 @@ class Agent:
         fallback_model: str | None = None,
         tool_rules: dict[str, list[dict]] | None = None,
         hooks: list | None = None,
+        response_format: dict | None = None,
+        timeout_seconds: int | float | None = None,
     ) -> AgentOutput:
         """
         Execute the agent with the given input using a ReAct loop.
@@ -147,7 +150,38 @@ class Agent:
 
         started_at = datetime.now()
 
+        # Hard timeout — fire abort_signal after timeout_seconds
+        timer: threading.Timer | None = None
+        if timeout_seconds:
+            if not context.abort_signal:
+                context.abort_signal = threading.Event()
+            timer = threading.Timer(timeout_seconds, context.abort_signal.set)
+            timer.daemon = True
+            timer.start()
+
         try:
+            # OnRunStart hook — fire before anything else
+            if hooks:
+                from agentic.agent.hooks import run_hooks as _run_hooks
+
+                input_str = input if isinstance(input, str) else str(input)
+                on_start = _run_hooks(
+                    "OnRunStart",
+                    "",
+                    {"message": input_str},
+                    None,
+                    hooks,
+                    context=context,
+                )
+                if on_start.blocked:
+                    return AgentOutput(
+                        execution_id=context.execution_id,
+                        status=ExecutionStatus.FAILED,
+                        started_at=started_at,
+                        completed_at=datetime.now(),
+                        error=on_start.message or "Blocked by OnRunStart hook",
+                    )
+
             # Build messages list
             messages = self._build_messages(input, session)
 
@@ -248,6 +282,12 @@ class Agent:
                 }
                 if step_tools:
                     call_kwargs["tools"] = step_tools
+                if response_format is not None:
+                    call_kwargs["response_format"] = response_format
+                if self.temperature is not None:
+                    call_kwargs["temperature"] = self.temperature
+                if self.max_tokens is not None:
+                    call_kwargs["max_tokens"] = self.max_tokens
 
                 # Call LLM
                 try:
@@ -343,6 +383,21 @@ class Agent:
                         state = state.recover(
                             messages=working_budget, reason="budget_warning"
                         )
+
+                # Check abort after (potentially slow) LLM call
+                if context.is_aborted:
+                    return AgentOutput(
+                        execution_id=context.execution_id,
+                        status=ExecutionStatus.CANCELLED,
+                        started_at=started_at,
+                        completed_at=datetime.now(),
+                        error="Execution aborted",
+                        messages=list(state.messages),
+                        usage=total_usage,
+                        steps=step,
+                        tool_calls=all_tool_calls,
+                        events=collected_events,
+                    )
 
                 assistant_msg = response.choices[0].message
                 finish_reason = response.choices[0].finish_reason
@@ -538,7 +593,9 @@ class Agent:
             if hooks and content:
                 from agentic.agent.hooks import run_hooks
 
-                pre_response = run_hooks("PreResponse", "", {}, content, hooks)
+                pre_response = run_hooks(
+                    "PreResponse", "", {}, content, hooks, context=context
+                )
                 if pre_response.blocked:
                     content = (
                         f"[Response blocked: "
@@ -546,6 +603,22 @@ class Agent:
                     )
                 elif pre_response.modified_output:
                     content = pre_response.modified_output
+
+            # OnRunComplete hook — fire-and-forget after successful run
+            if hooks:
+                from agentic.agent.hooks import run_hooks as _run_hooks_complete
+
+                context.emit_event(
+                    {"type": "on_run_complete", "status": "completed", "steps": step}
+                )
+                _run_hooks_complete(
+                    "OnRunComplete",
+                    "",
+                    {"status": "completed", "content": content or "", "steps": step},
+                    None,
+                    hooks,
+                    context=context,
+                )
 
             return AgentOutput(
                 execution_id=context.execution_id,
@@ -570,6 +643,9 @@ class Agent:
                 error=str(e),
                 messages=self._build_messages(input, session),
             )
+        finally:
+            if timer is not None:
+                timer.cancel()
 
     async def arun(
         self,
@@ -611,8 +687,16 @@ class Agent:
                 model=self.model,
                 messages=messages,
                 num_retries=3,
-                **({"temperature": self.temperature} if self.temperature is not None else {}),
-                **({"max_tokens": self.max_tokens} if self.max_tokens is not None else {}),
+                **(
+                    {"temperature": self.temperature}
+                    if self.temperature is not None
+                    else {}
+                ),
+                **(
+                    {"max_tokens": self.max_tokens}
+                    if self.max_tokens is not None
+                    else {}
+                ),
             )
 
             # Extract response content
@@ -700,8 +784,16 @@ class Agent:
                 stream=True,
                 stream_options={"include_usage": True},
                 num_retries=3,
-                **({"temperature": self.temperature} if self.temperature is not None else {}),
-                **({"max_tokens": self.max_tokens} if self.max_tokens is not None else {}),
+                **(
+                    {"temperature": self.temperature}
+                    if self.temperature is not None
+                    else {}
+                ),
+                **(
+                    {"max_tokens": self.max_tokens}
+                    if self.max_tokens is not None
+                    else {}
+                ),
             )
 
             # Yield chunks as they arrive, capturing the final usage chunk
@@ -786,7 +878,11 @@ class Agent:
             messages=messages,
             stream=True,
             num_retries=3,
-            **({"temperature": self.temperature} if self.temperature is not None else {}),
+            **(
+                {"temperature": self.temperature}
+                if self.temperature is not None
+                else {}
+            ),
             **({"max_tokens": self.max_tokens} if self.max_tokens is not None else {}),
         )
 
@@ -866,7 +962,9 @@ class Agent:
             if hooks:
                 from agentic.agent.hooks import run_hooks
 
-                pre_result = run_hooks("PreToolUse", tool_name, arguments, None, hooks)
+                pre_result = run_hooks(
+                    "PreToolUse", tool_name, arguments, None, hooks, context=context
+                )
                 if pre_result.blocked:
                     result = (
                         f"Error: Blocked by hook — "
@@ -886,6 +984,30 @@ class Agent:
                 if pre_result.modified_input:
                     arguments = pre_result.modified_input
 
+        # === OnDelegation hook for DelegateTool ===
+        if hooks and tool_def:
+            from agentic.agent.tools import DelegateTool as _DelegateTool
+
+            if isinstance(tool_def, _DelegateTool):
+                from agentic.agent.hooks import run_hooks as _run_hooks_delegation
+
+                delegation_result = _run_hooks_delegation(
+                    "OnDelegation", tool_name, arguments, None, hooks, context=context
+                )
+                if delegation_result.blocked:
+                    result = f"Delegation blocked: {delegation_result.message}"
+                    tool_duration_ms = int((time.monotonic() - tool_start) * 1000)
+                    return self._finish_tool(
+                        result,
+                        tool_def,
+                        tool_name,
+                        arguments,
+                        step,
+                        context,
+                        tc,
+                        tool_duration_ms,
+                    )
+
         # === Execute the tool ===
         if tool_def:
             try:
@@ -900,7 +1022,9 @@ class Agent:
         if hooks and tool_def:
             from agentic.agent.hooks import run_hooks
 
-            post_result = run_hooks("PostToolUse", tool_name, arguments, result, hooks)
+            post_result = run_hooks(
+                "PostToolUse", tool_name, arguments, result, hooks, context=context
+            )
             if post_result.modified_output:
                 result = post_result.modified_output
 

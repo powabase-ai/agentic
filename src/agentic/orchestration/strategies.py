@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import concurrent.futures
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -20,7 +22,9 @@ def _build_orchestrator_prompt(orchestration, entities) -> str:
         if entity.entity_type == "agent" and entity.agent:
             name = entity.agent.name or "unnamed"
             desc = entity.role_description or (entity.agent.system_prompt or "")[:200]
-            agent_descriptions.append(f"- delegate_to_{name}: {desc}")
+            agent_descriptions.append(
+                f"- delegate_to_{_sanitize_tool_name(name)}: {desc}"
+            )
 
     agent_list = (
         "\n".join(agent_descriptions) if agent_descriptions else "(no agents available)"
@@ -40,13 +44,18 @@ Your job is to:
 {additional}""".strip()
 
 
+def _sanitize_tool_name(name: str) -> str:
+    """Sanitize a name to be a valid LLM tool name (^[a-zA-Z0-9_-]+$)."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+
+
 def _build_delegate_tools(entities) -> dict[str, DelegateTool]:
     """Build delegate tools from agent entities."""
     tools: dict[str, DelegateTool] = {}
     for entity in entities:
         if entity.entity_type == "agent" and entity.agent:
             name = entity.agent.name or "unnamed"
-            tool_name = f"delegate_to_{name}"
+            tool_name = f"delegate_to_{_sanitize_tool_name(name)}"
             tools[tool_name] = DelegateTool(
                 name=tool_name,
                 description=entity.role_description or f"Delegate to {name}",
@@ -142,4 +151,232 @@ class SupervisorEngine(StrategyEngine):
             }
         )
 
+        return output
+
+
+class SequentialEngine(StrategyEngine):
+    """Deterministic pipeline: agents run in position order."""
+
+    def execute(
+        self, orchestration, input: str, session: Any, context: ExecutionContext | None
+    ) -> OrchestrationOutput:
+        if context is None:
+            context = ExecutionContext()
+
+        output = OrchestrationOutput(execution_id=context.execution_id)
+        output.status = ExecutionStatus.RUNNING
+        output.started_at = datetime.now(UTC)
+
+        agent_entities = sorted(
+            [e for e in orchestration.entities if e.entity_type == "agent"],
+            key=lambda e: e.position or 0,
+        )
+
+        if not agent_entities:
+            output.status = ExecutionStatus.FAILED
+            output.error = "No agent entities in orchestration"
+            output.completed_at = datetime.now(UTC)
+            return output
+
+        context.emit_event(
+            {
+                "type": "orchestration_started",
+                "strategy": "sequential",
+                "name": orchestration.name,
+                "agent_count": len(agent_entities),
+            }
+        )
+
+        current_input = input
+        total_usage: dict[str, int] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+
+        try:
+            for i, entity in enumerate(agent_entities):
+                agent_name = entity.agent.name or f"agent_{i}"
+                context.emit_event(
+                    {"type": "sequential_step", "step": i, "agent": agent_name}
+                )
+
+                child_ctx = context.child_context()
+                agent_output = entity.agent.run(
+                    input=current_input,
+                    context=child_ctx,
+                    tools=entity.agent_tools if entity.agent_tools else None,
+                    max_steps=entity.config.get("max_steps", 10),
+                )
+
+                if agent_output.usage:
+                    for k in total_usage:
+                        total_usage[k] += (agent_output.usage or {}).get(k, 0)
+
+                if not agent_output.status.is_success():
+                    output.status = ExecutionStatus.FAILED
+                    output.error = f"Agent '{agent_name}' failed: {agent_output.error}"
+                    output.completed_at = datetime.now(UTC)
+                    context.emit_event(
+                        {"type": "orchestration_completed", "status": "failed"}
+                    )
+                    return output
+
+                current_input = agent_output.content or ""
+
+            output.content = current_input
+            output.status = ExecutionStatus.COMPLETED
+            output.usage = total_usage
+            output.steps = len(agent_entities)
+        except Exception as e:
+            output.status = ExecutionStatus.FAILED
+            output.error = str(e)
+
+        output.completed_at = datetime.now(UTC)
+        context.emit_event(
+            {
+                "type": "orchestration_completed",
+                "status": output.status.value,
+                "steps": output.steps,
+                "usage": output.usage,
+            }
+        )
+        return output
+
+
+class ParallelEngine(StrategyEngine):
+    """Concurrent execution: all agents simultaneously, then merge."""
+
+    def execute(
+        self, orchestration, input: str, session: Any, context: ExecutionContext | None
+    ) -> OrchestrationOutput:
+        if context is None:
+            context = ExecutionContext()
+
+        output = OrchestrationOutput(execution_id=context.execution_id)
+        output.status = ExecutionStatus.RUNNING
+        output.started_at = datetime.now(UTC)
+
+        agent_entities = [e for e in orchestration.entities if e.entity_type == "agent"]
+
+        if not agent_entities:
+            output.status = ExecutionStatus.FAILED
+            output.error = "No agent entities in orchestration"
+            output.completed_at = datetime.now(UTC)
+            return output
+
+        context.emit_event(
+            {
+                "type": "orchestration_started",
+                "strategy": "parallel",
+                "name": orchestration.name,
+                "agent_count": len(agent_entities),
+            }
+        )
+
+        total_usage: dict[str, int] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+
+        try:
+
+            def run_agent(entity):
+                child_ctx = context.child_context()
+                return entity.agent.run(
+                    input=input,
+                    context=child_ctx,
+                    tools=entity.agent_tools if entity.agent_tools else None,
+                    max_steps=entity.config.get("max_steps", 10),
+                )
+
+            agent_outputs: dict[str, Any] = {}
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(agent_entities)
+            ) as pool:
+                future_to_entity = {
+                    pool.submit(run_agent, e): e for e in agent_entities
+                }
+                for future in concurrent.futures.as_completed(future_to_entity):
+                    entity = future_to_entity[future]
+                    agent_name = entity.agent.name or "unnamed"
+                    agent_out = future.result()
+                    agent_outputs[agent_name] = agent_out
+                    if agent_out.usage:
+                        for k in total_usage:
+                            total_usage[k] += (agent_out.usage or {}).get(k, 0)
+
+            # Check for failed agents
+            failed = {
+                name: out
+                for name, out in agent_outputs.items()
+                if not out.status.is_success()
+            }
+            if failed:
+                output.status = ExecutionStatus.FAILED
+                output.error = f"Agents failed: {', '.join(failed.keys())}"
+                output.usage = total_usage
+                output.completed_at = datetime.now(UTC)
+                context.emit_event(
+                    {"type": "orchestration_completed", "status": "failed"}
+                )
+                return output
+
+            if len(agent_outputs) == 1:
+                only_output = next(iter(agent_outputs.values()))
+                output.content = only_output.content
+                output.status = only_output.status
+                output.usage = total_usage
+                output.steps = 1
+                output.completed_at = datetime.now(UTC)
+                context.emit_event(
+                    {"type": "orchestration_completed", "status": output.status.value}
+                )
+                return output
+
+            # Abort check before expensive merge step
+            if context.is_aborted:
+                output.status = ExecutionStatus.CANCELLED
+                output.error = "Aborted before merge"
+                output.completed_at = datetime.now(UTC)
+                return output
+
+            merge_parts = ["Multiple agents analyzed the same input:\n"]
+            for name, agent_out in agent_outputs.items():
+                merge_parts.append(
+                    f"--- {name} ---\n{agent_out.content or '(no output)'}\n"
+                )
+            merge_parts.append("\nSynthesize these into a single coherent response.")
+
+            merge_agent = Agent(
+                model=orchestration.settings.get("model", "gpt-4.1-mini"),
+                system_prompt="You combine multiple analysis results into a single coherent response.",
+                name=f"{orchestration.name}_merger",
+            )
+            merge_output = merge_agent.run(
+                input="\n".join(merge_parts), context=context
+            )
+
+            if merge_output.usage:
+                for k in total_usage:
+                    total_usage[k] += (merge_output.usage or {}).get(k, 0)
+
+            output.content = merge_output.content
+            output.status = ExecutionStatus.COMPLETED
+            output.usage = total_usage
+            output.steps = len(agent_entities) + 1
+        except Exception as e:
+            output.status = ExecutionStatus.FAILED
+            output.error = str(e)
+
+        output.completed_at = datetime.now(UTC)
+        context.emit_event(
+            {
+                "type": "orchestration_completed",
+                "status": output.status.value,
+                "steps": output.steps,
+                "usage": output.usage,
+            }
+        )
         return output

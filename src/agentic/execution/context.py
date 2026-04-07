@@ -69,6 +69,31 @@ class ExecutionContext:
     # Abort signal (set when client disconnects)
     abort_signal: threading.Event | None = None
 
+    # Approval gate primitives
+    _approval_event: threading.Event | None = field(default=None, repr=False)
+    _approval_decision: dict | None = field(default=None, repr=False)
+
+    def get_approval_event(self) -> threading.Event:
+        """Get or create the approval event for this context."""
+        if self._approval_event is None:
+            self._approval_event = threading.Event()
+        return self._approval_event
+
+    def get_approval_decision(self) -> dict | None:
+        """Get the approval decision (set by the /approve endpoint)."""
+        return self._approval_decision
+
+    def set_approval_decision(self, decision: dict) -> None:
+        """Set the approval decision and unblock the waiting thread."""
+        self._approval_decision = decision
+        if self._approval_event:
+            self._approval_event.set()
+
+    def reset_approval(self) -> None:
+        """Clear any prior approval state so the next approval gate starts fresh."""
+        self._approval_decision = None
+        self._approval_event = threading.Event()
+
     @property
     def is_aborted(self) -> bool:
         """Check if the execution has been aborted."""
