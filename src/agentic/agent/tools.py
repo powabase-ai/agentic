@@ -8,10 +8,19 @@ from typing import TYPE_CHECKING, Any
 
 import requests
 
+from agentic.agent.tool_config import (
+    CUSTOM_TOOL_TIMEOUT,
+    DEFAULT_MAX_RESULT_CHARS,
+    DELEGATE_MAX_STEPS,
+    MAX_TOOL_OUTPUT_LENGTH,
+    MCP_TOOL_TIMEOUT,
+)
+from agentic.knowledge.model_config import (
+    DEFAULT_MAX_CONTEXT_TOKENS as _DEFAULT_MAX_CONTEXT_TOKENS,
+)
+
 if TYPE_CHECKING:
     from agentic.execution.context import ExecutionContext
-
-MAX_TOOL_OUTPUT_LENGTH = 10000
 
 
 @dataclass
@@ -26,7 +35,7 @@ class ToolDefinition:
     is_concurrency_safe: bool = False  # Safe to run in parallel?
     is_read_only: bool = False  # Does not modify state?
     is_destructive: bool = False  # Irreversible action?
-    max_result_chars: int | None = 50000  # None = unlimited
+    max_result_chars: int | None = DEFAULT_MAX_RESULT_CHARS  # None = unlimited
 
     def validate_input(self, arguments: dict[str, Any]) -> tuple[bool, str | None]:
         """Validate input before execution. Override for custom validation."""
@@ -34,7 +43,7 @@ class ToolDefinition:
 
     def execute(
         self, arguments: dict[str, Any], context: ExecutionContext | None
-    ) -> str:
+    ) -> str | list[dict[str, Any]]:
         raise NotImplementedError(f"Tool {self.name} does not implement execute()")
 
     def to_function_schema(self) -> dict[str, Any]:
@@ -70,7 +79,8 @@ class CustomTool(ToolDefinition):
     endpoint: str = ""
     method: str = "POST"
     headers: dict[str, str] = field(default_factory=dict)
-    timeout: int = 30
+    timeout: int = CUSTOM_TOOL_TIMEOUT
+    max_output_length: int = MAX_TOOL_OUTPUT_LENGTH
 
     def execute(
         self, arguments: dict[str, Any], context: ExecutionContext | None
@@ -90,7 +100,7 @@ class CustomTool(ToolDefinition):
             timeout=self.timeout,
         )
         response.raise_for_status()
-        return response.text[:MAX_TOOL_OUTPUT_LENGTH]
+        return response.text[:self.max_output_length]
 
 
 @dataclass
@@ -112,9 +122,9 @@ class KnowledgeSearchTool(ToolDefinition):
     max_result_chars: int | None = None  # Unlimited
 
     knowledge_base_configs: list[dict[str, Any]] = field(default_factory=list)
-    max_context_tokens: int = 8000
+    max_context_tokens: int = _DEFAULT_MAX_CONTEXT_TOKENS
     include_kb_filter: bool = False
-    search_handler: Callable[..., str] | None = field(default=None, repr=False)
+    search_handler: Callable[..., str | list[dict[str, Any]]] | None = field(default=None, repr=False)
 
     def __post_init__(self):
         # Auto-generate input_schema if not provided (empty dict)
@@ -140,19 +150,45 @@ class KnowledgeSearchTool(ToolDefinition):
 
     def execute(
         self, arguments: dict[str, Any], context: ExecutionContext | None
-    ) -> str:
+    ) -> str | list[dict[str, Any]]:
         if self.search_handler is None:
             raise NotImplementedError(
                 f"KnowledgeSearchTool '{self.name}' has no search_handler. "
                 "The project-service must inject one at execution time."
             )
+
+        kb_configs = self.knowledge_base_configs
+
+        # Filter by requested KB names if provided
+        requested_names = arguments.get("knowledge_base_names")
+        if requested_names and self.include_kb_filter:
+            requested_set = set(requested_names)
+            kb_configs = [
+                c for c in kb_configs
+                if c.get("name") in requested_set
+            ]
+            if not kb_configs:
+                return "No matching knowledge bases found for the requested names."
+
         session_history = context.session_history if context else None
-        return self.search_handler(
+        result = self.search_handler(
             query=arguments["query"],
-            kb_configs=self.knowledge_base_configs,
+            kb_configs=kb_configs,
             max_tokens=self.max_context_tokens,
             session_history=session_history,
         )
+        # Handler may return (content, metadata) tuple with context_handler_id
+        if isinstance(result, tuple) and len(result) == 2:
+            content, metadata = result
+            if context and isinstance(metadata, dict) and metadata.get("context_handler_id"):
+                context.emit_event({
+                    "type": "context_handler_created",
+                    "context_handler_id": metadata["context_handler_id"],
+                    "tool_name": self.name,
+                    "query": arguments.get("query", ""),
+                })
+            return content
+        return result
 
 
 @dataclass
@@ -176,7 +212,7 @@ class McpTool(ToolDefinition):
             server_headers=self.server_headers,
             tool_name=self.mcp_tool_name,
             arguments=arguments,
-            timeout=30,
+            timeout=MCP_TOOL_TIMEOUT,
         )
 
 
@@ -198,7 +234,7 @@ class DelegateTool(ToolDefinition):
         default=None, repr=False
     )  # Agent instance (Any to avoid circular import)
     agent_tools: dict[str, ToolDefinition] = field(default_factory=dict)
-    max_steps: int = 10
+    max_steps: int = DELEGATE_MAX_STEPS
 
     def __post_init__(self):
         if not self.input_schema:

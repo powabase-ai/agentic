@@ -33,6 +33,56 @@ from agentic.knowledge.model_config import AGENT_DEFAULT_MODEL
 logger = logging.getLogger(__name__)
 
 
+def _build_tool_message(tc_id: str, result) -> tuple[dict, dict | None]:
+    """Build a tool result message, handling multimodal content.
+
+    LLM APIs require role: "tool" content to be a string. When tool results
+    contain multimodal content (list[dict] with image_url blocks), we split
+    them: text goes in the tool message, images are returned as a separate
+    user message to be appended *after* all tool messages (APIs require all
+    tool responses to be consecutive).
+
+    Returns (tool_message, optional_user_message).
+    """
+    if isinstance(result, list):
+        text_parts = [
+            item.get("text", "")
+            for item in result
+            if isinstance(item, dict) and item.get("type") == "text"
+        ]
+        tool_msg = {
+            "role": "tool",
+            "tool_call_id": tc_id,
+            "content": "\n".join(text_parts)
+            if text_parts
+            else "[Retrieved multimodal content]",
+        }
+        image_blocks = [
+            item
+            for item in result
+            if isinstance(item, dict) and item.get("type") == "image_url"
+        ]
+        if image_blocks:
+            user_msg = {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Here are the retrieved images from the knowledge base search:",
+                    },
+                    *image_blocks,
+                ],
+            }
+            return tool_msg, user_msg
+        return tool_msg, None
+    else:
+        return {
+            "role": "tool",
+            "tool_call_id": tc_id,
+            "content": result,
+        }, None
+
+
 class Agent:
     """
     A single LLM-powered agent.
@@ -487,6 +537,12 @@ class Agent:
                     else:
                         exclusive_calls.append(tc)
 
+                # Collect deferred user messages (multimodal images) across
+                # both concurrent and exclusive calls. All tool messages must
+                # appear before any user messages — LLM APIs require all tool
+                # responses for a given assistant message to be consecutive.
+                deferred_image_msgs = []
+
                 # Execute concurrent-safe tools in parallel
                 if concurrent_calls:
                     with ThreadPoolExecutor(max_workers=len(concurrent_calls)) as pool:
@@ -507,13 +563,10 @@ class Agent:
                             tc = futures[future]
                             result, record = future.result()
                             all_tool_calls.append(record)
-                            working_messages.append(
-                                {
-                                    "role": "tool",
-                                    "tool_call_id": tc.id,
-                                    "content": result,
-                                }
-                            )
+                            tool_msg, user_msg = _build_tool_message(tc.id, result)
+                            working_messages.append(tool_msg)
+                            if user_msg:
+                                deferred_image_msgs.append(user_msg)
                             recent_calls.append(
                                 (tc.function.name, tc.function.arguments)
                             )
@@ -526,14 +579,14 @@ class Agent:
                         tc, tools, context, step, tool_rules, hooks
                     )
                     all_tool_calls.append(record)
-                    working_messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": result,
-                        }
-                    )
+                    tool_msg, user_msg = _build_tool_message(tc.id, result)
+                    working_messages.append(tool_msg)
+                    if user_msg:
+                        deferred_image_msgs.append(user_msg)
                     recent_calls.append((tc.function.name, tc.function.arguments))
+
+                # Append multimodal image messages after ALL tool messages
+                working_messages.extend(deferred_image_msgs)
 
                 # Emit step_completed after all tool calls are done
                 context.emit_event(
@@ -1038,10 +1091,11 @@ class Agent:
             if post_result.modified_output:
                 result = post_result.modified_output
 
-        # Safety cap on result size
+        # Safety cap on result size (skip for multimodal list results)
         if (
             tool_def
             and tool_def.max_result_chars is not None
+            and isinstance(result, str)
             and len(result) > tool_def.max_result_chars
         ):
             original_len = len(result)
@@ -1058,13 +1112,28 @@ class Agent:
             duration_ms=tool_duration_ms,
         )
 
+        # Build result diagnostics for debugging
+        if isinstance(result, list):
+            block_types = [b.get("type", "unknown") for b in result if isinstance(b, dict)]
+            result_meta = {
+                "result_type": "multimodal",
+                "block_count": len(result),
+                "block_types": block_types,
+            }
+        else:
+            result_meta = {
+                "result_type": "text",
+                "char_count": len(result) if isinstance(result, str) else 0,
+            }
+
         context.emit_event(
             {
                 "type": "tool_result",
                 "step": step,
                 "tool_name": tool_name,
                 "call_id": tc.id,
-                "result_preview": result[:200] if result else "",
+                "result_preview": (result[:200] if isinstance(result, str) else "[multimodal content]") if result else "",
+                "result_meta": result_meta,
                 "duration_ms": tool_duration_ms,
             }
         )
@@ -1096,7 +1165,7 @@ class Agent:
                 "step": step,
                 "tool_name": tool_name,
                 "call_id": tc.id,
-                "result_preview": result[:200] if result else "",
+                "result_preview": (result[:200] if isinstance(result, str) else "[multimodal content]") if result else "",
                 "duration_ms": tool_duration_ms,
             }
         )

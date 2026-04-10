@@ -16,7 +16,7 @@ class ToolCallRecord:
     step: int
     tool_name: str
     arguments: dict[str, Any]
-    result: str
+    result: str | list[dict[str, Any]]
     duration_ms: int
     usage: dict[str, Any] | None = None
 
