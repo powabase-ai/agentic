@@ -68,6 +68,7 @@ class Agent:
         name: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        api_key: str | None = None,
     ) -> None:
         """
         Initialize an Agent.
@@ -81,12 +82,16 @@ class Agent:
                   debugging, especially in multi-agent scenarios.
             temperature: Sampling temperature (0-2). None uses the model default.
             max_tokens: Maximum tokens to generate. None uses the model default.
+            api_key: Optional API key for the model's provider. Passed directly
+                     to litellm, overriding env vars. Enables thread-safe
+                     concurrent requests without os.environ mutation.
         """
         self.model = model
         self.system_prompt = system_prompt
         self.name = name
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.api_key = api_key
 
     def run(
         self,
@@ -288,6 +293,8 @@ class Agent:
                     call_kwargs["tools"] = step_tools
                 if response_format is not None:
                     call_kwargs["response_format"] = response_format
+                if self.api_key is not None:
+                    call_kwargs["api_key"] = self.api_key
 
                 # Call LLM
                 try:
@@ -697,6 +704,7 @@ class Agent:
                     if self.max_tokens is not None
                     else {}
                 ),
+                **({"api_key": self.api_key} if self.api_key is not None else {}),
             )
 
             # Extract response content
@@ -794,6 +802,7 @@ class Agent:
                     if self.max_tokens is not None
                     else {}
                 ),
+                **({"api_key": self.api_key} if self.api_key is not None else {}),
             )
 
             # Yield chunks as they arrive, capturing the final usage chunk
@@ -884,6 +893,7 @@ class Agent:
                 else {}
             ),
             **({"max_tokens": self.max_tokens} if self.max_tokens is not None else {}),
+            **({"api_key": self.api_key} if self.api_key is not None else {}),
         )
 
         # Yield chunks as they arrive
