@@ -141,7 +141,10 @@ class ExtractorRegistry:
         return list(self._extractors.keys())
 
     @classmethod
-    def default(cls) -> "ExtractorRegistry":
+    def default(
+        cls,
+        provider_keys: dict[str, str] | None = None,
+    ) -> "ExtractorRegistry":
         """
         Create a registry with built-in extractors.
 
@@ -149,8 +152,10 @@ class ExtractorRegistry:
         - text/* (TextExtractor)
         - HTML, PDF, DOCX
 
-        Environment variables used:
-        - MISTRAL_API_KEY: If set, enables Mistral OCR for PDF extraction
+        Args:
+            provider_keys: Optional dict mapping provider names to API keys
+                (e.g. ``{"mistral": "sk-..."}``). When provided, these take
+                precedence over environment variables.
 
         Returns:
             ExtractorRegistry with built-ins registered
@@ -160,6 +165,9 @@ class ExtractorRegistry:
             >>> extractor = registry.get_extractor("text/plain")
         """
         import os
+
+        _keys = provider_keys or {}
+        mistral_api_key = _keys.get("mistral") or os.getenv("MISTRAL_API_KEY")
 
         registry = cls()
 
@@ -182,8 +190,6 @@ class ExtractorRegistry:
         try:
             from agentic.ingest.extractor.pdf import PDFExtractor
 
-            # Use Mistral OCR if API key is available
-            mistral_api_key = os.getenv("MISTRAL_API_KEY")
             try:
                 max_pages = int(os.getenv("MISTRAL_OCR_MAX_PAGES", "1000"))
             except (TypeError, ValueError):
@@ -210,7 +216,6 @@ class ExtractorRegistry:
         try:
             from agentic.ingest.extractor.image import ImageExtractor
 
-            mistral_api_key = os.getenv("MISTRAL_API_KEY")
             registry.register(ImageExtractor(mistral_api_key=mistral_api_key))
         except ImportError:
             pass

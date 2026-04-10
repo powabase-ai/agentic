@@ -17,9 +17,30 @@ Preserve key facts, decisions, and context that would be needed to continue the 
 Do not include pleasantries or filler. Be factual and brief."""
 
 
+def _content_char_len(content: Any) -> int:
+    """Return approximate character length of a message content field.
+
+    Handles both ``str`` content and multimodal ``list[dict]`` content blocks
+    (e.g. ``[{"type": "text", "text": "..."}, {"type": "image_url", ...}]``).
+    Image blocks are estimated at 1000 chars each as a rough proxy.
+    """
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        total = 0
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    total += len(item.get("text", ""))
+                elif item.get("type") == "image_url":
+                    total += 1000  # rough proxy for an image block
+        return total
+    return len(str(content)) if content else 0
+
+
 def estimate_token_count(messages: list[dict[str, Any]]) -> int:
     """Rough estimate of token count for a message list."""
-    total_chars = sum(len(m.get("content", "") or "") for m in messages)
+    total_chars = sum(_content_char_len(m.get("content", "") or "") for m in messages)
     return total_chars // CHARS_PER_TOKEN
 
 
@@ -48,8 +69,20 @@ def compact_messages(
     to_summarize = rest[:-keep_last_n]
     to_keep = rest[-keep_last_n:]
 
+    def _content_as_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "\n".join(
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "text"
+            )
+        return str(content) if content else ""
+
     conversation_text = "\n".join(
-        f"{m['role']}: {m.get('content', '')}" for m in to_summarize
+        f"{m['role']}: {_content_as_text(m.get('content', ''))}"
+        for m in to_summarize
     )
 
     try:
