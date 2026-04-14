@@ -38,8 +38,12 @@ You have the following specialist agents available as tools:
 
 Your job is to:
 1. Understand the user's request
-2. Delegate to the appropriate specialist(s)
-3. Synthesize their responses into a coherent answer
+2. Plan which specialists to use and in what order
+3. Delegate to each required specialist in sequence — do NOT stop after just one delegation if the task requires multiple
+4. Use the output from earlier delegations as context when delegating to later ones
+5. After ALL necessary delegations are complete, synthesize their responses into a coherent answer for the user
+
+IMPORTANT: If your instructions or the task require multiple agents, you MUST call each one. Do not skip agents or stop early. Complete the full workflow before responding to the user.
 
 {additional}""".strip()
 
@@ -75,6 +79,8 @@ class SupervisorEngine(StrategyEngine):
         input: str,
         session: Any,
         context: ExecutionContext | None,
+        *,
+        history: list[dict] | None = None,
     ) -> OrchestrationOutput:
         if context is None:
             context = ExecutionContext()
@@ -116,9 +122,15 @@ class SupervisorEngine(StrategyEngine):
                 name=f"{orchestration.name}_orchestrator",
             )
 
+            # Build input with history for multi-turn conversations
+            if history:
+                agent_input: str | list[dict] = list(history) + [{"role": "user", "content": input}]
+            else:
+                agent_input = input
+
             # Run the orchestrator's ReAct loop
             agent_output = orchestrator.run(
-                input=input,
+                input=agent_input,
                 context=context,
                 tools=delegate_tools,
                 max_steps=orchestration.settings.get("max_steps", 25),
@@ -158,7 +170,8 @@ class SequentialEngine(StrategyEngine):
     """Deterministic pipeline: agents run in position order."""
 
     def execute(
-        self, orchestration, input: str, session: Any, context: ExecutionContext | None
+        self, orchestration, input: str, session: Any, context: ExecutionContext | None,
+        *, history: list[dict] | None = None,
     ) -> OrchestrationOutput:
         if context is None:
             context = ExecutionContext()
@@ -187,7 +200,11 @@ class SequentialEngine(StrategyEngine):
             }
         )
 
-        current_input = input
+        # Prepend history to input for the first agent in the pipeline
+        if history:
+            current_input: str | list[dict] = list(history) + [{"role": "user", "content": input}]
+        else:
+            current_input: str | list[dict] = input
         total_usage: dict[str, int] = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
@@ -248,7 +265,8 @@ class ParallelEngine(StrategyEngine):
     """Concurrent execution: all agents simultaneously, then merge."""
 
     def execute(
-        self, orchestration, input: str, session: Any, context: ExecutionContext | None
+        self, orchestration, input: str, session: Any, context: ExecutionContext | None,
+        *, history: list[dict] | None = None,
     ) -> OrchestrationOutput:
         if context is None:
             context = ExecutionContext()
@@ -282,10 +300,16 @@ class ParallelEngine(StrategyEngine):
 
         try:
 
+            # Build input with history for multi-turn conversations
+            if history:
+                parallel_input: str | list[dict] = list(history) + [{"role": "user", "content": input}]
+            else:
+                parallel_input: str | list[dict] = input
+
             def run_agent(entity):
                 child_ctx = context.child_context()
                 return entity.agent.run(
-                    input=input,
+                    input=parallel_input,
                     context=child_ctx,
                     tools=entity.agent_tools if entity.agent_tools else None,
                     max_steps=entity.config.get("max_steps", 10),

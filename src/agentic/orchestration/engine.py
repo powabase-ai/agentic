@@ -19,6 +19,8 @@ class StrategyEngine:
         input: str,
         session: Any,
         context: ExecutionContext | None,
+        *,
+        history: list[dict] | None = None,
     ) -> OrchestrationOutput:
         raise NotImplementedError
 
