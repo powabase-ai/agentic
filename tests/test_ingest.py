@@ -2,6 +2,8 @@
 Tests for the Content Ingestion module.
 """
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 
 from agentic.ingest import (
@@ -18,6 +20,8 @@ from agentic.ingest import (
     RawContent,
     TextExtractor,
 )
+from agentic.ingest.extractor.pptx import PptxExtractor
+from agentic.ingest.extractor.xlsx import XlsxExtractor
 
 
 class TestModels:
@@ -484,6 +488,359 @@ class TestPDFExtractor:
         assert extractor.max_pages == 100
 
 
+class TestPDFExtractorPaddleOCR:
+    """Tests for PDFExtractor PaddleOCR-VL method."""
+
+    def test_paddleocr_requires_api_key(self):
+        """PaddleOCR should fail without API key."""
+        extractor = PDFExtractor()
+        raw = RawContent(
+            content=b"%PDF-1.4 fake",
+            mime_type="application/pdf",
+            source_uri="upload://test.pdf",
+            metadata={"extraction_model": "paddleocr"},
+        )
+        with pytest.raises(ExtractionError, match="PADDLEOCR_API_KEY"):
+            import asyncio
+            asyncio.get_event_loop().run_until_complete(extractor.extract(raw))
+
+    @pytest.mark.asyncio
+    async def test_paddleocr_extraction(self):
+        """PaddleOCR should produce correct derivatives from API response."""
+        extractor = PDFExtractor(paddleocr_api_key="test-key")
+        raw = RawContent(
+            content=b"%PDF-1.4 fake",
+            mime_type="application/pdf",
+            source_uri="upload://test.pdf",
+            metadata={"extraction_model": "paddleocr"},
+        )
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "result": {
+                "layoutParsingResults": [
+                    {"markdown": {"text": "# Page 1\nContent here", "images": {}}},
+                    {"markdown": {"text": "# Page 2\nMore content", "images": {}}},
+                ]
+            }
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("requests.post", return_value=mock_response), \
+             patch.object(extractor, "_render_page_images", return_value=[]):
+            result = await extractor.extract(raw)
+
+        assert result.extraction_method == "paddleocr_vl"
+        assert result.auto_metadata["page_count"] == 2
+
+        # Check markdown derivative
+        md_derivs = [d for d in result.derivatives if d.type == "markdown"]
+        assert len(md_derivs) == 1
+        assert "Page 1" in md_derivs[0].content
+        assert "Page 2" in md_derivs[0].content
+
+        # Check page_text derivatives
+        page_derivs = [d for d in result.derivatives if d.type == "page_text"]
+        assert len(page_derivs) == 2
+        assert page_derivs[0].page == 1
+        assert page_derivs[1].page == 2
+
+    @pytest.mark.asyncio
+    async def test_paddleocr_strips_image_refs(self):
+        """PaddleOCR should strip image references from markdown."""
+        extractor = PDFExtractor(paddleocr_api_key="test-key")
+        raw = RawContent(
+            content=b"%PDF-1.4 fake",
+            mime_type="application/pdf",
+            source_uri="upload://test.pdf",
+            metadata={"extraction_model": "paddleocr"},
+        )
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "result": {
+                "layoutParsingResults": [
+                    {
+                        "markdown": {
+                            "text": "Text before ![figure](https://temp-url/img1.png) and after ![chart](img1) end",
+                            "images": {"img1": "https://temp-url/img1.png"},
+                        }
+                    },
+                ]
+            }
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("requests.post", return_value=mock_response), \
+             patch.object(extractor, "_render_page_images", return_value=[]):
+            result = await extractor.extract(raw)
+
+        # Image refs should be stripped — both URL-based and path-based patterns
+        md = result.derivatives[0].content
+        assert "https://temp-url" not in md
+        assert "![figure]" not in md
+        assert "![chart]" not in md
+        assert "Text before" in md
+        assert "and after" in md
+        assert "end" in md
+
+
+class TestPDFExtractorLightOnOCR:
+    """Tests for PDFExtractor LightOnOCR method."""
+
+    def test_lighton_requires_api_key(self):
+        """LightOnOCR should fail without API key."""
+        extractor = PDFExtractor()
+        raw = RawContent(
+            content=b"%PDF-1.4 fake",
+            mime_type="application/pdf",
+            source_uri="upload://test.pdf",
+            metadata={"extraction_model": "lighton"},
+        )
+        with pytest.raises(ExtractionError, match="LIGHTON_API_KEY"):
+            import asyncio
+            asyncio.get_event_loop().run_until_complete(extractor.extract(raw))
+
+    @pytest.mark.asyncio
+    async def test_lighton_extraction(self):
+        """LightOnOCR should produce correct derivatives from API response."""
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        raw = RawContent(
+            content=b"%PDF-1.4 fake",
+            mime_type="application/pdf",
+            source_uri="upload://test.pdf",
+            metadata={"extraction_model": "lighton"},
+        )
+
+        # Mock page image derivatives (simulating _render_page_images output)
+        mock_img_derivs = [
+            Derivative(type="image", content=b"fake-png-1", format="png", page=1),
+            Derivative(type="image", content=b"fake-png-2", format="png", page=2),
+        ]
+
+        mock_response_1 = MagicMock()
+        mock_response_1.status_code = 200
+        mock_response_1.json.return_value = {
+            "choices": [{"message": {"content": "# Page 1\nOCR text"}}]
+        }
+        mock_response_1.raise_for_status = MagicMock()
+
+        mock_response_2 = MagicMock()
+        mock_response_2.status_code = 200
+        mock_response_2.json.return_value = {
+            "choices": [{"message": {"content": "# Page 2\nMore OCR text"}}]
+        }
+        mock_response_2.raise_for_status = MagicMock()
+
+        with patch.object(extractor, "_render_page_images", return_value=mock_img_derivs), \
+             patch("requests.post", side_effect=[mock_response_1, mock_response_2]):
+            result = await extractor.extract(raw)
+
+        assert result.extraction_method == "lighton_ocr"
+        assert result.auto_metadata["page_count"] == 2
+
+        # Check markdown derivative
+        md_derivs = [d for d in result.derivatives if d.type == "markdown"]
+        assert len(md_derivs) == 1
+        assert "Page 1" in md_derivs[0].content
+        assert "Page 2" in md_derivs[0].content
+
+        # Check page_text derivatives
+        page_derivs = [d for d in result.derivatives if d.type == "page_text"]
+        assert len(page_derivs) == 2
+        assert page_derivs[0].page == 1
+        assert page_derivs[1].page == 2
+
+        # Check image derivatives are included
+        img_derivs = [d for d in result.derivatives if d.type == "image"]
+        assert len(img_derivs) == 2
+
+    @pytest.mark.asyncio
+    async def test_lighton_requires_fitz_for_rendering(self):
+        """LightOnOCR should fail if page rendering returns no images."""
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        raw = RawContent(
+            content=b"%PDF-1.4 fake",
+            mime_type="application/pdf",
+            source_uri="upload://test.pdf",
+            metadata={"extraction_model": "lighton"},
+        )
+
+        with patch.object(extractor, "_render_page_images", return_value=[]):
+            with pytest.raises(ExtractionError, match="PyMuPDF"):
+                await extractor.extract(raw)
+
+
+class TestPDFExtractorOpenDataLoader:
+    """Tests for PDFExtractor OpenDataLoader method."""
+
+    @pytest.mark.asyncio
+    async def test_opendataloader_extraction(self):
+        """OpenDataLoader should produce per-page page_text derivatives and joined markdown."""
+        from agentic.ingest.extractor.pdf import _ODL_PAGE_SEP
+
+        extractor = PDFExtractor()
+        raw = RawContent(
+            content=b"%PDF-1.4 fake",
+            mime_type="application/pdf",
+            source_uri="upload://test.pdf",
+            metadata={"extraction_model": "opendataloader"},
+        )
+
+        page1 = "# Document Title\n\nFirst page content."
+        page2 = "## Chapter 2\n\nSecond page content."
+        page3 = "## Chapter 3\n\nThird page content."
+        mock_md_content = _ODL_PAGE_SEP.join([page1, page2, page3])
+
+        def mock_convert(input_path, output_dir, format, markdown_page_separator, quiet):
+            import os
+            assert isinstance(input_path, list), "input_path must be a list"
+            assert len(input_path) == 1
+            assert markdown_page_separator == _ODL_PAGE_SEP
+            os.makedirs(output_dir, exist_ok=True)
+            with open(os.path.join(output_dir, "input.md"), "w") as f:
+                f.write(mock_md_content)
+
+        with patch.dict("sys.modules", {"opendataloader_pdf": MagicMock(convert=mock_convert)}), \
+             patch.object(extractor, "_render_page_images", return_value=[
+                 Derivative(type="image", content=b"fake-png", format="png", page=1),
+             ]):
+            result = await extractor.extract(raw)
+
+        assert result.extraction_method == "opendataloader"
+        assert result.auto_metadata["page_count"] == 3
+        expected_fulltext = "\n\n".join([page1, page2, page3])
+        assert result.auto_metadata["char_count"] == len(expected_fulltext)
+
+        md_derivs = [d for d in result.derivatives if d.type == "markdown"]
+        assert len(md_derivs) == 1
+        assert md_derivs[0].content == expected_fulltext
+        assert md_derivs[0].format == "markdown"
+
+        page_derivs = [d for d in result.derivatives if d.type == "page_text"]
+        assert len(page_derivs) == 3
+        assert page_derivs[0].content == page1
+        assert page_derivs[0].page == 1
+        assert page_derivs[1].content == page2
+        assert page_derivs[1].page == 2
+        assert page_derivs[2].content == page3
+        assert page_derivs[2].page == 3
+
+        img_derivs = [d for d in result.derivatives if d.type == "image"]
+        assert len(img_derivs) == 1
+
+    @pytest.mark.asyncio
+    async def test_opendataloader_import_error(self):
+        """OpenDataLoader should raise ExtractionError when not installed."""
+        extractor = PDFExtractor()
+        raw = RawContent(
+            content=b"%PDF-1.4 fake",
+            mime_type="application/pdf",
+            source_uri="upload://test.pdf",
+            metadata={"extraction_model": "opendataloader"},
+        )
+
+        with patch.dict("sys.modules", {"opendataloader_pdf": None}):
+            with pytest.raises(ExtractionError, match="opendataloader-pdf"):
+                await extractor.extract(raw)
+
+
+class TestPDFExtractorOCRLocalFallback:
+    """Tests for OCR-to-local fallback behavior."""
+
+    @pytest.mark.asyncio
+    async def test_cloud_ocr_falls_back_to_local(self):
+        """When a cloud OCR method fails, should fall back to local methods."""
+        extractor = PDFExtractor(mistral_api_key="test-key")
+        raw = RawContent(
+            content=b"%PDF-1.4 fake",
+            mime_type="application/pdf",
+            source_uri="upload://test.pdf",
+            metadata={"extraction_model": "mistral"},
+        )
+
+        mock_result = ExtractionResult(
+            source_uri="upload://test.pdf",
+            mime_type="application/pdf",
+            derivatives=[Derivative(type="text", content="fallback text")],
+            extraction_method="fitz",
+        )
+
+        with patch.object(extractor, "_extract_mistral", side_effect=Exception("API down")), \
+             patch.object(extractor, "_extract_opendataloader", side_effect=Exception("no java")), \
+             patch.object(extractor, "_extract_fitz", return_value=mock_result):
+            result = await extractor.extract(raw)
+
+        assert result.extraction_method == "fitz"
+
+    @pytest.mark.asyncio
+    async def test_local_method_no_circular_fallback(self):
+        """When a local method (fitz) fails explicitly, should NOT fall back."""
+        extractor = PDFExtractor()
+        raw = RawContent(
+            content=b"%PDF-1.4 fake",
+            mime_type="application/pdf",
+            source_uri="upload://test.pdf",
+            metadata={"extraction_model": "fitz"},
+        )
+
+        with patch.object(extractor, "_extract_fitz", side_effect=ExtractionError(
+            "fitz broken", extractor_name="pdf", source_uri="upload://test.pdf"
+        )):
+            with pytest.raises(ExtractionError, match="fitz broken"):
+                await extractor.extract(raw)
+
+    @pytest.mark.asyncio
+    async def test_cloud_ocr_all_fallbacks_fail(self):
+        """When cloud OCR and all local fallbacks fail, should raise with context."""
+        extractor = PDFExtractor(mistral_api_key="test-key")
+        raw = RawContent(
+            content=b"%PDF-1.4 fake",
+            mime_type="application/pdf",
+            source_uri="upload://test.pdf",
+            metadata={"extraction_model": "mistral"},
+        )
+
+        with patch.object(extractor, "_extract_mistral", side_effect=Exception("API down")), \
+             patch.object(extractor, "_extract_opendataloader", side_effect=Exception("no java")), \
+             patch.object(extractor, "_extract_fitz", side_effect=Exception("fitz fail")), \
+             patch.object(extractor, "_extract_pdfplumber", side_effect=Exception("plumber fail")):
+            with pytest.raises(ExtractionError, match="all local fallbacks failed"):
+                await extractor.extract(raw)
+
+
+class TestPDFExtractorAutoMode:
+    """Test that auto mode does NOT include paddleocr/lighton."""
+
+    @pytest.mark.asyncio
+    async def test_auto_mode_skips_paddleocr_and_lighton(self):
+        """Auto mode should not try paddleocr or lighton methods."""
+        extractor = PDFExtractor(
+            paddleocr_api_key="key",
+            lighton_api_key="key",
+        )
+        raw = RawContent(
+            content=b"%PDF-1.4 fake",
+            mime_type="application/pdf",
+            source_uri="upload://test.pdf",
+            metadata={"extraction_model": "auto"},
+        )
+
+        # All fallback methods should fail, but paddleocr/lighton should NOT be tried
+        with patch.object(extractor, "_extract_opendataloader", side_effect=Exception("odl fail")), \
+             patch.object(extractor, "_extract_fitz", side_effect=Exception("fitz fail")), \
+             patch.object(extractor, "_extract_pdfplumber", side_effect=Exception("plumber fail")), \
+             patch.object(extractor, "_extract_paddleocr") as mock_paddle, \
+             patch.object(extractor, "_extract_lighton") as mock_lighton:
+            with pytest.raises(ExtractionError, match="All extraction methods failed"):
+                await extractor.extract(raw)
+
+        mock_paddle.assert_not_called()
+        mock_lighton.assert_not_called()
+
+
 class TestDocxExtractor:
     """Tests for DocxExtractor."""
 
@@ -493,6 +850,122 @@ class TestDocxExtractor:
         assert extractor.supports(
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
+
+
+class TestXlsxExtractor:
+    """Tests for XlsxExtractor."""
+
+    def test_xlsx_extractor_supported_types(self):
+        """XlsxExtractor should support XLSX and XLS types."""
+        extractor = XlsxExtractor()
+        assert extractor.supports(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        assert extractor.supports("application/vnd.ms-excel")
+
+    def test_xlsx_extractor_name(self):
+        """XlsxExtractor should have correct name."""
+        extractor = XlsxExtractor()
+        assert extractor.name == "xlsx"
+
+    @pytest.mark.asyncio
+    async def test_xlsx_extract_produces_derivatives(self):
+        """XlsxExtractor should produce markdown and text derivatives."""
+        extractor = XlsxExtractor()
+        mock_markdown = "| Col1 | Col2 |\n|------|------|\n| A | B |"
+
+        with patch.object(extractor, "_convert", return_value=mock_markdown):
+            raw = RawContent(
+                content=b"fake xlsx bytes",
+                mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                source_uri="upload://data.xlsx",
+                filename="data.xlsx",
+            )
+            result = await extractor.extract(raw)
+
+        assert result.extraction_method == "markitdown-xlsx"
+        assert result.source_uri == "upload://data.xlsx"
+        assert len(result.derivatives) == 2
+        assert result.derivatives[0].type == "markdown"
+        assert result.derivatives[0].format == "markdown"
+        assert result.derivatives[0].content == mock_markdown
+        assert result.derivatives[1].type == "text"
+        assert result.derivatives[1].format == "plain"
+        assert result.auto_metadata["char_count"] == len(mock_markdown)
+
+    @pytest.mark.asyncio
+    async def test_xlsx_extract_error_handling(self):
+        """XlsxExtractor should wrap errors in ExtractionError."""
+        extractor = XlsxExtractor()
+
+        with patch.object(extractor, "_convert", side_effect=ValueError("bad file")):
+            raw = RawContent(
+                content=b"bad bytes",
+                mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                source_uri="upload://bad.xlsx",
+            )
+            with pytest.raises(ExtractionError, match="MarkItDown XLSX conversion failed"):
+                await extractor.extract(raw)
+
+
+class TestPptxExtractor:
+    """Tests for PptxExtractor."""
+
+    def test_pptx_extractor_supported_types(self):
+        """PptxExtractor should support PPTX type."""
+        extractor = PptxExtractor()
+        assert extractor.supports(
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        )
+
+    def test_pptx_extractor_name(self):
+        """PptxExtractor should have correct name."""
+        extractor = PptxExtractor()
+        assert extractor.name == "pptx"
+
+    @pytest.mark.asyncio
+    async def test_pptx_extract_delegates_to_pdf(self):
+        """PptxExtractor should convert to PDF and delegate to PDFExtractor."""
+        mock_pdf_extractor = MagicMock()
+        mock_pdf_result = ExtractionResult(
+            source_uri="upload://slides.pptx",
+            mime_type="application/pdf",
+            derivatives=[Derivative(type="text", content="Slide content")],
+            extraction_method="pdf-mistral-ocr",
+        )
+        mock_pdf_extractor.extract = AsyncMock(return_value=mock_pdf_result)
+
+        extractor = PptxExtractor(pdf_extractor=mock_pdf_extractor)
+
+        with patch.object(extractor, "_convert_to_pdf", return_value=b"fake pdf bytes"):
+            raw = RawContent(
+                content=b"fake pptx bytes",
+                mime_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                source_uri="upload://slides.pptx",
+                filename="slides.pptx",
+            )
+            result = await extractor.extract(raw)
+
+        # Verify PDF extractor was called with PDF RawContent
+        mock_pdf_extractor.extract.assert_called_once()
+        pdf_raw = mock_pdf_extractor.extract.call_args[0][0]
+        assert pdf_raw.mime_type == "application/pdf"
+        assert pdf_raw.content == b"fake pdf bytes"
+        assert pdf_raw.filename == "slides.pdf"
+
+        # Verify result is tagged correctly
+        assert result.extraction_method == "pptx-via-pdf"
+        assert result.mime_type == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        assert result.auto_metadata["pdf_extraction_method"] == "pdf-mistral-ocr"
+
+    @pytest.mark.asyncio
+    async def test_pptx_convert_to_pdf_libreoffice_not_found(self):
+        """PptxExtractor should raise ExtractionError when LibreOffice is missing."""
+        extractor = PptxExtractor()
+
+        with patch("subprocess.run", side_effect=FileNotFoundError("libreoffice not found")):
+            with pytest.raises(ExtractionError, match="LibreOffice is not installed"):
+                extractor._convert_to_pdf(b"fake pptx", source_uri="test://slides.pptx")
 
 
 class TestExtractorRegistryWithBuiltins:
@@ -532,6 +1005,30 @@ class TestExtractorRegistryWithBuiltins:
         assert extractor.name == "docx"
 
 
+    def test_registry_default_has_xlsx(self):
+        """default() should include XlsxExtractor."""
+        registry = ExtractorRegistry.default()
+        mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        assert registry.supports(mime)
+
+        extractor = registry.get_extractor(mime)
+        assert extractor.name == "xlsx"
+
+    def test_registry_default_has_xlsx_legacy(self):
+        """default() should include XlsxExtractor for legacy .xls type."""
+        registry = ExtractorRegistry.default()
+        assert registry.supports("application/vnd.ms-excel")
+
+    def test_registry_default_has_pptx(self):
+        """default() should include PptxExtractor."""
+        registry = ExtractorRegistry.default()
+        mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        assert registry.supports(mime)
+
+        extractor = registry.get_extractor(mime)
+        assert extractor.name == "pptx"
+
+
 class TestModuleImports:
     """Tests that module exports are correct."""
 
@@ -559,3 +1056,5 @@ class TestModuleImports:
         assert hasattr(ingest, "HTMLExtractor")
         assert hasattr(ingest, "PDFExtractor")
         assert hasattr(ingest, "DocxExtractor")
+        assert hasattr(ingest, "XlsxExtractor")
+        assert hasattr(ingest, "PptxExtractor")

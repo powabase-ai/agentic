@@ -273,10 +273,29 @@ AGENT_DEFAULT_MODEL = "gpt-4o-mini"
 # Extraction defaults
 # =============================================================================
 # Default extraction method for PDFs. "auto" uses the fallback chain below.
-EXTRACTION_DEFAULT_METHOD = "auto"  # "auto", "mistral", "fitz", "pdfplumber"
+EXTRACTION_DEFAULT_METHOD = "auto"  # "auto", "mistral", "opendataloader", "paddleocr", "lighton", "fitz", "pdfplumber"
 
 # Ordered fallback chain used when extraction_model is "auto".
-EXTRACTION_FALLBACK_CHAIN = ["mistral", "fitz", "pdfplumber"]
+# paddleocr and lighton are NOT in the chain — user-selectable only.
+EXTRACTION_FALLBACK_CHAIN = ["mistral", "opendataloader", "fitz", "pdfplumber"]
+
+# --- PaddleOCR-VL configuration ---
+PADDLEOCR_DEFAULT_BASE_URL = "https://s1naa1u9e7v9f7ub.aistudio-app.com"
+PADDLEOCR_LAYOUT_PARSING_PATH = "/layout-parsing"
+PADDLEOCR_FILE_TYPE_PDF = 0
+PADDLEOCR_FILE_TYPE_IMAGE = 1
+PADDLEOCR_TIMEOUT = 120  # seconds — large PDFs can take time
+PADDLEOCR_USE_DOC_ORIENTATION_CLASSIFY = False
+PADDLEOCR_USE_DOC_UNWARPING = False
+PADDLEOCR_USE_CHART_RECOGNITION = False
+
+# --- LightOnOCR configuration ---
+LIGHTON_DEFAULT_BASE_URL = "https://openai.inference.de-txl.ionos.com/v1"
+LIGHTON_DEFAULT_MODEL = "lightonai/LightOnOCR-2-1B"
+LIGHTON_MAX_TOKENS = 4096
+LIGHTON_TEMPERATURE = 0.2
+LIGHTON_TOP_P = 0.9
+LIGHTON_TIMEOUT = 60  # seconds per page
 
 
 # =============================================================================

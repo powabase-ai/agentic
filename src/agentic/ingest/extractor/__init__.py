@@ -32,9 +32,11 @@ from agentic.ingest.extractor.docx import DocxExtractor
 from agentic.ingest.extractor.html import HTMLExtractor
 from agentic.ingest.extractor.image import ImageExtractor
 from agentic.ingest.extractor.pdf import PDFExtractor
+from agentic.ingest.extractor.pptx import PptxExtractor
 from agentic.ingest.extractor.registry import ExtractorRegistry
 from agentic.ingest.extractor.text import TextExtractor
 from agentic.ingest.extractor.txt import TxtExtractor
+from agentic.ingest.extractor.xlsx import XlsxExtractor
 
 __all__ = [
     "Extractor",
@@ -45,6 +47,8 @@ __all__ = [
     "HTMLExtractor",
     "PDFExtractor",
     "DocxExtractor",
+    "PptxExtractor",
+    "XlsxExtractor",
     "ImageExtractor",
     "TxtExtractor",
 ]

@@ -487,6 +487,17 @@ class Agent:
 
                 working_messages = list(state.messages) + [msg_dict]
 
+                # Emit reasoning content when the LLM explains its
+                # thinking alongside tool calls (intermediary reasoning).
+                if has_tool_calls and assistant_msg.content:
+                    context.emit_event(
+                        {
+                            "type": "reasoning",
+                            "step": step,
+                            "content": assistant_msg.content,
+                        }
+                    )
+
                 # ===== PHASE 3: DECISION =====
                 if finish_reason == "stop" or not has_tool_calls or is_last_step:
                     # Check for truncated output (finish_reason = "length" or "max_tokens")

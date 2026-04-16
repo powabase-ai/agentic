@@ -168,6 +168,10 @@ class ExtractorRegistry:
 
         _keys = provider_keys or {}
         mistral_api_key = _keys.get("mistral") or os.getenv("MISTRAL_API_KEY")
+        paddleocr_api_key = _keys.get("paddleocr") or os.getenv("PADDLEOCR_API_KEY")
+        paddleocr_base_url = _keys.get("paddleocr_base_url") or os.getenv("PADDLEOCR_BASE_URL")
+        lighton_api_key = _keys.get("lighton") or os.getenv("LIGHTON_API_KEY")
+        lighton_base_url = _keys.get("lighton_base_url") or os.getenv("LIGHTON_BASE_URL")
 
         registry = cls()
 
@@ -194,7 +198,14 @@ class ExtractorRegistry:
                 max_pages = int(os.getenv("MISTRAL_OCR_MAX_PAGES", "1000"))
             except (TypeError, ValueError):
                 max_pages = 1000
-            pdf_ext = PDFExtractor(mistral_api_key=mistral_api_key, max_pages=max_pages)
+            pdf_ext = PDFExtractor(
+                mistral_api_key=mistral_api_key,
+                paddleocr_api_key=paddleocr_api_key,
+                paddleocr_base_url=paddleocr_base_url,
+                lighton_api_key=lighton_api_key,
+                lighton_base_url=lighton_base_url,
+                max_pages=max_pages,
+            )
             registry.register(pdf_ext)
         except ImportError:
             pass  # Not yet implemented
@@ -205,6 +216,20 @@ class ExtractorRegistry:
             registry.register(DocxExtractor(pdf_extractor=pdf_ext))
         except ImportError:
             pass  # Not yet implemented
+
+        try:
+            from agentic.ingest.extractor.xlsx import XlsxExtractor
+
+            registry.register(XlsxExtractor())
+        except ImportError:
+            pass
+
+        try:
+            from agentic.ingest.extractor.pptx import PptxExtractor
+
+            registry.register(PptxExtractor(pdf_extractor=pdf_ext))
+        except ImportError:
+            pass
 
         try:
             from agentic.ingest.extractor.txt import TxtExtractor

@@ -2,10 +2,12 @@
 PDFExtractor - extract text from PDF documents with fallback strategy.
 
 Adapted from proven implementation in agentic/etl/transformers/extractors/pdf.py.
-Uses fallback strategy: Mistral OCR → PyMuPDF (fitz) → pdfplumber
+Uses fallback strategy: Mistral OCR → OpenDataLoader → PyMuPDF (fitz) → pdfplumber
 """
 
 import asyncio
+import base64
+import glob as glob_mod
 import io
 import logging
 import os
@@ -20,6 +22,8 @@ from agentic.ingest.extractor.base import (
 from agentic.ingest.models import Derivative, ExtractionResult, RawContent
 
 logger = logging.getLogger(__name__)
+
+_ODL_PAGE_SEP = "\n<!-- PAGE_BREAK -->\n"
 
 
 def _count_pages(data: bytes) -> int:
@@ -74,10 +78,12 @@ class PDFExtractor(Extractor):
 
     Extraction methods (in order of preference):
     1. Mistral OCR - Best for scanned PDFs (requires API key)
-    2. PyMuPDF (fitz) - Fast, good for text-based PDFs
-    3. pdfplumber - Fallback for edge cases
+    2. OpenDataLoader - High-accuracy structural extraction (local, needs Java)
+    3. PyMuPDF (fitz) - Fast, good for text-based PDFs
+    4. pdfplumber - Fallback for edge cases
 
-    Adapted from proven insurance-demo implementation.
+    When an explicit cloud OCR method (mistral, paddleocr, lighton) fails,
+    extraction falls back to local methods (opendataloader → fitz → pdfplumber).
 
     Example:
         >>> extractor = PDFExtractor()
@@ -92,6 +98,10 @@ class PDFExtractor(Extractor):
     def __init__(
         self,
         mistral_api_key: str | None = None,
+        paddleocr_api_key: str | None = None,
+        paddleocr_base_url: str | None = None,
+        lighton_api_key: str | None = None,
+        lighton_base_url: str | None = None,
         max_pages: int = 1000,
     ):
         """
@@ -99,9 +109,17 @@ class PDFExtractor(Extractor):
 
         Args:
             mistral_api_key: API key for Mistral OCR (optional, enables OCR)
+            paddleocr_api_key: API key for PaddleOCR-VL (optional)
+            paddleocr_base_url: Base URL for PaddleOCR-VL API (optional)
+            lighton_api_key: API key for LightOnOCR (optional)
+            lighton_base_url: Base URL for LightOnOCR API (optional)
             max_pages: Maximum pages per Mistral OCR API call (batch size)
         """
         self.mistral_api_key = mistral_api_key
+        self.paddleocr_api_key = paddleocr_api_key
+        self.paddleocr_base_url = paddleocr_base_url
+        self.lighton_api_key = lighton_api_key
+        self.lighton_base_url = lighton_base_url
         self.max_pages = max_pages
 
     def _render_page_images(self, raw: RawContent, dpi: int = 150) -> list[Derivative]:
@@ -177,6 +195,60 @@ class PDFExtractor(Extractor):
             raise ExtractionError(
                 "Mistral OCR failed", extractor_name=self.name, source_uri=raw.source_uri
             )
+        elif method == "paddleocr":
+            if not self.paddleocr_api_key:
+                raise ExtractionError(
+                    "PaddleOCR requested but PADDLEOCR_API_KEY is not configured",
+                    extractor_name=self.name,
+                    source_uri=raw.source_uri,
+                )
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    return await self._extract_paddleocr(raw)
+                except ExtractionError:
+                    raise
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        wait = 2 ** attempt
+                        logger.warning(
+                            f"PaddleOCR attempt {attempt + 1}/{max_retries} failed: {e}, "
+                            f"retrying in {wait}s"
+                        )
+                        await asyncio.sleep(wait)
+                    else:
+                        raise
+            raise ExtractionError(
+                "PaddleOCR failed", extractor_name=self.name, source_uri=raw.source_uri
+            )
+        elif method == "lighton":
+            if not self.lighton_api_key:
+                raise ExtractionError(
+                    "LightOnOCR requested but LIGHTON_API_KEY is not configured",
+                    extractor_name=self.name,
+                    source_uri=raw.source_uri,
+                )
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    return await self._extract_lighton(raw)
+                except ExtractionError:
+                    raise
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        wait = 2 ** attempt
+                        logger.warning(
+                            f"LightOnOCR attempt {attempt + 1}/{max_retries} failed: {e}, "
+                            f"retrying in {wait}s"
+                        )
+                        await asyncio.sleep(wait)
+                    else:
+                        raise
+            raise ExtractionError(
+                "LightOnOCR failed", extractor_name=self.name, source_uri=raw.source_uri
+            )
+        elif method == "opendataloader":
+            return self._extract_opendataloader(raw)
         elif method == "fitz":
             return self._extract_fitz(raw)
         elif method == "pdfplumber":
@@ -211,9 +283,33 @@ class PDFExtractor(Extractor):
             "extraction_model", EXTRACTION_DEFAULT_METHOD
         )
 
+        LOCAL_METHODS = {"opendataloader", "fitz", "pdfplumber"}
+
         if preference != "auto":
-            # Explicit method — use it directly, raise on failure
-            return await self._try_method(preference, raw)
+            try:
+                return await self._try_method(preference, raw)
+            except Exception as e:
+                # Local methods have no further fallback
+                if preference in LOCAL_METHODS:
+                    raise
+                # Cloud/OCR methods fall back to local chain
+                logger.warning(
+                    f"{preference} extraction failed: {e}, "
+                    f"falling back to local extraction methods"
+                )
+                for method in ["opendataloader", "fitz", "pdfplumber"]:
+                    try:
+                        return await self._try_method(method, raw)
+                    except Exception as fallback_err:
+                        logger.warning(
+                            f"Local fallback {method} also failed: {fallback_err}"
+                        )
+                raise ExtractionError(
+                    f"{preference} and all local fallbacks failed. "
+                    f"Original error: {e}",
+                    extractor_name=self.name,
+                    source_uri=raw.source_uri,
+                ) from e
 
         # Auto mode — iterate fallback chain
         chain = list(EXTRACTION_FALLBACK_CHAIN)
@@ -240,6 +336,80 @@ class PDFExtractor(Extractor):
             f"All extraction methods failed. Last error: {last_error}",
             extractor_name=self.name,
             source_uri=raw.source_uri,
+        )
+
+    def _extract_opendataloader(self, raw: RawContent) -> ExtractionResult:
+        """Extract using opendataloader-pdf — high-accuracy structural extraction."""
+        try:
+            import opendataloader_pdf
+        except ImportError:
+            raise ExtractionError(
+                "opendataloader-pdf is required. Install with: pip install opendataloader-pdf",
+                extractor_name=self.name,
+                source_uri=raw.source_uri,
+            ) from None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = os.path.join(tmpdir, "input.pdf")
+            output_dir = os.path.join(tmpdir, "output")
+            with open(input_path, "wb") as f:
+                f.write(raw.content)
+
+            opendataloader_pdf.convert(
+                input_path=[input_path],
+                output_dir=output_dir,
+                format="markdown",
+                markdown_page_separator=_ODL_PAGE_SEP,
+                quiet=True,
+            )
+
+            md_files = glob_mod.glob(
+                os.path.join(output_dir, "**", "*.md"), recursive=True
+            )
+            if not md_files:
+                raise ExtractionError(
+                    "opendataloader-pdf produced no output",
+                    extractor_name=self.name,
+                    source_uri=raw.source_uri,
+                )
+            with open(md_files[0], encoding="utf-8") as f:
+                raw_md = f.read()
+
+        # Split into per-page markdown using the sentinel separator
+        page_markdowns = raw_md.split(_ODL_PAGE_SEP)
+
+        # Build page_text derivatives (same pattern as fitz/pdfplumber)
+        page_text_derivs = []
+        for i, page_md in enumerate(page_markdowns):
+            page_text_derivs.append(
+                Derivative(
+                    type="page_text",
+                    content=page_md,
+                    format="plain",
+                    page=i + 1,
+                )
+            )
+
+        # Rejoin with \n\n — must match the separator registered in indexing.py
+        fulltext = "\n\n".join(page_markdowns)
+
+        derivatives = [
+            Derivative(type="markdown", content=fulltext, format="markdown"),
+        ]
+        derivatives.extend(page_text_derivs)
+        image_derivs = self._render_page_images(raw)
+        derivatives.extend(image_derivs)
+
+        return ExtractionResult(
+            source_uri=raw.source_uri,
+            mime_type=raw.mime_type,
+            derivatives=derivatives,
+            auto_metadata={
+                "page_count": len(page_markdowns),
+                "char_count": len(fulltext),
+            },
+            extraction_method="opendataloader",
+            stats={"pages_processed": len(page_markdowns)},
         )
 
     def _extract_fitz(self, raw: RawContent) -> ExtractionResult:
@@ -529,6 +699,202 @@ class PDFExtractor(Extractor):
                 "pages_processed": total_processed,
                 "batch_count": len(batch_results),
             },
+        )
+
+    async def _extract_paddleocr(self, raw: RawContent) -> ExtractionResult:
+        """Extract using PaddleOCR-VL layout parsing API."""
+        import requests
+
+        from agentic.knowledge.model_config import (
+            PADDLEOCR_DEFAULT_BASE_URL,
+            PADDLEOCR_FILE_TYPE_PDF,
+            PADDLEOCR_LAYOUT_PARSING_PATH,
+            PADDLEOCR_TIMEOUT,
+            PADDLEOCR_USE_CHART_RECOGNITION,
+            PADDLEOCR_USE_DOC_ORIENTATION_CLASSIFY,
+            PADDLEOCR_USE_DOC_UNWARPING,
+        )
+
+        base_url = self.paddleocr_base_url or PADDLEOCR_DEFAULT_BASE_URL
+        url = f"{base_url}{PADDLEOCR_LAYOUT_PARSING_PATH}"
+
+        b64_pdf = base64.b64encode(raw.content).decode("utf-8")
+        payload = {
+            "file": b64_pdf,
+            "fileType": PADDLEOCR_FILE_TYPE_PDF,
+            "useDocOrientationClassify": PADDLEOCR_USE_DOC_ORIENTATION_CLASSIFY,
+            "useDocUnwarping": PADDLEOCR_USE_DOC_UNWARPING,
+            "useChartRecognition": PADDLEOCR_USE_CHART_RECOGNITION,
+        }
+        headers = {
+            "Authorization": f"token {self.paddleocr_api_key}",
+            "Content-Type": "application/json",
+        }
+
+        logger.info("PaddleOCR: sending PDF (%d bytes) to %s", len(raw.content), url)
+
+        resp = requests.post(url, json=payload, headers=headers, timeout=PADDLEOCR_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+
+        layout_results = data.get("result", {}).get("layoutParsingResults", [])
+        if not layout_results:
+            raise ExtractionError(
+                "PaddleOCR returned no layout parsing results",
+                extractor_name=self.name,
+                source_uri=raw.source_uri,
+            )
+
+        page_markdowns = []
+        page_text_derivs = []
+        for i, res in enumerate(layout_results):
+            md_block = res.get("markdown", {})
+            page_md = md_block.get("text", "")
+
+            # Strip embedded image references (temporary URLs we don't host).
+            # PaddleOCR images dict maps {image_path: image_url}.
+            # The markdown contains ![...](image_url) patterns we need to remove.
+            images = md_block.get("images", {})
+            if images:
+                for img_path, img_url in images.items():
+                    # Remove ![alt](url) where url matches the temp image URL
+                    if img_url:
+                        pattern = r"!\[[^\]]*\]\(" + re.escape(img_url) + r"\)"
+                        page_md = re.sub(pattern, "", page_md)
+                    # Also remove references using the image path as URL
+                    if img_path:
+                        pattern = r"!\[[^\]]*\]\(" + re.escape(img_path) + r"\)"
+                        page_md = re.sub(pattern, "", page_md)
+
+            page_markdowns.append(page_md)
+            page_text_derivs.append(
+                Derivative(
+                    type="page_text",
+                    content=page_md,
+                    format="plain",
+                    page=i + 1,
+                )
+            )
+
+        fulltext = "\n\n".join(page_markdowns)
+
+        derivatives = [
+            Derivative(
+                type="markdown",
+                content=fulltext,
+                format="markdown",
+            ),
+        ]
+        derivatives.extend(page_text_derivs)
+
+        # Render page images for image-mode retrieval
+        image_derivs = self._render_page_images(raw)
+        derivatives.extend(image_derivs)
+
+        return ExtractionResult(
+            source_uri=raw.source_uri,
+            mime_type=raw.mime_type,
+            derivatives=derivatives,
+            auto_metadata={
+                "page_count": len(page_markdowns),
+                "char_count": len(fulltext),
+            },
+            extraction_method="paddleocr_vl",
+            stats={"pages_processed": len(page_markdowns)},
+        )
+
+    async def _extract_lighton(self, raw: RawContent) -> ExtractionResult:
+        """Extract using LightOnOCR via OpenAI-compatible chat completions API."""
+        import requests
+
+        from agentic.knowledge.model_config import (
+            LIGHTON_DEFAULT_BASE_URL,
+            LIGHTON_DEFAULT_MODEL,
+            LIGHTON_MAX_TOKENS,
+            LIGHTON_TEMPERATURE,
+            LIGHTON_TIMEOUT,
+            LIGHTON_TOP_P,
+        )
+
+        base_url = self.lighton_base_url or LIGHTON_DEFAULT_BASE_URL
+        url = f"{base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.lighton_api_key}",
+            "Content-Type": "application/json",
+        }
+
+        # Render pages once — reuse for both API calls and image derivatives
+        image_derivs = self._render_page_images(raw)
+        if not image_derivs:
+            raise ExtractionError(
+                "LightOnOCR requires PyMuPDF to render page images",
+                extractor_name=self.name,
+                source_uri=raw.source_uri,
+            )
+
+        logger.info("LightOnOCR: processing %d pages via %s", len(image_derivs), url)
+
+        page_markdowns = []
+        page_text_derivs = []
+        for img_deriv in image_derivs:
+            b64_img = base64.b64encode(img_deriv.content).decode("utf-8")
+            payload = {
+                "model": LIGHTON_DEFAULT_MODEL,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{b64_img}",
+                                },
+                            }
+                        ],
+                    }
+                ],
+                "max_tokens": LIGHTON_MAX_TOKENS,
+                "temperature": LIGHTON_TEMPERATURE,
+                "top_p": LIGHTON_TOP_P,
+            }
+
+            resp = requests.post(url, json=payload, headers=headers, timeout=LIGHTON_TIMEOUT)
+            resp.raise_for_status()
+            data = resp.json()
+
+            page_md = data["choices"][0]["message"]["content"]
+            page_markdowns.append(page_md)
+            page_text_derivs.append(
+                Derivative(
+                    type="page_text",
+                    content=page_md,
+                    format="plain",
+                    page=img_deriv.page,
+                )
+            )
+
+        fulltext = "\n\n".join(page_markdowns)
+
+        derivatives = [
+            Derivative(
+                type="markdown",
+                content=fulltext,
+                format="markdown",
+            ),
+        ]
+        derivatives.extend(page_text_derivs)
+        derivatives.extend(image_derivs)
+
+        return ExtractionResult(
+            source_uri=raw.source_uri,
+            mime_type=raw.mime_type,
+            derivatives=derivatives,
+            auto_metadata={
+                "page_count": len(page_markdowns),
+                "char_count": len(fulltext),
+            },
+            extraction_method="lighton_ocr",
+            stats={"pages_processed": len(page_markdowns)},
         )
 
     def _extract_pdfplumber(self, raw: RawContent) -> ExtractionResult:

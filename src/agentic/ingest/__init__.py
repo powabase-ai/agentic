@@ -37,7 +37,9 @@ from agentic.ingest.extractor import (
     HTMLExtractor,
     ImageExtractor,
     PDFExtractor,
+    PptxExtractor,
     TextExtractor,
+    XlsxExtractor,
 )
 from agentic.ingest.models import ContentItem, Derivative, ExtractionResult, RawContent
 
@@ -58,5 +60,7 @@ __all__ = [
     "HTMLExtractor",
     "PDFExtractor",
     "DocxExtractor",
+    "PptxExtractor",
+    "XlsxExtractor",
     "ImageExtractor",
 ]

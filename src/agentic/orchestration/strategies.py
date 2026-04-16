@@ -117,7 +117,7 @@ class SupervisorEngine(StrategyEngine):
 
             # Create the orchestrator agent
             orchestrator = Agent(
-                model=orchestration.settings.get("model", "gpt-4.1-mini"),
+                model=orchestration.settings.get("model", "gpt-5.4"),
                 system_prompt=_build_orchestrator_prompt(orchestration, entities),
                 name=f"{orchestration.name}_orchestrator",
             )
@@ -143,7 +143,7 @@ class SupervisorEngine(StrategyEngine):
             output.events = agent_output.events
             output.coordination_metadata = {
                 "strategy": "supervisor",
-                "model": orchestration.settings.get("model", "gpt-4.1-mini"),
+                "model": orchestration.settings.get("model", "gpt-5.4"),
                 "tool_calls": [tc.to_dict() for tc in agent_output.tool_calls],
             }
             output.error = agent_output.error
@@ -374,7 +374,7 @@ class ParallelEngine(StrategyEngine):
             merge_parts.append("\nSynthesize these into a single coherent response.")
 
             merge_agent = Agent(
-                model=orchestration.settings.get("model", "gpt-4.1-mini"),
+                model=orchestration.settings.get("model", "gpt-5.4"),
                 system_prompt="You combine multiple analysis results into a single coherent response.",
                 name=f"{orchestration.name}_merger",
             )
