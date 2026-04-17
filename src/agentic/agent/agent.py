@@ -487,8 +487,21 @@ class Agent:
 
                 working_messages = list(state.messages) + [msg_dict]
 
-                # Emit reasoning content when the LLM explains its
-                # thinking alongside tool calls (intermediary reasoning).
+                # Emit reasoning from LiteLLM's reasoning_content field
+                # (Claude thinking blocks, OpenAI o-series reasoning)
+                reasoning_text = getattr(assistant_msg, "reasoning_content", None)
+                if reasoning_text:
+                    context.emit_event(
+                        {
+                            "type": "reasoning",
+                            "step": step,
+                            "content": reasoning_text,
+                            "source": "thinking",
+                        }
+                    )
+
+                # Emit intermediary content when the LLM explains its
+                # thinking alongside tool calls.
                 if has_tool_calls and assistant_msg.content:
                     context.emit_event(
                         {
