@@ -297,7 +297,10 @@ class PDFExtractor(Extractor):
                 )
                 for method in ["opendataloader", "fitz", "pdfplumber"]:
                     try:
-                        return await self._try_method(method, raw)
+                        result = await self._try_method(method, raw)
+                        result.auto_metadata["requested_method"] = preference
+                        result.auto_metadata["fallback_reason"] = str(e)
+                        return result
                     except Exception as fallback_err:
                         logger.warning(
                             f"Local fallback {method} also failed: {fallback_err}"
