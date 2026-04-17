@@ -679,8 +679,6 @@ class TestPDFExtractorOpenDataLoader:
     @pytest.mark.asyncio
     async def test_opendataloader_extraction(self):
         """OpenDataLoader should produce per-page page_text derivatives and joined markdown."""
-        from agentic.ingest.extractor.pdf import _ODL_PAGE_SEP
-
         extractor = PDFExtractor()
         raw = RawContent(
             content=b"%PDF-1.4 fake",
@@ -692,18 +690,39 @@ class TestPDFExtractorOpenDataLoader:
         page1 = "# Document Title\n\nFirst page content."
         page2 = "## Chapter 2\n\nSecond page content."
         page3 = "## Chapter 3\n\nThird page content."
-        mock_md_content = _ODL_PAGE_SEP.join([page1, page2, page3])
+        page_contents = [page1, page2, page3]
 
-        def mock_convert(input_path, output_dir, format, markdown_page_separator, quiet):
+        # Track which page is being converted (by call order)
+        convert_call_count = {"n": 0}
+
+        def mock_convert(input_path, output_dir, format, quiet):
             import os
             assert isinstance(input_path, list), "input_path must be a list"
             assert len(input_path) == 1
-            assert markdown_page_separator == _ODL_PAGE_SEP
+            idx = convert_call_count["n"]
+            convert_call_count["n"] += 1
             os.makedirs(output_dir, exist_ok=True)
-            with open(os.path.join(output_dir, "input.md"), "w") as f:
-                f.write(mock_md_content)
+            with open(os.path.join(output_dir, "page.md"), "w") as f:
+                f.write(page_contents[idx])
 
-        with patch.dict("sys.modules", {"opendataloader_pdf": MagicMock(convert=mock_convert)}), \
+        # Mock fitz: first call opens src_doc (with stream= kwarg),
+        # subsequent calls create empty single-page docs (no args)
+        mock_src_doc = MagicMock()
+        mock_src_doc.__len__ = lambda self: 3
+
+        mock_fitz = MagicMock()
+
+        def mock_fitz_open(*args, **kwargs):
+            if "stream" in kwargs:
+                return mock_src_doc  # src_doc = fitz.open(stream=..., filetype="pdf")
+            return MagicMock()  # single = fitz.open()  — empty doc for insert_pdf
+
+        mock_fitz.open.side_effect = mock_fitz_open
+
+        with patch.dict("sys.modules", {
+                "opendataloader_pdf": MagicMock(convert=mock_convert),
+                "fitz": mock_fitz,
+             }), \
              patch.object(extractor, "_render_page_images", return_value=[
                  Derivative(type="image", content=b"fake-png", format="png", page=1),
              ]):
@@ -711,7 +730,7 @@ class TestPDFExtractorOpenDataLoader:
 
         assert result.extraction_method == "opendataloader"
         assert result.auto_metadata["page_count"] == 3
-        expected_fulltext = "\n\n".join([page1, page2, page3])
+        expected_fulltext = "\n\n".join(page_contents)
         assert result.auto_metadata["char_count"] == len(expected_fulltext)
 
         md_derivs = [d for d in result.derivatives if d.type == "markdown"]

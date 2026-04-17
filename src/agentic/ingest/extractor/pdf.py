@@ -23,8 +23,6 @@ from agentic.ingest.models import Derivative, ExtractionResult, RawContent
 
 logger = logging.getLogger(__name__)
 
-_ODL_PAGE_SEP = "\n<!-- PAGE_BREAK -->\n"
-
 
 def _count_pages(data: bytes) -> int:
     """Count pages in a PDF from bytes using fitz, with regex fallback."""
@@ -339,7 +337,11 @@ class PDFExtractor(Extractor):
         )
 
     def _extract_opendataloader(self, raw: RawContent) -> ExtractionResult:
-        """Extract using opendataloader-pdf — high-accuracy structural extraction."""
+        """Extract using opendataloader-pdf — high-accuracy structural extraction.
+
+        Splits the PDF into single-page PDFs and extracts each independently
+        to guarantee 1:1 alignment between page text and page images.
+        """
         try:
             import opendataloader_pdf
         except ImportError:
@@ -349,48 +351,63 @@ class PDFExtractor(Extractor):
                 source_uri=raw.source_uri,
             ) from None
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            input_path = os.path.join(tmpdir, "input.pdf")
-            output_dir = os.path.join(tmpdir, "output")
-            with open(input_path, "wb") as f:
-                f.write(raw.content)
+        try:
+            import fitz
+        except ImportError:
+            raise ExtractionError(
+                "PyMuPDF (fitz) is required for per-page PDF splitting. "
+                "Install with: pip install pymupdf",
+                extractor_name=self.name,
+                source_uri=raw.source_uri,
+            ) from None
 
-            opendataloader_pdf.convert(
-                input_path=[input_path],
-                output_dir=output_dir,
-                format="markdown",
-                markdown_page_separator=_ODL_PAGE_SEP,
-                quiet=True,
-            )
+        src_doc = fitz.open(stream=raw.content, filetype="pdf")
+        try:
+            num_pages = len(src_doc)
 
-            md_files = glob_mod.glob(
-                os.path.join(output_dir, "**", "*.md"), recursive=True
-            )
-            if not md_files:
-                raise ExtractionError(
-                    "opendataloader-pdf produced no output",
-                    extractor_name=self.name,
-                    source_uri=raw.source_uri,
-                )
-            with open(md_files[0], encoding="utf-8") as f:
-                raw_md = f.read()
+            page_markdowns = []
+            page_text_derivs = []
 
-        # Split into per-page markdown using the sentinel separator
-        page_markdowns = raw_md.split(_ODL_PAGE_SEP)
+            with tempfile.TemporaryDirectory() as tmpdir:
+                for page_num in range(num_pages):
+                    # Create a single-page PDF via insert_pdf (same pattern as _split_pdf)
+                    single = fitz.open()  # new empty PDF
+                    try:
+                        single.insert_pdf(src_doc, from_page=page_num, to_page=page_num)
+                        page_pdf_path = os.path.join(tmpdir, f"page_{page_num}.pdf")
+                        single.save(page_pdf_path)
+                    finally:
+                        single.close()
 
-        # Build page_text derivatives (same pattern as fitz/pdfplumber)
-        page_text_derivs = []
-        for i, page_md in enumerate(page_markdowns):
-            page_text_derivs.append(
-                Derivative(
-                    type="page_text",
-                    content=page_md,
-                    format="plain",
-                    page=i + 1,
-                )
-            )
+                    # Extract with opendataloader
+                    page_output_dir = os.path.join(tmpdir, f"output_{page_num}")
+                    opendataloader_pdf.convert(
+                        input_path=[page_pdf_path],
+                        output_dir=page_output_dir,
+                        format="markdown",
+                        quiet=True,
+                    )
 
-        # Rejoin with \n\n — must match the separator registered in indexing.py
+                    md_files = glob_mod.glob(
+                        os.path.join(page_output_dir, "**", "*.md"), recursive=True
+                    )
+                    page_md = ""
+                    if md_files:
+                        with open(md_files[0], encoding="utf-8") as f:
+                            page_md = f.read().strip()
+
+                    page_markdowns.append(page_md)
+                    page_text_derivs.append(
+                        Derivative(
+                            type="page_text",
+                            content=page_md,
+                            format="plain",
+                            page=page_num + 1,
+                        )
+                    )
+        finally:
+            src_doc.close()
+
         fulltext = "\n\n".join(page_markdowns)
 
         derivatives = [
@@ -405,11 +422,11 @@ class PDFExtractor(Extractor):
             mime_type=raw.mime_type,
             derivatives=derivatives,
             auto_metadata={
-                "page_count": len(page_markdowns),
+                "page_count": num_pages,
                 "char_count": len(fulltext),
             },
             extraction_method="opendataloader",
-            stats={"pages_processed": len(page_markdowns)},
+            stats={"pages_processed": num_pages},
         )
 
     def _extract_fitz(self, raw: RawContent) -> ExtractionResult:
