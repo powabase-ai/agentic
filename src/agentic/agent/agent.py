@@ -415,6 +415,9 @@ class Agent:
 
                 # Accumulate usage
                 step_usage = self._extract_usage(response)
+                # Fire per-call cost event before we mutate the accumulator
+                # so consumers see per-step token breakdowns, not the running total.
+                self._emit_cost(context, state.current_model, step_usage)
                 if step_usage:
                     for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
                         total_usage[k] += step_usage.get(k, 0)
@@ -789,6 +792,7 @@ class Agent:
 
             # Extract usage (including extended token details)
             usage = self._extract_usage(response)
+            self._emit_cost(context, self.model, usage)
 
             # Add assistant message to messages list
             messages.append({"role": "assistant", "content": content})
@@ -889,9 +893,16 @@ class Agent:
                     content = chunk.choices[0].delta.content
                     content_chunks.append(content)
                     yield content
-                # The final chunk has usage but an empty choices list
+                # The final chunk has usage but an empty choices list. Some
+                # providers emit multiple cumulative-usage chunks mid-stream,
+                # so don't emit the cost event here — just remember the last
+                # usage and emit once after the loop.
                 if hasattr(chunk, "usage") and chunk.usage is not None:
                     usage_data = self._extract_usage(chunk)
+
+            # Exactly one cost event per stream call, regardless of how many
+            # chunks carried usage.
+            self._emit_cost(context, self.model, usage_data)
 
             # Build final content
             final_content = "".join(content_chunks)
@@ -1218,6 +1229,22 @@ class Agent:
             if cached is not None:
                 usage["cached_tokens"] = cached
         return usage
+
+    def _emit_cost(self, context: ExecutionContext | None, model: str, usage: dict[str, int] | None) -> None:
+        """Fire the ExecutionContext.on_cost callback, if any, fire-and-forget.
+
+        Callback failures are swallowed by design — the ledger must never
+        fail a run. See agentic-platform's services/cost_emitter.py for the
+        concrete consumer; other environments can plug in their own.
+        """
+        if context is None or context.on_cost is None or not usage:
+            return
+        try:
+            context.on_cost(model, usage)
+        except Exception:
+            # Intentionally silent: observability callbacks are best-effort.
+            # The agent doesn't know or care whether the ledger write succeeded.
+            pass
 
     def _build_messages(
         self,
