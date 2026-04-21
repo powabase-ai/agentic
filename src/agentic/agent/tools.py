@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -21,6 +22,8 @@ from agentic.knowledge.model_config import (
 
 if TYPE_CHECKING:
     from agentic.execution.context import ExecutionContext
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -262,8 +265,6 @@ class DelegateTool(ToolDefinition):
     def execute(
         self, arguments: dict[str, Any], context: ExecutionContext | None
     ) -> str:
-        import logging
-
         if context is None:
             from agentic.execution.context import ExecutionContext as EC
 
@@ -313,15 +314,17 @@ class DelegateTool(ToolDefinition):
                         "error": output.error,
                         "usage": output.usage or {},
                         "steps": output.steps,
-                        "events": getattr(output, "events", None),
-                        "tool_calls": getattr(output, "tool_calls", None),
-                        "reasoning_steps": getattr(output, "reasoning_steps", None),
-                        "started_at": getattr(output, "started_at", None),
-                        "completed_at": getattr(output, "completed_at", None),
+                        "events": output.events,
+                        "tool_calls": [
+                            tc.to_dict() for tc in (output.tool_calls or [])
+                        ],
+                        "messages": output.messages or [],
+                        "started_at": output.started_at,
+                        "completed_at": output.completed_at,
                     }
                 )
             except Exception:
-                logging.getLogger(__name__).exception(
+                logger.exception(
                     "DelegateTool.on_run_complete hook failed for %s; continuing",
                     agent_name,
                 )

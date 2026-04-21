@@ -16,7 +16,6 @@ def _make_agent_output(content="done", status=ExecutionStatus.COMPLETED):
     output.steps = 2
     output.events = [{"type": "step", "seq": 1}]
     output.tool_calls = []
-    output.reasoning_steps = []
     output.messages = []
     output.started_at = None
     output.completed_at = None
@@ -51,6 +50,11 @@ def test_delegate_tool_invokes_hook_with_payload():
     assert captured["agent_name"] == "Specialist"
     assert captured["orchestration_run_id"] == "orch-run-1"
     assert captured["child_execution_id"]  # non-empty
+    assert "events" in captured
+    assert "tool_calls" in captured
+    assert isinstance(captured["tool_calls"], list)
+    assert "messages" in captured
+    assert "reasoning_steps" not in captured
 
 
 def test_delegate_tool_hook_exceptions_do_not_break_delegation():
