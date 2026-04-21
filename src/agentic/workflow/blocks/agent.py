@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncGenerator
-from typing import Any
 
 from agentic.agent.agent import Agent
 from agentic.workflow.block import BaseBlock, BlockInput, BlockOutput
@@ -87,6 +86,24 @@ class AgentBlock(BaseBlock):
 
         agent = self._build_agent(model, system_prompt)
         output = await agent.arun(prompt)
+
+        hook = block_input.services.get("on_agent_run_complete")
+        if hook is not None:
+            try:
+                hook(
+                    {
+                        "block_id": self.config.get("block_id"),
+                        "model": model,
+                        "system_prompt": system_prompt,
+                        "prompt": prompt,
+                        "content": output.content,
+                        "usage": output.usage,
+                    }
+                )
+            except Exception:
+                logger.exception(
+                    "on_agent_run_complete hook failed in AgentBlock; continuing"
+                )
 
         return BlockOutput(
             data={
