@@ -100,7 +100,7 @@ class CustomTool(ToolDefinition):
             timeout=self.timeout,
         )
         response.raise_for_status()
-        return response.text[:self.max_output_length]
+        return response.text[: self.max_output_length]
 
 
 @dataclass
@@ -124,7 +124,9 @@ class KnowledgeSearchTool(ToolDefinition):
     knowledge_base_configs: list[dict[str, Any]] = field(default_factory=list)
     max_context_tokens: int = _DEFAULT_MAX_CONTEXT_TOKENS
     include_kb_filter: bool = False
-    search_handler: Callable[..., str | list[dict[str, Any]]] | None = field(default=None, repr=False)
+    search_handler: Callable[..., str | list[dict[str, Any]]] | None = field(
+        default=None, repr=False
+    )
 
     def __post_init__(self):
         # Auto-generate input_schema if not provided (empty dict)
@@ -163,10 +165,7 @@ class KnowledgeSearchTool(ToolDefinition):
         requested_names = arguments.get("knowledge_base_names")
         if requested_names and self.include_kb_filter:
             requested_set = set(requested_names)
-            kb_configs = [
-                c for c in kb_configs
-                if c.get("name") in requested_set
-            ]
+            kb_configs = [c for c in kb_configs if c.get("name") in requested_set]
             if not kb_configs:
                 return "No matching knowledge bases found for the requested names."
 
@@ -180,13 +179,19 @@ class KnowledgeSearchTool(ToolDefinition):
         # Handler may return (content, metadata) tuple with context_handler_id
         if isinstance(result, tuple) and len(result) == 2:
             content, metadata = result
-            if context and isinstance(metadata, dict) and metadata.get("context_handler_id"):
-                context.emit_event({
-                    "type": "context_handler_created",
-                    "context_handler_id": metadata["context_handler_id"],
-                    "tool_name": self.name,
-                    "query": arguments.get("query", ""),
-                })
+            if (
+                context
+                and isinstance(metadata, dict)
+                and metadata.get("context_handler_id")
+            ):
+                context.emit_event(
+                    {
+                        "type": "context_handler_created",
+                        "context_handler_id": metadata["context_handler_id"],
+                        "tool_name": self.name,
+                        "query": arguments.get("query", ""),
+                    }
+                )
             return content
         return result
 
@@ -222,6 +227,8 @@ class DelegateTool(ToolDefinition):
 
     Used by the orchestration supervisor to invoke specialist agents.
     The delegate creates a child ExecutionContext and calls agent.run().
+    An optional on_run_complete hook is invoked after the sub-agent returns —
+    the platform layer uses this to persist the delegated run.
     """
 
     # Override parent's input_schema with auto-generated default
@@ -235,6 +242,9 @@ class DelegateTool(ToolDefinition):
     )  # Agent instance (Any to avoid circular import)
     agent_tools: dict[str, ToolDefinition] = field(default_factory=dict)
     max_steps: int = DELEGATE_MAX_STEPS
+    on_run_complete: Callable[[dict[str, Any]], None] | None = field(
+        default=None, repr=False
+    )
 
     def __post_init__(self):
         if not self.input_schema:
@@ -252,6 +262,8 @@ class DelegateTool(ToolDefinition):
     def execute(
         self, arguments: dict[str, Any], context: ExecutionContext | None
     ) -> str:
+        import logging
+
         if context is None:
             from agentic.execution.context import ExecutionContext as EC
 
@@ -259,11 +271,12 @@ class DelegateTool(ToolDefinition):
 
         # Create child context (raises MaxDepthExceeded if at limit)
         child_ctx = context.child_context()
+        agent_name = self.agent.name if self.agent else self.name
 
         context.emit_event(
             {
                 "type": "delegation_started",
-                "agent": self.agent.name if self.agent else self.name,
+                "agent": agent_name,
                 "task": arguments.get("task", ""),
                 "child_execution_id": child_ctx.execution_id,
             }
@@ -279,12 +292,38 @@ class DelegateTool(ToolDefinition):
         context.emit_event(
             {
                 "type": "delegation_completed",
-                "agent": self.agent.name if self.agent else self.name,
+                "agent": agent_name,
                 "child_execution_id": child_ctx.execution_id,
                 "status": output.status.value,
                 "steps": output.steps,
                 "usage": output.usage,
             }
         )
+
+        if self.on_run_complete is not None:
+            try:
+                self.on_run_complete(
+                    {
+                        "agent_name": agent_name,
+                        "child_execution_id": child_ctx.execution_id,
+                        "orchestration_run_id": context.orchestration_run_id,
+                        "task": arguments.get("task", ""),
+                        "content": output.content,
+                        "status": output.status,
+                        "error": output.error,
+                        "usage": output.usage or {},
+                        "steps": output.steps,
+                        "events": getattr(output, "events", None),
+                        "tool_calls": getattr(output, "tool_calls", None),
+                        "reasoning_steps": getattr(output, "reasoning_steps", None),
+                        "started_at": getattr(output, "started_at", None),
+                        "completed_at": getattr(output, "completed_at", None),
+                    }
+                )
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "DelegateTool.on_run_complete hook failed for %s; continuing",
+                    agent_name,
+                )
 
         return output.content or output.error or ""
