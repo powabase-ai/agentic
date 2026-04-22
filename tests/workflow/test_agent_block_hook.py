@@ -1,8 +1,11 @@
 """Unit test: AgentBlock invokes the on_agent_run_complete services hook."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from agentic.execution.status import ExecutionStatus
 from agentic.workflow.block import BlockInput
 from agentic.workflow.blocks.agent import AgentBlock
 
@@ -122,3 +125,113 @@ def test_agent_block_hook_exceptions_do_not_break_execute():
         result = asyncio.run(block.execute(bi))
 
     assert result.data["output"] == "response"
+
+
+def test_agent_block_execute_passes_status_and_error_from_output():
+    """On a failed arun (status=FAILED), the hook payload must carry status+error
+    so the platform recorder can persist with AgentRunStatus.FAILED instead of
+    silently labelling it COMPLETED."""
+    called = {}
+
+    def hook(payload):
+        called.update(payload)
+
+    fake_output = MagicMock()
+    fake_output.content = None
+    fake_output.usage = {}
+    fake_output.status = ExecutionStatus.FAILED
+    fake_output.error = "LLM backend unavailable"
+
+    block = _make_block()
+    with patch("agentic.workflow.blocks.agent.Agent") as FakeAgentCls:
+        instance = FakeAgentCls.return_value
+        instance.arun = AsyncMock(return_value=fake_output)
+
+        bi = BlockInput(services={"on_agent_run_complete": hook})
+        asyncio.run(block.execute(bi))
+
+    assert called["status"] == ExecutionStatus.FAILED
+    assert called["error"] == "LLM backend unavailable"
+    assert called["content"] is None
+
+
+def test_agent_block_execute_passes_status_completed_on_success():
+    called = {}
+
+    def hook(payload):
+        called.update(payload)
+
+    fake_output = MagicMock()
+    fake_output.content = "ok"
+    fake_output.usage = {"total_tokens": 1}
+    fake_output.status = ExecutionStatus.COMPLETED
+    fake_output.error = None
+
+    block = _make_block()
+    with patch("agentic.workflow.blocks.agent.Agent") as FakeAgentCls:
+        instance = FakeAgentCls.return_value
+        instance.arun = AsyncMock(return_value=fake_output)
+
+        bi = BlockInput(services={"on_agent_run_complete": hook})
+        asyncio.run(block.execute(bi))
+
+    assert called["status"] == ExecutionStatus.COMPLETED
+    assert called["error"] is None
+
+
+def test_agent_block_stream_fires_hook_on_astream_error_and_re_raises():
+    """If Agent.astream raises mid-stream, AgentBlock.stream must still fire
+    the persistence hook (with partial content + error) before re-raising so
+    the caller's workflow-block log correctly links to a FAILED agent_run."""
+    called = {}
+
+    def hook(payload):
+        called.update(payload)
+
+    async def failing_astream(prompt):
+        yield "partial "
+        raise RuntimeError("stream dropped")
+
+    block = _make_block()
+    with patch("agentic.workflow.blocks.agent.Agent") as FakeAgentCls:
+        instance = FakeAgentCls.return_value
+        instance.astream = failing_astream
+
+        bi = BlockInput(services={"on_agent_run_complete": hook})
+
+        async def _consume():
+            async for _ in block.stream(bi):
+                pass
+
+        with pytest.raises(RuntimeError, match="stream dropped"):
+            asyncio.run(_consume())
+
+    assert called["status"] == ExecutionStatus.FAILED
+    assert called["error"] == "stream dropped"
+    assert called["content"] == "partial "
+
+
+def test_agent_block_stream_hook_exceptions_do_not_suppress_original_error():
+    """If the persistence hook itself raises during the failure path, the
+    original astream exception must still propagate (hook error is logged)."""
+
+    def bad_hook(payload):
+        raise RuntimeError("hook also broken")
+
+    async def failing_astream(prompt):
+        yield "early chunk"
+        raise RuntimeError("original failure")
+
+    block = _make_block()
+    with patch("agentic.workflow.blocks.agent.Agent") as FakeAgentCls:
+        instance = FakeAgentCls.return_value
+        instance.astream = failing_astream
+
+        bi = BlockInput(services={"on_agent_run_complete": bad_hook})
+
+        async def _consume():
+            async for _ in block.stream(bi):
+                pass
+
+        with pytest.raises(RuntimeError, match="original failure"):
+            asyncio.run(_consume())
