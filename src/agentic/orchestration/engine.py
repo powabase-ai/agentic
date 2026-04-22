@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -21,6 +22,7 @@ class StrategyEngine:
         context: ExecutionContext | None,
         *,
         history: list[dict] | None = None,
+        on_delegate_complete: Callable[[dict], None] | None = None,
     ) -> OrchestrationOutput:
         raise NotImplementedError
 
