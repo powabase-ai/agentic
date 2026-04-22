@@ -128,6 +128,25 @@ class AgentBlock(BaseBlock):
             yield chunk
 
         content = "".join(chunks)
+
+        hook = block_input.services.get("on_agent_run_complete")
+        if hook is not None:
+            try:
+                hook(
+                    {
+                        "block_id": self.config.get("block_id"),
+                        "model": model,
+                        "system_prompt": system_prompt,
+                        "prompt": prompt,
+                        "content": content,
+                        "usage": None,
+                    }
+                )
+            except Exception:
+                logger.exception(
+                    "on_agent_run_complete hook failed in AgentBlock.stream(); continuing"
+                )
+
         yield BlockOutput(
             data={
                 "output": content,

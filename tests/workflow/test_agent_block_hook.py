@@ -60,6 +60,49 @@ def test_agent_block_without_hook_works_as_before():
     assert result.data["output"] == "response"
 
 
+def test_agent_block_stream_calls_services_hook_after_run():
+    called = {}
+
+    def hook(payload):
+        called.update(payload)
+
+    async def fake_astream(prompt):
+        yield "hello "
+        yield "world"
+
+    block = _make_block()
+    with __import__("unittest.mock", fromlist=["patch"]).patch(
+        "agentic.workflow.blocks.agent.Agent"
+    ) as FakeAgentCls:
+        instance = FakeAgentCls.return_value
+        instance.astream = fake_astream
+
+        bi = BlockInput(services={"on_agent_run_complete": hook})
+
+        async def _run():
+            outputs = []
+            async for item in block.stream(bi):
+                outputs.append(item)
+            return outputs
+
+        outputs = asyncio.run(_run())
+
+    # Last item should be BlockOutput with full content
+    from agentic.workflow.block import BlockOutput
+
+    assert isinstance(outputs[-1], BlockOutput)
+    assert outputs[-1].data["output"] == "hello world"
+
+    # Hook must have been called with the same payload keys as execute()
+    assert called["content"] == "hello world"
+    assert called["block_id"] is None or isinstance(
+        called["block_id"], str | type(None)
+    )
+    assert called["system_prompt"] is not None
+    assert called["prompt"] == "hello"
+    assert called["model"] == "gpt-4o-mini"
+
+
 def test_agent_block_hook_exceptions_do_not_break_execute():
     def bad_hook(payload):
         raise RuntimeError("boom")
