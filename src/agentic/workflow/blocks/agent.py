@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncGenerator
-from typing import Any
 
 from agentic.agent.agent import Agent
 from agentic.workflow.block import BaseBlock, BlockInput, BlockOutput
@@ -88,6 +87,26 @@ class AgentBlock(BaseBlock):
         agent = self._build_agent(model, system_prompt)
         output = await agent.arun(prompt)
 
+        hook = block_input.services.get("on_agent_run_complete")
+        if hook is not None:
+            try:
+                hook(
+                    {
+                        "block_id": self.config.get("block_id"),
+                        "model": model,
+                        "system_prompt": system_prompt,
+                        "prompt": prompt,
+                        "content": output.content,
+                        "usage": output.usage,
+                        "status": output.status,
+                        "error": output.error,
+                    }
+                )
+            except Exception:
+                logger.exception(
+                    "on_agent_run_complete hook failed in AgentBlock; continuing"
+                )
+
         return BlockOutput(
             data={
                 "output": output.content,
@@ -99,6 +118,11 @@ class AgentBlock(BaseBlock):
     async def stream(
         self, block_input: BlockInput
     ) -> AsyncGenerator[str | BlockOutput]:
+        # Import here to keep the module-level import graph clean — ExecutionStatus
+        # is a tiny leaf type; this avoids touching top-of-file imports for one
+        # narrow call site.
+        from agentic.execution.status import ExecutionStatus
+
         model = self.config.get("model", "gpt-4o-mini")
         system_prompt = await self._build_system_prompt(block_input)
         prompt = self._resolve_prompt(block_input)
@@ -106,11 +130,52 @@ class AgentBlock(BaseBlock):
         agent = self._build_agent(model, system_prompt)
         chunks: list[str] = []
 
-        async for chunk in agent.astream(prompt):
-            chunks.append(chunk)
-            yield chunk
+        # Agent.astream is a pure async generator with no internal try/except —
+        # LLM errors raise out of `async for`. Wrap here so we can still fire
+        # the persistence hook (with partial content + error) before re-raising.
+        stream_error: Exception | None = None
+        try:
+            async for chunk in agent.astream(prompt):
+                chunks.append(chunk)
+                yield chunk
+        except Exception as e:
+            stream_error = e
+            logger.error(
+                "AgentBlock.stream failed during astream: %s", e, exc_info=True
+            )
 
         content = "".join(chunks)
+
+        hook = block_input.services.get("on_agent_run_complete")
+        if hook is not None:
+            try:
+                hook(
+                    {
+                        "block_id": self.config.get("block_id"),
+                        "model": model,
+                        "system_prompt": system_prompt,
+                        "prompt": prompt,
+                        "content": content,
+                        "usage": None,
+                        "status": (
+                            ExecutionStatus.FAILED
+                            if stream_error is not None
+                            else ExecutionStatus.COMPLETED
+                        ),
+                        "error": str(stream_error)
+                        if stream_error is not None
+                        else None,
+                    }
+                )
+            except Exception:
+                logger.exception(
+                    "on_agent_run_complete hook failed in AgentBlock.stream(); continuing"
+                )
+
+        if stream_error is not None:
+            # Preserve the original exception type + traceback.
+            raise stream_error
+
         yield BlockOutput(
             data={
                 "output": content,

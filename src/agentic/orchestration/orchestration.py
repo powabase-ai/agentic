@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -92,12 +93,20 @@ class Orchestration:
         session: OrchestrationSession | None = None,
         context: ExecutionContext | None = None,
         history: list[dict] | None = None,
+        on_delegate_complete: Callable[[dict], None] | None = None,
     ) -> OrchestrationOutput:
         """Execute the orchestration with the given input."""
         from agentic.orchestration.engine import get_strategy_engine
 
         engine = get_strategy_engine(self.strategy)
-        return engine.execute(self, input, session, context, history=history)
+        return engine.execute(
+            self,
+            input,
+            session,
+            context,
+            history=history,
+            on_delegate_complete=on_delegate_complete,
+        )
 
     async def arun(
         self,

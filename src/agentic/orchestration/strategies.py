@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import concurrent.futures
+import logging
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -13,6 +15,8 @@ from agentic.execution.context import ExecutionContext
 from agentic.execution.status import ExecutionStatus
 from agentic.orchestration.engine import StrategyEngine
 from agentic.orchestration.output import OrchestrationOutput
+
+logger = logging.getLogger(__name__)
 
 
 def _build_orchestrator_prompt(orchestration, entities) -> str:
@@ -53,7 +57,9 @@ def _sanitize_tool_name(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "_", name)
 
 
-def _build_delegate_tools(entities) -> dict[str, DelegateTool]:
+def _build_delegate_tools(
+    entities, on_run_complete: Callable[[dict], None] | None = None
+) -> dict[str, DelegateTool]:
     """Build delegate tools from agent entities."""
     tools: dict[str, DelegateTool] = {}
     for entity in entities:
@@ -66,6 +72,7 @@ def _build_delegate_tools(entities) -> dict[str, DelegateTool]:
                 agent=entity.agent,
                 agent_tools=entity.agent_tools or {},
                 max_steps=entity.config.get("max_steps", 10),
+                on_run_complete=on_run_complete,
             )
     return tools
 
@@ -81,6 +88,7 @@ class SupervisorEngine(StrategyEngine):
         context: ExecutionContext | None,
         *,
         history: list[dict] | None = None,
+        on_delegate_complete: Callable[[dict], None] | None = None,
     ) -> OrchestrationOutput:
         if context is None:
             context = ExecutionContext()
@@ -108,7 +116,9 @@ class SupervisorEngine(StrategyEngine):
 
         try:
             # Build delegate tools (one per agent entity)
-            delegate_tools: dict[str, ToolDefinition] = _build_delegate_tools(entities)
+            delegate_tools: dict[str, ToolDefinition] = _build_delegate_tools(
+                entities, on_run_complete=on_delegate_complete
+            )
 
             # Also include any tool entities directly
             for entity in entities:
@@ -124,7 +134,9 @@ class SupervisorEngine(StrategyEngine):
 
             # Build input with history for multi-turn conversations
             if history:
-                agent_input: str | list[dict] = list(history) + [{"role": "user", "content": input}]
+                agent_input: str | list[dict] = list(history) + [
+                    {"role": "user", "content": input}
+                ]
             else:
                 agent_input = input
 
@@ -170,8 +182,14 @@ class SequentialEngine(StrategyEngine):
     """Deterministic pipeline: agents run in position order."""
 
     def execute(
-        self, orchestration, input: str, session: Any, context: ExecutionContext | None,
-        *, history: list[dict] | None = None,
+        self,
+        orchestration,
+        input: str,
+        session: Any,
+        context: ExecutionContext | None,
+        *,
+        history: list[dict] | None = None,
+        on_delegate_complete: Callable[[dict], None] | None = None,
     ) -> OrchestrationOutput:
         if context is None:
             context = ExecutionContext()
@@ -202,7 +220,9 @@ class SequentialEngine(StrategyEngine):
 
         # Prepend history to input for the first agent in the pipeline
         if history:
-            current_input: str | list[dict] = list(history) + [{"role": "user", "content": input}]
+            current_input: str | list[dict] = list(history) + [
+                {"role": "user", "content": input}
+            ]
         else:
             current_input: str | list[dict] = input
         total_usage: dict[str, int] = {
@@ -225,6 +245,37 @@ class SequentialEngine(StrategyEngine):
                     tools=entity.agent_tools if entity.agent_tools else None,
                     max_steps=entity.config.get("max_steps", 10),
                 )
+
+                if on_delegate_complete is not None:
+                    try:
+                        on_delegate_complete(
+                            {
+                                "agent_name": agent_name,
+                                "child_execution_id": child_ctx.execution_id,
+                                "orchestration_run_id": context.orchestration_run_id,
+                                "task": current_input
+                                if isinstance(current_input, str)
+                                else str(current_input),
+                                "content": agent_output.content,
+                                "status": agent_output.status,
+                                "error": agent_output.error,
+                                "usage": agent_output.usage or {},
+                                "steps": agent_output.steps,
+                                "events": agent_output.events,
+                                "messages": agent_output.messages or [],
+                                "tool_calls": [
+                                    tc.to_dict()
+                                    for tc in (agent_output.tool_calls or [])
+                                ],
+                                "started_at": agent_output.started_at,
+                                "completed_at": agent_output.completed_at,
+                            }
+                        )
+                    except Exception:
+                        logger.exception(
+                            "SequentialEngine.on_delegate_complete hook failed for %s; continuing",
+                            agent_name,
+                        )
 
                 if agent_output.usage:
                     for k in total_usage:
@@ -265,8 +316,14 @@ class ParallelEngine(StrategyEngine):
     """Concurrent execution: all agents simultaneously, then merge."""
 
     def execute(
-        self, orchestration, input: str, session: Any, context: ExecutionContext | None,
-        *, history: list[dict] | None = None,
+        self,
+        orchestration,
+        input: str,
+        session: Any,
+        context: ExecutionContext | None,
+        *,
+        history: list[dict] | None = None,
+        on_delegate_complete: Callable[[dict], None] | None = None,
     ) -> OrchestrationOutput:
         if context is None:
             context = ExecutionContext()
@@ -299,21 +356,23 @@ class ParallelEngine(StrategyEngine):
         }
 
         try:
-
             # Build input with history for multi-turn conversations
             if history:
-                parallel_input: str | list[dict] = list(history) + [{"role": "user", "content": input}]
+                parallel_input: str | list[dict] = list(history) + [
+                    {"role": "user", "content": input}
+                ]
             else:
                 parallel_input: str | list[dict] = input
 
             def run_agent(entity):
                 child_ctx = context.child_context()
-                return entity.agent.run(
+                agent_out = entity.agent.run(
                     input=parallel_input,
                     context=child_ctx,
                     tools=entity.agent_tools if entity.agent_tools else None,
                     max_steps=entity.config.get("max_steps", 10),
                 )
+                return agent_out, child_ctx
 
             agent_outputs: dict[str, Any] = {}
             with concurrent.futures.ThreadPoolExecutor(
@@ -325,11 +384,41 @@ class ParallelEngine(StrategyEngine):
                 for future in concurrent.futures.as_completed(future_to_entity):
                     entity = future_to_entity[future]
                     agent_name = entity.agent.name or "unnamed"
-                    agent_out = future.result()
+                    agent_out, child_ctx = future.result()
                     agent_outputs[agent_name] = agent_out
                     if agent_out.usage:
                         for k in total_usage:
                             total_usage[k] += (agent_out.usage or {}).get(k, 0)
+                    if on_delegate_complete is not None:
+                        try:
+                            on_delegate_complete(
+                                {
+                                    "agent_name": agent_name,
+                                    "child_execution_id": child_ctx.execution_id,
+                                    "orchestration_run_id": context.orchestration_run_id,
+                                    "task": parallel_input
+                                    if isinstance(parallel_input, str)
+                                    else str(parallel_input),
+                                    "content": agent_out.content,
+                                    "status": agent_out.status,
+                                    "error": agent_out.error,
+                                    "usage": agent_out.usage or {},
+                                    "steps": agent_out.steps,
+                                    "events": agent_out.events,
+                                    "messages": agent_out.messages or [],
+                                    "tool_calls": [
+                                        tc.to_dict()
+                                        for tc in (agent_out.tool_calls or [])
+                                    ],
+                                    "started_at": agent_out.started_at,
+                                    "completed_at": agent_out.completed_at,
+                                }
+                            )
+                        except Exception:
+                            logger.exception(
+                                "ParallelEngine.on_delegate_complete hook failed for %s; continuing",
+                                agent_name,
+                            )
 
             # Check for failed agents
             failed = {
