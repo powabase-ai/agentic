@@ -126,66 +126,76 @@ def accumulate_stream(
     finish_reason: str | None = None
     usage: dict | None = None
 
-    for chunk in stream:
-        # Abort poll point
-        if abort_signal is not None and abort_signal.is_set():
-            try:
-                if hasattr(stream, "close"):
-                    stream.close()
-            finally:
-                raise AbortedError("Stream aborted by signal")
+    try:
+        for chunk in stream:
+            # Abort poll point
+            if abort_signal is not None and abort_signal.is_set():
+                try:
+                    if hasattr(stream, "close"):
+                        stream.close()
+                finally:
+                    raise AbortedError("Stream aborted by signal")
 
-        # Capture usage if present (typically on the final chunk)
-        chunk_usage = getattr(chunk, "usage", None)
-        if chunk_usage is not None:
-            usage = _extract_usage(chunk_usage)
+            # Capture usage if present (typically on the final chunk)
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage is not None:
+                usage = _extract_usage(chunk_usage)
 
-        # Process choices
-        choices = getattr(chunk, "choices", []) or []
-        if not choices:
-            continue
+            # Process choices
+            choices = getattr(chunk, "choices", []) or []
+            if not choices:
+                continue
 
-        choice = choices[0]
-        delta = getattr(choice, "delta", None)
-        chunk_finish_reason = getattr(choice, "finish_reason", None)
-        if chunk_finish_reason is not None:
-            finish_reason = chunk_finish_reason
+            choice = choices[0]
+            delta = getattr(choice, "delta", None)
+            chunk_finish_reason = getattr(choice, "finish_reason", None)
+            if chunk_finish_reason is not None:
+                finish_reason = chunk_finish_reason
 
-        if delta is None:
-            continue
+            if delta is None:
+                continue
 
-        # Content fragment
-        content_frag = getattr(delta, "content", None)
-        if content_frag:
-            content_buf += content_frag
-            if on_content_delta is not None:
-                on_content_delta(content_frag)
+            # Content fragment
+            content_frag = getattr(delta, "content", None)
+            if content_frag:
+                content_buf += content_frag
+                if on_content_delta is not None:
+                    on_content_delta(content_frag)
 
-        # Reasoning fragment
-        reasoning_frag = getattr(delta, "reasoning_content", None)
-        if reasoning_frag:
-            reasoning_buf += reasoning_frag
-            if on_reasoning_delta is not None:
-                on_reasoning_delta(reasoning_frag)
+            # Reasoning fragment
+            reasoning_frag = getattr(delta, "reasoning_content", None)
+            if reasoning_frag:
+                reasoning_buf += reasoning_frag
+                if on_reasoning_delta is not None:
+                    on_reasoning_delta(reasoning_frag)
 
-        # Tool calls
-        tool_call_deltas = getattr(delta, "tool_calls", None) or []
-        for tcd in tool_call_deltas:
-            idx = getattr(tcd, "index", 0)
-            entry = tool_calls_acc.setdefault(
-                idx, {"id": None, "name": None, "args_str": ""}
-            )
-            tcd_id = getattr(tcd, "id", None)
-            if tcd_id and entry["id"] is None:
-                entry["id"] = tcd_id
-            tcd_function = getattr(tcd, "function", None)
-            if tcd_function is not None:
-                tcd_name = getattr(tcd_function, "name", None)
-                if tcd_name and entry["name"] is None:
-                    entry["name"] = tcd_name
-                tcd_args = getattr(tcd_function, "arguments", None)
-                if tcd_args:
-                    entry["args_str"] += tcd_args
+            # Tool calls
+            tool_call_deltas = getattr(delta, "tool_calls", None) or []
+            for tcd in tool_call_deltas:
+                idx = getattr(tcd, "index", 0)
+                entry = tool_calls_acc.setdefault(
+                    idx, {"id": None, "name": None, "args_str": ""}
+                )
+                tcd_id = getattr(tcd, "id", None)
+                if tcd_id and entry["id"] is None:
+                    entry["id"] = tcd_id
+                tcd_function = getattr(tcd, "function", None)
+                if tcd_function is not None:
+                    tcd_name = getattr(tcd_function, "name", None)
+                    if tcd_name and entry["name"] is None:
+                        entry["name"] = tcd_name
+                    tcd_args = getattr(tcd_function, "arguments", None)
+                    if tcd_args:
+                        entry["args_str"] += tcd_args
+    except (AbortedError, StreamPartialError):
+        # Already wrapped — propagate as-is
+        raise
+    except Exception as e:
+        raise StreamPartialError(
+            f"Stream iteration failed: {e}",
+            partial_content=content_buf,
+            partial_reasoning=reasoning_buf,
+        ) from e
 
     # Finalize tool calls — VALIDATE the JSON parses (raise on truncation)
     # but keep `arguments` as a JSON STRING in the result (B1 v3: agent.py

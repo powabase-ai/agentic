@@ -1,6 +1,7 @@
 """Tests for agentic.llm.streaming.accumulate_stream."""
 
 import json
+import threading
 
 import pytest
 
@@ -16,6 +17,7 @@ from tests.fixtures.streams import (
     reasoning_chunks,
     role_chunk,
     tool_call_chunks,
+    usage_chunk,
 )
 
 
@@ -220,3 +222,57 @@ def test_truncated_tool_call_args_raises_truncation_error():
 
     # Truncation error should carry partial buffers (empty in this case — no content streamed)
     assert excinfo.value.partial_content == ""
+
+
+def test_abort_mid_stream():
+    """abort_signal mid-iteration → AbortedError."""
+    from agentic.llm.streaming import AbortedError, accumulate_stream
+
+    abort = threading.Event()
+
+    def aborting_stream():
+        yield role_chunk()
+        # Simulate an external abort here
+        abort.set()
+        yield content_chunks("never seen")[0]
+
+    with pytest.raises(AbortedError):
+        accumulate_stream(aborting_stream(), abort_signal=abort)
+
+
+def test_usage_captured_from_final_chunk():
+    """Q5: final chunk's usage propagates to the returned tuple."""
+    from agentic.llm.streaming import accumulate_stream
+
+    _, _, usage = accumulate_stream(
+        fake_stream(
+            role_chunk(),
+            *content_chunks("hi"),
+            finish_chunk("stop"),
+            usage_chunk(prompt_tokens=10, completion_tokens=5),
+        ),
+    )
+
+    assert usage is not None
+    assert usage["prompt_tokens"] == 10
+    assert usage["completion_tokens"] == 5
+    assert usage["total_tokens"] == 15
+
+
+def test_stream_partial_error_carries_buffers():
+    """M5: a generic mid-stream exception propagates as StreamPartialError
+    with the buffers populated up to the failure point."""
+    from agentic.llm.streaming import StreamPartialError, accumulate_stream
+
+    def failing_stream():
+        yield role_chunk()
+        yield from content_chunks("hello world", fragments=2)
+        # Simulate provider connection drop
+        raise ConnectionError("upstream closed")
+
+    with pytest.raises(StreamPartialError) as excinfo:
+        accumulate_stream(failing_stream())
+
+    assert "hello world" in excinfo.value.partial_content
+    # Reasoning was empty in this stream
+    assert excinfo.value.partial_reasoning == ""
