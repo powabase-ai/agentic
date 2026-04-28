@@ -304,3 +304,133 @@ class TestStreamingKillSwitch:
         assert "content_delta" not in emitted_types
         assert "reasoning_delta" not in emitted_types
         assert output.events == events
+
+
+class TestStreamingContentDeltaEmission:
+    """Streaming on -> content_delta events fire; line ~563 reasoning emit is suppressed.
+
+    Q1 resolution (issue #106): when streaming is enabled, the LLM's intermediary
+    prose alongside tool calls is already streamed via content_delta to the chat
+    bubble — re-emitting it as a terminal reasoning event would duplicate.
+    """
+
+    @patch("agentic.agent.agent.litellm")
+    def test_streaming_emits_content_delta_events(self, mock_litellm, monkeypatch):
+        """Streaming on -> content_delta events fire for each fragment, no
+        duplicate reasoning event from line ~563 (Q1 fix)."""
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
+
+        # Step 1: streaming response with content + tool call (triggers
+        # has_tool_calls=True AND assistant_msg.content non-empty path).
+        # Step 2: streaming response with content only (loop terminates).
+        step1 = _mock_streaming_response(
+            content="thinking out loud",
+            tool_calls=[{"name": "search_kb", "args": {"q": "x"}}],
+            finish_reason="tool_calls",
+        )
+        step2 = _mock_streaming_response(content="done", finish_reason="stop")
+        mock_litellm.completion.side_effect = [step1, step2]
+
+        tool = BuiltinTool(
+            name="search_kb",
+            description="Search the KB",
+            input_schema={
+                "type": "object",
+                "properties": {"q": {"type": "string"}},
+            },
+            handler=lambda args, ctx: "result",
+        )
+
+        events = []
+        ctx = ExecutionContext(execution_id="test", on_event=lambda e: events.append(e))
+
+        agent = Agent(model="gpt-4o-mini", system_prompt="test")
+        output = agent.run("What's in the KB?", context=ctx, tools={"search_kb": tool})
+
+        assert output.status.is_success()
+
+        # 1. content_delta events fire for each fragment.
+        content_deltas = [e for e in events if e.get("type") == "content_delta"]
+        assert len(content_deltas) > 0, "expected at least one content_delta event"
+
+        # 2. Concatenated content_delta deltas equal the prose from step 1.
+        # (step 2's "done" deltas also flow, so check that step 1's prose is a
+        # contiguous substring of the concatenation, OR sum to the full string.)
+        joined = "".join(e["delta"] for e in content_deltas)
+        assert (
+            "thinking out loud" in joined
+        ), f"expected step-1 prose in joined deltas, got: {joined!r}"
+
+        # 3. No reasoning event WITHOUT a "source" field (line ~563 must not fire
+        # when streaming is on). The reasoning emit at line ~552 (with
+        # source="thinking") would not fire either since the mock has no
+        # reasoning_content.
+        bare_reasoning_events = [
+            e for e in events if e.get("type") == "reasoning" and "source" not in e
+        ]
+        assert bare_reasoning_events == [], (
+            f"line ~563 reasoning emit must be gated off when streaming is on; "
+            f"got: {bare_reasoning_events}"
+        )
+
+    @patch("agentic.agent.agent.litellm")
+    def test_line_506_emits_when_streaming_disabled(self, mock_litellm, monkeypatch):
+        """Kill switch off -> line ~563 still fires for has_tool_calls + content
+        steps. Regression guard for today's behavior."""
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "false")
+
+        # Non-streaming response with BOTH content and a tool call.
+        step1 = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="let me search for that",
+                        role="assistant",
+                        tool_calls=[
+                            SimpleNamespace(
+                                id="call_1",
+                                type="function",
+                                function=SimpleNamespace(
+                                    name="search_kb",
+                                    arguments='{"q": "x"}',
+                                ),
+                            )
+                        ],
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            usage=SimpleNamespace(
+                prompt_tokens=10, completion_tokens=5, total_tokens=15
+            ),
+        )
+        step2 = _mock_completion_response("done")
+        mock_litellm.completion.side_effect = [step1, step2]
+
+        tool = BuiltinTool(
+            name="search_kb",
+            description="Search the KB",
+            input_schema={
+                "type": "object",
+                "properties": {"q": {"type": "string"}},
+            },
+            handler=lambda args, ctx: "result",
+        )
+
+        events = []
+        ctx = ExecutionContext(execution_id="test", on_event=lambda e: events.append(e))
+
+        agent = Agent(model="gpt-4o-mini", system_prompt="test")
+        output = agent.run("What's in the KB?", context=ctx, tools={"search_kb": tool})
+
+        assert output.status.is_success()
+
+        # Line ~563 must fire: a reasoning event with NO source field, content =
+        # the assistant's prose alongside the tool call.
+        bare_reasoning_events = [
+            e for e in events if e.get("type") == "reasoning" and "source" not in e
+        ]
+        assert (
+            len(bare_reasoning_events) == 1
+        ), f"expected exactly one bare reasoning event, got: {bare_reasoning_events}"
+        assert bare_reasoning_events[0]["content"] == "let me search for that"

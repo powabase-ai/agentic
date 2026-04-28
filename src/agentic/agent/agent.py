@@ -560,7 +560,11 @@ class Agent:
 
                 # Emit intermediary content when the LLM explains its
                 # thinking alongside tool calls.
-                if has_tool_calls and assistant_msg.content:
+                # NOTE: gated off in streaming mode — the prose was already
+                # streamed via content_delta to the chat bubble; emitting it
+                # again here as a reasoning event would duplicate (issue #106
+                # Q1 resolution).
+                if has_tool_calls and assistant_msg.content and not streaming_enabled:
                     context.emit_event(
                         {
                             "type": "reasoning",
