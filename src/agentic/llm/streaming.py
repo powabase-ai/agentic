@@ -13,6 +13,7 @@ and unit-testable without ExecutionContext or threading.
 
 from __future__ import annotations
 
+import json
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -118,6 +119,10 @@ def accumulate_stream(
     """
     content_buf = ""
     reasoning_buf = ""
+    # Tool calls accumulate into a dict keyed by `tc.index`. Each entry has
+    # {id, name, args_str}. JSON-decoded at end of stream; raises
+    # StreamTruncationError on malformed args.
+    tool_calls_acc: dict[int, dict[str, Any]] = {}
     finish_reason: str | None = None
     usage: dict | None = None
 
@@ -163,11 +168,53 @@ def accumulate_stream(
             if on_reasoning_delta is not None:
                 on_reasoning_delta(reasoning_frag)
 
+        # Tool calls
+        tool_call_deltas = getattr(delta, "tool_calls", None) or []
+        for tcd in tool_call_deltas:
+            idx = getattr(tcd, "index", 0)
+            entry = tool_calls_acc.setdefault(
+                idx, {"id": None, "name": None, "args_str": ""}
+            )
+            tcd_id = getattr(tcd, "id", None)
+            if tcd_id and entry["id"] is None:
+                entry["id"] = tcd_id
+            tcd_function = getattr(tcd, "function", None)
+            if tcd_function is not None:
+                tcd_name = getattr(tcd_function, "name", None)
+                if tcd_name and entry["name"] is None:
+                    entry["name"] = tcd_name
+                tcd_args = getattr(tcd_function, "arguments", None)
+                if tcd_args:
+                    entry["args_str"] += tcd_args
+
+    # Finalize tool calls — VALIDATE the JSON parses (raise on truncation)
+    # but keep `arguments` as a JSON STRING in the result (B1 v3: agent.py
+    # expects a string here matching LiteLLM's normal response shape).
+    tool_calls: list[_ToolCall] = []
+    for idx in sorted(tool_calls_acc):
+        entry = tool_calls_acc[idx]
+        args_str = entry["args_str"] or "{}"
+        # Validate JSON (raises on mid-arg truncation) but DON'T replace the value
+        try:
+            json.loads(args_str)
+        except json.JSONDecodeError as e:
+            raise StreamTruncationError(
+                f"Tool call args at index {idx} failed to decode: {e}",
+                partial_content=content_buf,
+                partial_reasoning=reasoning_buf,
+            ) from e
+        tool_calls.append(
+            _ToolCall(
+                id=entry["id"] or f"call_{idx}",
+                function=_Function(name=entry["name"] or "", arguments=args_str),
+            )
+        )
+
     return (
         Message(
             content=content_buf,
             reasoning_content=reasoning_buf,
-            tool_calls=[],
+            tool_calls=tool_calls,
         ),
         finish_reason,
         usage,
