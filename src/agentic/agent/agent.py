@@ -4,6 +4,7 @@ Agent - single LLM-powered agent definition and execution.
 
 import json
 import logging
+import os
 import threading
 import time
 from collections.abc import AsyncGenerator, Generator
@@ -346,6 +347,15 @@ class Agent:
                 if self.api_key is not None:
                     call_kwargs["api_key"] = self.api_key
 
+                # Streaming flag (issue #106 — read per-call, not module-level,
+                # so monkeypatch.setenv works in tests)
+                streaming_enabled = (
+                    os.getenv("AGENT_LLM_STREAMING_ENABLED", "true").lower() == "true"
+                )
+                call_kwargs["stream"] = streaming_enabled
+                if streaming_enabled:
+                    call_kwargs["stream_options"] = {"include_usage": True}
+
                 # Call LLM
                 try:
                     response = litellm.completion(**call_kwargs)
@@ -413,8 +423,59 @@ class Agent:
                     # Unrecoverable — re-raise to outer exception handler
                     raise
 
-                # Accumulate usage
-                step_usage = self._extract_usage(response)
+                # Unpack the response — streaming path uses accumulate_stream;
+                # non-streaming preserves today's behavior. Both branches define
+                # `assistant_msg`, `finish_reason`, and `usage` for the rest of
+                # the iteration to consume.
+                if streaming_enabled:
+                    from agentic.llm.streaming import (
+                        AbortedError,
+                        accumulate_stream,
+                    )
+
+                    try:
+                        assistant_msg, finish_reason, usage = accumulate_stream(
+                            response,
+                            on_content_delta=lambda d: context.emit_delta_event(
+                                {"type": "content_delta", "delta": d}
+                            ),
+                            on_reasoning_delta=lambda d,
+                            _step=step: context.emit_delta_event(
+                                {
+                                    "type": "reasoning_delta",
+                                    "step": _step,
+                                    "source": "thinking",
+                                    "delta": d,
+                                }
+                            ),
+                            abort_signal=context.abort_signal,
+                        )
+                    except AbortedError:
+                        # B2 v3: streaming abort produces the same AgentOutput shape
+                        # as the existing non-streaming abort path at line 444-456.
+                        return AgentOutput(
+                            execution_id=context.execution_id,
+                            status=ExecutionStatus.CANCELLED,
+                            started_at=started_at,
+                            completed_at=datetime.now(),
+                            error="Execution aborted",
+                            messages=list(state.messages),
+                            usage=total_usage,
+                            steps=step,
+                            tool_calls=all_tool_calls,
+                            events=collected_events,
+                        )
+                    # StreamPartialError (mid-stream provider failure) is handled
+                    # in Task 10 — for now, let it propagate to the outer except.
+                else:
+                    # Kill-switch-off path — preserves today's exact behavior
+                    assistant_msg = response.choices[0].message
+                    finish_reason = response.choices[0].finish_reason
+                    usage = self._extract_usage(response)
+
+                # Accumulate usage — `usage` was set in the streaming/non-streaming
+                # branches above (M6 v3)
+                step_usage = usage
                 if step_usage:
                     for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
                         total_usage[k] += step_usage.get(k, 0)
@@ -455,9 +516,6 @@ class Agent:
                         tool_calls=all_tool_calls,
                         events=collected_events,
                     )
-
-                assistant_msg = response.choices[0].message
-                finish_reason = response.choices[0].finish_reason
 
                 # Determine if the LLM requested tool calls
                 has_tool_calls = (
@@ -1138,7 +1196,9 @@ class Agent:
 
         # Build result diagnostics for debugging
         if isinstance(result, list):
-            block_types = [b.get("type", "unknown") for b in result if isinstance(b, dict)]
+            block_types = [
+                b.get("type", "unknown") for b in result if isinstance(b, dict)
+            ]
             result_meta = {
                 "result_type": "multimodal",
                 "block_count": len(result),
@@ -1156,7 +1216,11 @@ class Agent:
                 "step": step,
                 "tool_name": tool_name,
                 "call_id": tc.id,
-                "result_preview": (result[:200] if isinstance(result, str) else "[multimodal content]") if result else "",
+                "result_preview": (
+                    result[:200] if isinstance(result, str) else "[multimodal content]"
+                )
+                if result
+                else "",
                 "result_meta": result_meta,
                 "duration_ms": tool_duration_ms,
             }
@@ -1189,7 +1253,11 @@ class Agent:
                 "step": step,
                 "tool_name": tool_name,
                 "call_id": tc.id,
-                "result_preview": (result[:200] if isinstance(result, str) else "[multimodal content]") if result else "",
+                "result_preview": (
+                    result[:200] if isinstance(result, str) else "[multimodal content]"
+                )
+                if result
+                else "",
                 "duration_ms": tool_duration_ms,
             }
         )
