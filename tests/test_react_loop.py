@@ -60,6 +60,47 @@ def _mock_tool_call_response(tool_name, arguments, call_id="call_1"):
     )
 
 
+def _mock_streaming_response(
+    content: str = "",
+    reasoning: str = "",
+    tool_calls: list[dict] | None = None,
+    finish_reason: str = "stop",
+):
+    """Streaming variant of _mock_completion_response.
+
+    Returns an iterator of FakeChunk objects matching what
+    ``litellm.completion(stream=True)`` yields.
+    """
+    from tests.fixtures.streams import (
+        content_chunks,
+        fake_stream,
+        finish_chunk,
+        reasoning_chunks,
+        role_chunk,
+        tool_call_chunks,
+        usage_chunk,
+    )
+
+    chunks = [role_chunk()]
+    if reasoning:
+        chunks.extend(reasoning_chunks(reasoning, fragments=3))
+    if content:
+        chunks.extend(content_chunks(content, fragments=3))
+    if tool_calls:
+        for i, tc in enumerate(tool_calls):
+            chunks.extend(
+                tool_call_chunks(
+                    name=tc["name"],
+                    args=tc.get("args", {}),
+                    index=i,
+                    frag_count=2,
+                )
+            )
+    chunks.append(finish_chunk(finish_reason))
+    chunks.append(usage_chunk(prompt_tokens=10, completion_tokens=5))
+    return fake_stream(*chunks)
+
+
 class TestReactLoopNoTools:
     """Without tools, the loop should run one iteration (backward compat)."""
 
@@ -218,3 +259,48 @@ class TestAbortIntegration:
 
         assert output.status.value in ("cancelled", "failed")
         mock_litellm.completion.assert_not_called()
+
+
+class TestStreamingKillSwitch:
+    """Regression guard: AGENT_LLM_STREAMING_ENABLED=false preserves today's behavior."""
+
+    @patch("agentic.agent.agent.litellm")
+    def test_streaming_disabled_via_env_preserves_today_behavior(
+        self, mock_litellm, monkeypatch
+    ):
+        """Kill-switch off -> behavior identical to pre-PR. Regression guard.
+
+        With AGENT_LLM_STREAMING_ENABLED=false, agent.run() must:
+          - Use the non-streaming litellm.completion path (no stream=True kwarg).
+          - Return AgentOutput.content matching the mock response exactly.
+          - Emit zero content_delta / reasoning_delta events via on_event.
+        """
+        # Conftest already pins to "false"; explicit here for clarity / belt-and-braces.
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "false")
+
+        mock_litellm.completion.return_value = _mock_completion_response("hi")
+
+        events = []
+        ctx = ExecutionContext(execution_id="test", on_event=lambda e: events.append(e))
+
+        agent = Agent(model="gpt-4o-mini", system_prompt="test")
+        output = agent.run("Hello", context=ctx)
+
+        # AgentOutput shape matches today's non-streaming behavior.
+        assert output.content == "hi"
+        assert output.status.is_success()
+        assert output.steps == 1
+        assert output.tool_calls == []
+
+        # litellm was called in non-streaming mode.
+        mock_litellm.completion.assert_called_once()
+        call_kwargs = mock_litellm.completion.call_args.kwargs
+        assert not call_kwargs.get(
+            "stream"
+        ), "kill-switch off must not pass stream=True"
+
+        # No streaming-specific events were emitted.
+        emitted_types = [e["type"] for e in events]
+        assert "content_delta" not in emitted_types
+        assert "reasoning_delta" not in emitted_types
+        assert output.events == events
