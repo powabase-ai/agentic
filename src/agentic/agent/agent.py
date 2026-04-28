@@ -120,6 +120,7 @@ class Agent:
         temperature: float | None = None,
         max_tokens: int | None = None,
         api_key: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         """
         Initialize an Agent.
@@ -136,6 +137,15 @@ class Agent:
             api_key: Optional API key for the model's provider. Passed directly
                      to litellm, overriding env vars. Enables thread-safe
                      concurrent requests without os.environ mutation.
+            reasoning_effort: Optional reasoning effort hint (e.g. "low",
+                     "medium", "high") forwarded to reasoning-capable models
+                     via litellm. At construction time, this is checked
+                     against ``litellm.supports_reasoning`` for ``model``;
+                     if the model does not support reasoning, the value is
+                     silently dropped and a structured-log breadcrumb
+                     ``reasoning_effort_dropped`` is emitted. The resolved
+                     value is cached per model and lazily populated for
+                     fallback models on first use.
         """
         self.model = model
         self.system_prompt = system_prompt
@@ -143,6 +153,35 @@ class Agent:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.api_key = api_key
+        self._requested_effort = reasoning_effort
+        self._effort_cache: dict[str, str | None] = {}
+        self._effort_cache[model] = self._resolve_effort_for_model(model)
+
+    def _resolve_effort_for_model(self, model: str) -> str | None:
+        """Construct-time precheck. Drops the param for unsupported models with breadcrumb."""
+        if self._requested_effort is None:
+            return None
+        try:
+            supports = litellm.supports_reasoning(model=model)
+        except Exception:
+            supports = False
+        if supports:
+            return self._requested_effort
+        logger.info(
+            "reasoning_effort_dropped",
+            extra={
+                "model": model,
+                "requested_effort": self._requested_effort,
+                "reason": "model_does_not_support_reasoning",
+            },
+        )
+        return None
+
+    def _resolved_effort_for(self, model: str) -> str | None:
+        """Per-call lookup. Caches per model; populates on first use of a fallback."""
+        if model not in self._effort_cache:
+            self._effort_cache[model] = self._resolve_effort_for_model(model)
+        return self._effort_cache[model]
 
     def run(
         self,
