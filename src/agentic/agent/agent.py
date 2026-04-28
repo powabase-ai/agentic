@@ -30,6 +30,10 @@ from agentic.agent.tools import ToolDefinition
 from agentic.execution.context import ExecutionContext
 from agentic.execution.status import ExecutionStatus
 from agentic.knowledge.model_config import AGENT_DEFAULT_MODEL
+from agentic.llm.routing import (
+    maybe_route_through_responses,
+    reasoning_call_kwargs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -368,9 +372,8 @@ class Agent:
                 # On last step, don't pass tools to force a text-only response
                 step_tools = None if is_last_step else tool_schemas
 
-                # Build call kwargs
+                # Build call kwargs (model is set below after routing resolution)
                 call_kwargs: dict[str, Any] = {
-                    "model": state.current_model,
                     "messages": normalized,
                     "num_retries": 3,
                     "stream": False,
@@ -385,6 +388,22 @@ class Agent:
                     call_kwargs["response_format"] = response_format
                 if self.api_key is not None:
                     call_kwargs["api_key"] = self.api_key
+
+                # Resolve reasoning effort for the current model (cache hit on
+                # repeat use; fallback models trigger lazy precheck — §3.1.1).
+                # Route OpenAI reasoning models through the Responses bridge
+                # and merge in the matching kwargs (top-level reasoning_effort
+                # for non-Responses paths; effort+summary packed into extra_body
+                # for Responses paths — see agentic/llm/routing.py for the
+                # bug-avoidance rationale).
+                effective_effort = self._resolved_effort_for(state.current_model)
+                routed_model = maybe_route_through_responses(
+                    state.current_model, effective_effort
+                )
+                call_kwargs["model"] = routed_model
+                call_kwargs.update(
+                    reasoning_call_kwargs(effective_effort, routed_model)
+                )
 
                 # Streaming flag (issue #106 — read per-call, not module-level,
                 # so monkeypatch.setenv works in tests)
