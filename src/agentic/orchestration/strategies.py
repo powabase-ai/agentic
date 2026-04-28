@@ -148,6 +148,12 @@ class SupervisorEngine(StrategyEngine):
                 max_steps=orchestration.settings.get("max_steps", 25),
             )
 
+            # output.usage holds the ORCHESTRATOR's own LLM tokens only — the
+            # children land in their respective agent_run rows via the
+            # on_delegate_complete persistence hook. Keeping the orchestration
+            # row leaf-only avoids double-counting in the platform's
+            # "tokens by all sources" dashboard rollup. Per-run drill-down UI
+            # sums orch_run + child_runs explicitly.
             output.content = agent_output.content
             output.status = agent_output.status
             output.steps = agent_output.steps

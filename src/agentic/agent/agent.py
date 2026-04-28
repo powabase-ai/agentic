@@ -1200,27 +1200,59 @@ class Agent:
 
     @staticmethod
     def _extract_usage(response) -> dict[str, int] | None:
-        """Extract usage info from a litellm response, including extended token details."""
+        """Extract usage info from a litellm response, including extended token details.
+
+        Reasoning-model token accounting differs by API surface:
+          - Chat Completions (o1, o3, gpt-5 family): reasoning_tokens lives on
+            `usage.completion_tokens_details.reasoning_tokens`.
+          - Responses API: it lives on `usage.output_tokens_details.reasoning_tokens`.
+          - Some providers return either as a dict (not a Pydantic object), so
+            we read it both ways.
+        """
         if not response.usage:
             return None
+
+        def _get(obj: Any, key: str) -> Any:
+            # Tolerate both Pydantic-like and plain dict shapes.
+            if obj is None:
+                return None
+            if isinstance(obj, dict):
+                return obj.get(key)
+            return getattr(obj, key, None)
+
+        usage_obj = response.usage
         usage = {
-            "prompt_tokens": response.usage.prompt_tokens,
-            "completion_tokens": response.usage.completion_tokens,
-            "total_tokens": response.usage.total_tokens,
+            "prompt_tokens": _get(usage_obj, "prompt_tokens"),
+            "completion_tokens": _get(usage_obj, "completion_tokens"),
+            "total_tokens": _get(usage_obj, "total_tokens"),
         }
-        # Reasoning model details (o1, o3, etc.)
-        details = getattr(response.usage, "completion_tokens_details", None)
-        if details:
-            reasoning = getattr(details, "reasoning_tokens", None)
+        # Some providers don't populate completion_tokens; fall back to
+        # output_tokens (Responses API name).
+        if usage["completion_tokens"] is None:
+            usage["completion_tokens"] = _get(usage_obj, "output_tokens")
+        if usage["prompt_tokens"] is None:
+            usage["prompt_tokens"] = _get(usage_obj, "input_tokens")
+
+        # Reasoning details — try both Chat Completions and Responses API names.
+        for details_key in ("completion_tokens_details", "output_tokens_details"):
+            details = _get(usage_obj, details_key)
+            reasoning = _get(details, "reasoning_tokens")
             if reasoning is not None:
                 usage["reasoning_tokens"] = reasoning
-        # Prompt cache details
-        prompt_details = getattr(response.usage, "prompt_tokens_details", None)
-        if prompt_details:
-            cached = getattr(prompt_details, "cached_tokens", None)
+                break
+
+        # Prompt cache details — Chat Completions = prompt_tokens_details,
+        # Responses API = input_tokens_details.
+        for details_key in ("prompt_tokens_details", "input_tokens_details"):
+            details = _get(usage_obj, details_key)
+            cached = _get(details, "cached_tokens")
             if cached is not None:
                 usage["cached_tokens"] = cached
-        return usage
+                break
+
+        # Drop any leftover None values so downstream code can treat keys as
+        # presence-or-absence (matches the prior contract).
+        return {k: v for k, v in usage.items() if v is not None}
 
     def _build_messages(
         self,
