@@ -60,14 +60,6 @@ class ExecutionContext:
     # Event persistence callback
     on_event: Callable[[dict[str, Any]], None] | None = None
 
-    # Cost-event callback — fired once per LLM round-trip with the raw
-    # litellm usage dict and the model name. Observability dashboards and
-    # billing/ledgers hook into this to persist per-call token + $ cost
-    # rows without the agent runtime having to know about any DB.
-    # Signature: on_cost(model, usage_dict_or_None) -> None. Must never
-    # raise — the agent treats it as fire-and-forget.
-    on_cost: Callable[[str, dict[str, Any] | None], None] | None = None
-
     # Session history for tools that need conversation context (e.g., KB search)
     session_history: list[dict[str, Any]] | None = None
 

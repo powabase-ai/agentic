@@ -251,6 +251,7 @@ class SequentialEngine(StrategyEngine):
                         on_delegate_complete(
                             {
                                 "agent_name": agent_name,
+                                "model": entity.agent.model if entity.agent else None,
                                 "child_execution_id": child_ctx.execution_id,
                                 "orchestration_run_id": context.orchestration_run_id,
                                 "task": current_input
@@ -394,6 +395,7 @@ class ParallelEngine(StrategyEngine):
                             on_delegate_complete(
                                 {
                                     "agent_name": agent_name,
+                                    "model": entity.agent.model if entity.agent else None,
                                     "child_execution_id": child_ctx.execution_id,
                                     "orchestration_run_id": context.orchestration_run_id,
                                     "task": parallel_input

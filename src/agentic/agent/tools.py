@@ -306,6 +306,7 @@ class DelegateTool(ToolDefinition):
                 self.on_run_complete(
                     {
                         "agent_name": agent_name,
+                        "model": self.agent.model if self.agent else None,
                         "child_execution_id": child_ctx.execution_id,
                         "orchestration_run_id": context.orchestration_run_id,
                         "task": arguments.get("task", ""),
