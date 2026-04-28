@@ -32,9 +32,18 @@ See Also:
     - docs/CONCEPTS.md for detailed concept explanations
 """
 
+import importlib as _importlib
+
+from . import llm  # noqa: F401  -- triggers llm/setup.py on cold import
+from .llm import setup as _llm_setup
+
+# Re-run setup on every package init (incl. importlib.reload) so the LiteLLM
+# global flag is restored even if a caller mutated it after first import.
+_importlib.reload(_llm_setup)
+
 # Agent module - fully implemented
-from agentic.agent import Agent, AgentOutput, AgentSession, ToolCallRecord
-from agentic.agent.tools import (
+from agentic.agent import Agent, AgentOutput, AgentSession, ToolCallRecord  # noqa: E402
+from agentic.agent.tools import (  # noqa: E402
     BuiltinTool,
     CustomTool,
     DelegateTool,
@@ -44,7 +53,7 @@ from agentic.agent.tools import (
 )
 
 # Execution infrastructure
-from agentic.execution import (
+from agentic.execution import (  # noqa: E402
     ExecutionContext,
     ExecutionStatus,
     MaxDepthExceeded,
@@ -52,7 +61,7 @@ from agentic.execution import (
 )
 
 # Ingest module - content ingestion (connectors & extractors)
-from agentic.ingest import (
+from agentic.ingest import (  # noqa: E402
     Connector,
     ContentItem,
     Derivative,
@@ -64,7 +73,7 @@ from agentic.ingest import (
 )
 
 # Knowledge module - base classes and interfaces
-from agentic.knowledge import (
+from agentic.knowledge import (  # noqa: E402
     ChunkingStrategy,
     Embedder,
     IndexingAlgorithm,
@@ -77,7 +86,7 @@ from agentic.knowledge import (
 )
 
 # Orchestration module
-from agentic.orchestration import (
+from agentic.orchestration import (  # noqa: E402
     Orchestration,
     OrchestrationEntity,
     OrchestrationOutput,
@@ -88,7 +97,7 @@ from agentic.orchestration import (
 )
 
 # Workflow module - placeholder
-from agentic.workflow import Workflow, WorkflowOutput, WorkflowSession
+from agentic.workflow import Workflow, WorkflowOutput, WorkflowSession  # noqa: E402
 
 __version__ = "0.1.0"
 
