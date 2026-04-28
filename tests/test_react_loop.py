@@ -434,3 +434,157 @@ class TestStreamingContentDeltaEmission:
             len(bare_reasoning_events) == 1
         ), f"expected exactly one bare reasoning event, got: {bare_reasoning_events}"
         assert bare_reasoning_events[0]["content"] == "let me search for that"
+
+
+class TestMidStreamErrorSyntheticEvents:
+    """T10/M5: when accumulate_stream raises StreamPartialError mid-iteration,
+    agent.py emits synthetic terminal events (chunk + reasoning + error) so
+    the FE retains partial context and the route layer can persist them."""
+
+    @patch("agentic.agent.agent.litellm")
+    def test_mid_stream_error_emits_chunk_and_reasoning_then_error(
+        self, mock_litellm, monkeypatch
+    ):
+        """M5/M2: stream raises mid-iteration with both partial content and
+        partial reasoning -> synthetic terminal events emitted in order:
+        chunk, reasoning (source=thinking), error."""
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
+
+        from tests.fixtures.streams import (
+            content_chunks,
+            reasoning_chunks,
+            role_chunk,
+        )
+
+        def failing_stream():
+            yield role_chunk()
+            yield from reasoning_chunks("thinking hard", fragments=2)
+            yield from content_chunks("partial answer", fragments=2)
+            raise ConnectionError("upstream connection dropped")
+
+        mock_litellm.completion.return_value = failing_stream()
+
+        events = []
+        ctx = ExecutionContext(execution_id="test", on_event=lambda e: events.append(e))
+        agent = Agent(model="gpt-4o-mini", system_prompt="test")
+        output = agent.run("Hello", context=ctx)
+
+        # Outer except catches the re-raised StreamPartialError -> FAILED
+        assert output.status.value == "failed"
+
+        # Live deltas fired before the error
+        content_deltas = [e for e in events if e.get("type") == "content_delta"]
+        reasoning_deltas = [e for e in events if e.get("type") == "reasoning_delta"]
+        assert len(content_deltas) > 0, "expected content_delta events before error"
+        assert len(reasoning_deltas) > 0, "expected reasoning_delta events before error"
+
+        # Find the synthetic terminal events fired AFTER the deltas
+        # (they live alongside step_started/etc., so filter by type and
+        # check ordering by index in the events list).
+        synth_chunk = [e for e in events if e.get("type") == "chunk"]
+        synth_reasoning = [
+            e
+            for e in events
+            if e.get("type") == "reasoning" and e.get("source") == "thinking"
+        ]
+        error_events = [e for e in events if e.get("type") == "error"]
+
+        assert (
+            len(synth_chunk) == 1
+        ), f"expected exactly 1 synthetic chunk event, got: {synth_chunk}"
+        assert (
+            len(synth_reasoning) == 1
+        ), f"expected exactly 1 synthetic reasoning event, got: {synth_reasoning}"
+        assert (
+            len(error_events) == 1
+        ), f"expected exactly 1 error event, got: {error_events}"
+
+        # Synthetic chunk content == joined content fragments
+        assert synth_chunk[0]["content"] == "partial answer"
+        # Synthetic reasoning content == joined reasoning fragments, source=thinking
+        assert synth_reasoning[0]["content"] == "thinking hard"
+        assert synth_reasoning[0]["source"] == "thinking"
+
+        # Order: chunk -> reasoning -> error
+        chunk_idx = events.index(synth_chunk[0])
+        reasoning_idx = events.index(synth_reasoning[0])
+        error_idx = events.index(error_events[0])
+        assert chunk_idx < reasoning_idx < error_idx, (
+            f"expected chunk -> reasoning -> error order, got indices "
+            f"chunk={chunk_idx}, reasoning={reasoning_idx}, error={error_idx}"
+        )
+
+    @patch("agentic.agent.agent.litellm")
+    def test_mid_stream_error_only_content(self, mock_litellm, monkeypatch):
+        """Variant: stream errors after content but before reasoning ever fires.
+        Expect synthetic chunk + error, NO synthetic reasoning."""
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
+
+        from tests.fixtures.streams import content_chunks, role_chunk
+
+        def failing_stream():
+            yield role_chunk()
+            yield from content_chunks("hello world", fragments=2)
+            raise ConnectionError("upstream closed")
+
+        mock_litellm.completion.return_value = failing_stream()
+
+        events = []
+        ctx = ExecutionContext(execution_id="test", on_event=lambda e: events.append(e))
+        agent = Agent(model="gpt-4o-mini", system_prompt="test")
+        output = agent.run("Hi", context=ctx)
+
+        assert output.status.value == "failed"
+
+        synth_chunk = [e for e in events if e.get("type") == "chunk"]
+        synth_reasoning = [
+            e
+            for e in events
+            if e.get("type") == "reasoning" and e.get("source") == "thinking"
+        ]
+        error_events = [e for e in events if e.get("type") == "error"]
+
+        assert len(synth_chunk) == 1, f"expected synthetic chunk, got: {synth_chunk}"
+        assert synth_chunk[0]["content"] == "hello world"
+        assert (
+            synth_reasoning == []
+        ), f"expected NO synthetic reasoning, got: {synth_reasoning}"
+        assert len(error_events) == 1
+
+    @patch("agentic.agent.agent.litellm")
+    def test_mid_stream_error_only_reasoning(self, mock_litellm, monkeypatch):
+        """Variant: stream errors after reasoning but before any content fragment.
+        Expect synthetic reasoning + error, NO synthetic chunk (m3 v3 edge case)."""
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
+
+        from tests.fixtures.streams import reasoning_chunks, role_chunk
+
+        def failing_stream():
+            yield role_chunk()
+            yield from reasoning_chunks("just thinking", fragments=2)
+            raise ConnectionError("upstream closed")
+
+        mock_litellm.completion.return_value = failing_stream()
+
+        events = []
+        ctx = ExecutionContext(execution_id="test", on_event=lambda e: events.append(e))
+        agent = Agent(model="gpt-4o-mini", system_prompt="test")
+        output = agent.run("Hi", context=ctx)
+
+        assert output.status.value == "failed"
+
+        synth_chunk = [e for e in events if e.get("type") == "chunk"]
+        synth_reasoning = [
+            e
+            for e in events
+            if e.get("type") == "reasoning" and e.get("source") == "thinking"
+        ]
+        error_events = [e for e in events if e.get("type") == "error"]
+
+        assert synth_chunk == [], f"expected NO synthetic chunk, got: {synth_chunk}"
+        assert (
+            len(synth_reasoning) == 1
+        ), f"expected synthetic reasoning, got: {synth_reasoning}"
+        assert synth_reasoning[0]["content"] == "just thinking"
+        assert synth_reasoning[0]["source"] == "thinking"
+        assert len(error_events) == 1

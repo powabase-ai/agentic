@@ -430,6 +430,7 @@ class Agent:
                 if streaming_enabled:
                     from agentic.llm.streaming import (
                         AbortedError,
+                        StreamPartialError,
                         accumulate_stream,
                     )
 
@@ -465,8 +466,30 @@ class Agent:
                             tool_calls=all_tool_calls,
                             events=collected_events,
                         )
-                    # StreamPartialError (mid-stream provider failure) is handled
-                    # in Task 10 — for now, let it propagate to the outer except.
+                    except StreamPartialError as e:
+                        # M5: emit synthetic terminal events so partial content
+                        # is preserved (live FE keeps showing what it had; events
+                        # persisted by the route layer once Task 14 lands).
+                        if e.partial_content:
+                            context.emit_event(
+                                {
+                                    "type": "chunk",
+                                    "content": e.partial_content,
+                                }
+                            )
+                        if e.partial_reasoning:
+                            context.emit_event(
+                                {
+                                    "type": "reasoning",
+                                    "step": step,
+                                    "source": "thinking",
+                                    "content": e.partial_reasoning,
+                                }
+                            )
+                        context.emit_event(
+                            {"type": "error", "error": str(e), "step": step}
+                        )
+                        raise
                 else:
                     # Kill-switch-off path — preserves today's exact behavior
                     assistant_msg = response.choices[0].message
