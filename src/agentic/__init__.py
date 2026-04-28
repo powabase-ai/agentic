@@ -32,18 +32,12 @@ See Also:
     - docs/CONCEPTS.md for detailed concept explanations
 """
 
-import importlib as _importlib
+from . import llm  # noqa: F401  -- triggers llm/setup.py global config
 
-from . import llm  # noqa: F401  -- triggers llm/setup.py on cold import
-from .llm import setup as _llm_setup
-
-# Re-run setup on every package init (incl. importlib.reload) so the LiteLLM
-# global flag is restored even if a caller mutated it after first import.
-_importlib.reload(_llm_setup)
-
+# isort: split
 # Agent module - fully implemented
-from agentic.agent import Agent, AgentOutput, AgentSession, ToolCallRecord  # noqa: E402
-from agentic.agent.tools import (  # noqa: E402
+from agentic.agent import Agent, AgentOutput, AgentSession, ToolCallRecord
+from agentic.agent.tools import (
     BuiltinTool,
     CustomTool,
     DelegateTool,
@@ -53,7 +47,7 @@ from agentic.agent.tools import (  # noqa: E402
 )
 
 # Execution infrastructure
-from agentic.execution import (  # noqa: E402
+from agentic.execution import (
     ExecutionContext,
     ExecutionStatus,
     MaxDepthExceeded,
@@ -61,7 +55,7 @@ from agentic.execution import (  # noqa: E402
 )
 
 # Ingest module - content ingestion (connectors & extractors)
-from agentic.ingest import (  # noqa: E402
+from agentic.ingest import (
     Connector,
     ContentItem,
     Derivative,
@@ -73,7 +67,7 @@ from agentic.ingest import (  # noqa: E402
 )
 
 # Knowledge module - base classes and interfaces
-from agentic.knowledge import (  # noqa: E402
+from agentic.knowledge import (
     ChunkingStrategy,
     Embedder,
     IndexingAlgorithm,
@@ -86,7 +80,7 @@ from agentic.knowledge import (  # noqa: E402
 )
 
 # Orchestration module
-from agentic.orchestration import (  # noqa: E402
+from agentic.orchestration import (
     Orchestration,
     OrchestrationEntity,
     OrchestrationOutput,
@@ -97,7 +91,7 @@ from agentic.orchestration import (  # noqa: E402
 )
 
 # Workflow module - placeholder
-from agentic.workflow import Workflow, WorkflowOutput, WorkflowSession  # noqa: E402
+from agentic.workflow import Workflow, WorkflowOutput, WorkflowSession
 
 __version__ = "0.1.0"
 

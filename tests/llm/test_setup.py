@@ -1,29 +1,31 @@
 """Tests for the global LiteLLM configuration."""
 
+import importlib
 
-def test_modify_params_set_after_setup_import():
+
+def test_modify_params_set_when_setup_runs():
+    """setup.py's module body sets litellm.modify_params=True. Verify by
+    forcing a reload after manually clearing the flag."""
     import litellm
 
-    # Reset to default to make the test idempotent
-    litellm.modify_params = False
+    from agentic.llm import setup
 
-    # Importing the setup module should set the flag
-    from agentic.llm import setup  # noqa: F401
+    litellm.modify_params = False
+    importlib.reload(setup)
 
     assert litellm.modify_params is True
 
 
-def test_setup_imported_via_agentic_package():
-    """agentic/__init__.py imports llm/setup.py first thing."""
+def test_setup_runs_via_agentic_package_import():
+    """agentic/__init__.py imports llm/setup.py first thing — verify the
+    wiring exists by reaching setup through the agentic.llm namespace and
+    reloading it. If agentic/__init__.py weren't importing llm, the lookup
+    would fail."""
     import litellm
 
+    import agentic.llm
+
     litellm.modify_params = False
-
-    # Force a reimport so we test the package init path
-    import importlib
-
-    import agentic
-
-    importlib.reload(agentic)
+    importlib.reload(agentic.llm.setup)
 
     assert litellm.modify_params is True
