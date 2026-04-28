@@ -139,6 +139,9 @@ class SupervisorEngine(StrategyEngine):
                 system_prompt=_build_orchestrator_prompt(orchestration, entities),
                 name=f"{orchestration.name}_orchestrator",
                 api_key=orchestration.orchestrator_config.get("api_key"),
+                reasoning_effort=orchestration.orchestrator_config.get(
+                    "reasoning_effort"
+                ),
             )
 
             # Build input with history for multi-turn conversations
