@@ -30,6 +30,7 @@ from agentic.agent.tools import ToolDefinition
 from agentic.execution.context import ExecutionContext
 from agentic.execution.status import ExecutionStatus
 from agentic.knowledge.model_config import AGENT_DEFAULT_MODEL
+from agentic.llm.reasoning_extractor import extract_reasoning_artifact
 from agentic.llm.routing import (
     maybe_route_through_responses,
     reasoning_call_kwargs,
@@ -623,6 +624,18 @@ class Agent:
                         }
                         for tc in assistant_msg.tool_calls
                     ]
+
+                # Attach reasoning artifact for intra-run replay (Phase B).
+                # Required for Anthropic+thinking+tools to survive the next
+                # tool-result LLM call without 400-ing.
+                artifact = extract_reasoning_artifact(
+                    model=state.current_model,
+                    assembled_message=assistant_msg,
+                    final_response=response,
+                    requested_effort=self._resolved_effort_for(state.current_model),
+                )
+                if artifact is not None:
+                    msg_dict["reasoning"] = artifact.model_dump(exclude_none=True)
 
                 working_messages = list(state.messages) + [msg_dict]
 
