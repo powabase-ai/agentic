@@ -259,6 +259,14 @@ class Agent:
             timer.daemon = True
             timer.start()
 
+        # Reasoning surface for AgentOutput: last_artifact tracks the most
+        # recent step's extracted artifact; reasoning_was_requested is fixed
+        # at run start based on resolved effort for the model. Defined before
+        # the try block so all return paths (including OnRunStart-blocked and
+        # the bare-except fallback) can reference them safely.
+        last_artifact = None
+        reasoning_was_requested = self._resolved_effort_for(self.model) is not None
+
         try:
             # OnRunStart hook — fire before anything else
             if hooks:
@@ -280,6 +288,8 @@ class Agent:
                         started_at=started_at,
                         completed_at=datetime.now(),
                         error=on_start.message or "Blocked by OnRunStart hook",
+                        reasoning_artifact=last_artifact,
+                        reasoning_requested=reasoning_was_requested,
                     )
 
             # Build messages list
@@ -335,6 +345,8 @@ class Agent:
                         steps=step,
                         tool_calls=all_tool_calls,
                         events=collected_events,
+                        reasoning_artifact=last_artifact,
+                        reasoning_requested=reasoning_was_requested,
                     )
 
                 is_last_step = step >= max_steps or state.budget_exhausted
@@ -524,6 +536,8 @@ class Agent:
                             steps=step,
                             tool_calls=all_tool_calls,
                             events=collected_events,
+                            reasoning_artifact=last_artifact,
+                            reasoning_requested=reasoning_was_requested,
                         )
                     except StreamPartialError as e:
                         # M5: emit synthetic terminal events so partial content
@@ -597,6 +611,8 @@ class Agent:
                         steps=step,
                         tool_calls=all_tool_calls,
                         events=collected_events,
+                        reasoning_artifact=last_artifact,
+                        reasoning_requested=reasoning_was_requested,
                     )
 
                 # Determine if the LLM requested tool calls
@@ -636,6 +652,7 @@ class Agent:
                 )
                 if artifact is not None:
                     msg_dict["reasoning"] = artifact.model_dump(exclude_none=True)
+                    last_artifact = artifact
 
                 working_messages = list(state.messages) + [msg_dict]
 
@@ -791,6 +808,8 @@ class Agent:
                         steps=step,
                         tool_calls=all_tool_calls,
                         events=collected_events,
+                        reasoning_artifact=last_artifact,
+                        reasoning_requested=reasoning_was_requested,
                     )
 
                 # Compaction check: summarize history if context is growing large
@@ -821,6 +840,8 @@ class Agent:
                             steps=step,
                             tool_calls=all_tool_calls,
                             events=collected_events,
+                            reasoning_artifact=last_artifact,
+                            reasoning_requested=reasoning_was_requested,
                         )
 
                 # ===== PHASE 5: CONTINUATION =====
@@ -871,6 +892,8 @@ class Agent:
                 steps=step,
                 tool_calls=all_tool_calls,
                 events=collected_events,
+                reasoning_artifact=last_artifact,
+                reasoning_requested=reasoning_was_requested,
             )
 
         except Exception as e:
@@ -882,6 +905,8 @@ class Agent:
                 completed_at=datetime.now(),
                 error=str(e),
                 messages=self._build_messages(input, session),
+                reasoning_artifact=last_artifact,
+                reasoning_requested=reasoning_was_requested,
             )
         finally:
             if timer is not None:
