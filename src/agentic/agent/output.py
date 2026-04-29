@@ -3,10 +3,13 @@ Agent output - result of a single agent execution.
 """
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agentic.execution.base import BaseOutput
 from agentic.execution.status import ExecutionStatus
+
+if TYPE_CHECKING:
+    from agentic.agent.message import ReasoningArtifact
 
 
 @dataclass
@@ -67,6 +70,12 @@ class AgentOutput(BaseOutput):
     steps: int = 0
     tool_calls: list[ToolCallRecord] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
+
+    # Reasoning artifact (Anthropic thinking_blocks, OpenAI encrypted_content,
+    # Gemini thought_signatures) extracted from the final assistant message,
+    # plus a flag for whether reasoning was actually requested for this run.
+    reasoning_artifact: "ReasoningArtifact | None" = None
+    reasoning_requested: bool = False
 
     def get_content(self) -> str:
         """

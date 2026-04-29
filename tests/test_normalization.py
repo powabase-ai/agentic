@@ -30,6 +30,43 @@ class TestStripMetadata:
         result = normalize_messages(messages)
         assert result[0]["tool_calls"] == messages[0]["tool_calls"]
 
+    def test_preserves_thinking_blocks_for_anthropic_replay(self):
+        """thinking_blocks must survive normalization so Anthropic can replay
+        prior reasoning blocks on subsequent litellm.completion calls."""
+        messages = [
+            {
+                "role": "assistant",
+                "content": "ok",
+                "thinking_blocks": [
+                    {
+                        "type": "thinking",
+                        "thinking": "let me think...",
+                        "signature": "abc123",
+                    }
+                ],
+            },
+        ]
+        result = normalize_messages(messages)
+        assert result[0]["thinking_blocks"] == messages[0]["thinking_blocks"]
+
+    def test_preserves_provider_specific_fields_for_openai_gemini_replay(self):
+        """provider_specific_fields carries OpenAI/Gemini reasoning replay data
+        and must not be stripped."""
+        messages = [
+            {
+                "role": "assistant",
+                "content": "ok",
+                "provider_specific_fields": {
+                    "reasoning_content": "internal reasoning trace",
+                },
+            },
+        ]
+        result = normalize_messages(messages)
+        assert (
+            result[0]["provider_specific_fields"]
+            == messages[0]["provider_specific_fields"]
+        )
+
 
 class TestOrphanedToolResults:
     def test_removes_orphaned_tool_result(self):

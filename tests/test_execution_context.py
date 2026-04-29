@@ -89,3 +89,24 @@ class TestExecutionContext:
         ctx = ExecutionContext(execution_id="test")
         # Should not raise
         ctx.emit_event({"type": "ignored"})
+
+    def test_emit_delta_event_skips_seq_and_ts(self):
+        """emit_delta_event must NOT inject seq or ts (perf — high-volume events)."""
+        events = []
+        ctx = ExecutionContext(
+            execution_id="test",
+            on_event=lambda e: events.append(e),
+        )
+        ctx.emit_delta_event({"type": "content_delta", "delta": "hi"})
+        assert len(events) == 1
+        event = events[0]
+        assert event["type"] == "content_delta"
+        assert event["delta"] == "hi"
+        assert "seq" not in event
+        assert "ts" not in event
+
+    def test_emit_delta_event_no_callback_is_noop(self):
+        """emit_delta_event with no on_event must not raise."""
+        ctx = ExecutionContext(execution_id="test")
+        # Should not raise
+        ctx.emit_delta_event({"type": "content_delta", "delta": "hi"})

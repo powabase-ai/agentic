@@ -145,3 +145,16 @@ def sample_agent():
         system_prompt="You are a helpful assistant.",
         name="test-agent",
     )
+
+
+@pytest.fixture(autouse=True)
+def disable_streaming_by_default(monkeypatch):
+    """Pin AGENT_LLM_STREAMING_ENABLED=false for the autouse default.
+
+    Existing ReAct loop tests (test_react_loop.py) use non-iterable mock
+    responses; with streaming on by default they'd try to iterate a Mock
+    and fail. Streaming-specific tests opt back in via:
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
+    inside the test body.
+    """
+    monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "false")
