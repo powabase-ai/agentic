@@ -32,6 +32,9 @@ See Also:
     - docs/CONCEPTS.md for detailed concept explanations
 """
 
+from . import llm  # noqa: F401  -- triggers llm/setup.py global config
+
+# isort: split
 # Agent module - fully implemented
 from agentic.agent import Agent, AgentOutput, AgentSession, ToolCallRecord
 from agentic.agent.tools import (

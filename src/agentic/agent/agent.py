@@ -4,6 +4,7 @@ Agent - single LLM-powered agent definition and execution.
 
 import json
 import logging
+import os
 import threading
 import time
 from collections.abc import AsyncGenerator, Generator
@@ -29,6 +30,11 @@ from agentic.agent.tools import ToolDefinition
 from agentic.execution.context import ExecutionContext
 from agentic.execution.status import ExecutionStatus
 from agentic.knowledge.model_config import AGENT_DEFAULT_MODEL
+from agentic.llm.reasoning_extractor import extract_reasoning_artifact
+from agentic.llm.routing import (
+    maybe_route_through_responses,
+    reasoning_call_kwargs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +125,7 @@ class Agent:
         temperature: float | None = None,
         max_tokens: int | None = None,
         api_key: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         """
         Initialize an Agent.
@@ -135,6 +142,15 @@ class Agent:
             api_key: Optional API key for the model's provider. Passed directly
                      to litellm, overriding env vars. Enables thread-safe
                      concurrent requests without os.environ mutation.
+            reasoning_effort: Optional reasoning effort hint (e.g. "low",
+                     "medium", "high") forwarded to reasoning-capable models
+                     via litellm. At construction time, this is checked
+                     against ``litellm.supports_reasoning`` for ``model``;
+                     if the model does not support reasoning, the value is
+                     silently dropped and a structured-log breadcrumb
+                     ``reasoning_effort_dropped`` is emitted. The resolved
+                     value is cached per model and lazily populated for
+                     fallback models on first use.
         """
         self.model = model
         self.system_prompt = system_prompt
@@ -142,6 +158,35 @@ class Agent:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.api_key = api_key
+        self._requested_effort = reasoning_effort
+        self._effort_cache: dict[str, str | None] = {}
+        self._effort_cache[model] = self._resolve_effort_for_model(model)
+
+    def _resolve_effort_for_model(self, model: str) -> str | None:
+        """Construct-time precheck. Drops the param for unsupported models with breadcrumb."""
+        if self._requested_effort is None:
+            return None
+        try:
+            supports = litellm.supports_reasoning(model=model)
+        except Exception:
+            supports = False
+        if supports:
+            return self._requested_effort
+        logger.info(
+            "reasoning_effort_dropped",
+            extra={
+                "model": model,
+                "requested_effort": self._requested_effort,
+                "reason": "model_does_not_support_reasoning",
+            },
+        )
+        return None
+
+    def _resolved_effort_for(self, model: str) -> str | None:
+        """Per-call lookup. Caches per model; populates on first use of a fallback."""
+        if model not in self._effort_cache:
+            self._effort_cache[model] = self._resolve_effort_for_model(model)
+        return self._effort_cache[model]
 
     def run(
         self,
@@ -214,6 +259,14 @@ class Agent:
             timer.daemon = True
             timer.start()
 
+        # Reasoning surface for AgentOutput: last_artifact tracks the most
+        # recent step's extracted artifact; reasoning_was_requested is fixed
+        # at run start based on resolved effort for the model. Defined before
+        # the try block so all return paths (including OnRunStart-blocked and
+        # the bare-except fallback) can reference them safely.
+        last_artifact = None
+        reasoning_was_requested = self._resolved_effort_for(self.model) is not None
+
         try:
             # OnRunStart hook — fire before anything else
             if hooks:
@@ -235,6 +288,8 @@ class Agent:
                         started_at=started_at,
                         completed_at=datetime.now(),
                         error=on_start.message or "Blocked by OnRunStart hook",
+                        reasoning_artifact=last_artifact,
+                        reasoning_requested=reasoning_was_requested,
                     )
 
             # Build messages list
@@ -296,6 +351,8 @@ class Agent:
                         steps=step,
                         tool_calls=all_tool_calls,
                         events=collected_events,
+                        reasoning_artifact=last_artifact,
+                        reasoning_requested=reasoning_was_requested,
                     )
 
                 is_last_step = step >= max_steps or state.budget_exhausted
@@ -334,9 +391,8 @@ class Agent:
                 # On last step, don't pass tools to force a text-only response
                 step_tools = None if is_last_step else tool_schemas
 
-                # Build call kwargs
+                # Build call kwargs (model is set below after routing resolution)
                 call_kwargs: dict[str, Any] = {
-                    "model": state.current_model,
                     "messages": normalized,
                     "num_retries": 3,
                     "stream": False,
@@ -351,6 +407,31 @@ class Agent:
                     call_kwargs["response_format"] = response_format
                 if self.api_key is not None:
                     call_kwargs["api_key"] = self.api_key
+
+                # Resolve reasoning effort for the current model (cache hit on
+                # repeat use; fallback models trigger lazy precheck — §3.1.1).
+                # Route OpenAI reasoning models through the Responses bridge
+                # and merge in the matching kwargs (top-level reasoning_effort
+                # for non-Responses paths; effort+summary packed into extra_body
+                # for Responses paths — see agentic/llm/routing.py for the
+                # bug-avoidance rationale).
+                effective_effort = self._resolved_effort_for(state.current_model)
+                routed_model = maybe_route_through_responses(
+                    state.current_model, effective_effort
+                )
+                call_kwargs["model"] = routed_model
+                call_kwargs.update(
+                    reasoning_call_kwargs(effective_effort, routed_model)
+                )
+
+                # Streaming flag (issue #106 — read per-call, not module-level,
+                # so monkeypatch.setenv works in tests)
+                streaming_enabled = (
+                    os.getenv("AGENT_LLM_STREAMING_ENABLED", "true").lower() == "true"
+                )
+                call_kwargs["stream"] = streaming_enabled
+                if streaming_enabled:
+                    call_kwargs["stream_options"] = {"include_usage": True}
 
                 # Call LLM
                 try:
@@ -372,6 +453,13 @@ class Agent:
                                 "to": fallback_model,
                             }
                         )
+                        context.emit_event(
+                            {
+                                "type": "step_reset",
+                                "step": step,
+                                "reason": "rate_limit",
+                            }
+                        )
                         state = state.with_fallback_model(fallback_model)
                         continue
 
@@ -382,6 +470,13 @@ class Agent:
                         and state.compact_failure_count < 3
                     ):
                         context.emit_event({"type": "reactive_compact", "step": step})
+                        context.emit_event(
+                            {
+                                "type": "step_reset",
+                                "step": step,
+                                "reason": "prompt_too_long",
+                            }
+                        )
                         try:
                             pruned = prune_messages(list(state.messages))
                             compacted = compact_messages(pruned)
@@ -413,16 +508,98 @@ class Agent:
                                 "to": fallback_model,
                             }
                         )
+                        context.emit_event(
+                            {
+                                "type": "step_reset",
+                                "step": step,
+                                "reason": "model_error",
+                            }
+                        )
                         state = state.with_fallback_model(fallback_model)
                         continue
 
                     # Unrecoverable — re-raise to outer exception handler
                     raise
 
-                # Accumulate usage. Iterate the running-total dict's keys so
-                # any new fields (reasoning_tokens, cached_tokens) are also
-                # rolled up.
-                step_usage = self._extract_usage(response)
+                # Unpack the response — streaming path uses accumulate_stream;
+                # non-streaming preserves today's behavior. Both branches define
+                # `assistant_msg`, `finish_reason`, and `usage` for the rest of
+                # the iteration to consume.
+                if streaming_enabled:
+                    from agentic.llm.streaming import (
+                        AbortedError,
+                        StreamPartialError,
+                        accumulate_stream,
+                    )
+
+                    try:
+                        assistant_msg, finish_reason, usage = accumulate_stream(
+                            response,
+                            on_content_delta=lambda d: context.emit_delta_event(
+                                {"type": "content_delta", "delta": d}
+                            ),
+                            on_reasoning_delta=lambda d,
+                            _step=step: context.emit_delta_event(
+                                {
+                                    "type": "reasoning_delta",
+                                    "step": _step,
+                                    "source": "thinking",
+                                    "delta": d,
+                                }
+                            ),
+                            abort_signal=context.abort_signal,
+                        )
+                    except AbortedError:
+                        # B2 v3: streaming abort produces the same AgentOutput shape
+                        # as the existing non-streaming abort path at line 444-456.
+                        return AgentOutput(
+                            execution_id=context.execution_id,
+                            status=ExecutionStatus.CANCELLED,
+                            started_at=started_at,
+                            completed_at=datetime.now(),
+                            error="Execution aborted",
+                            messages=list(state.messages),
+                            usage=total_usage,
+                            steps=step,
+                            tool_calls=all_tool_calls,
+                            events=collected_events,
+                            reasoning_artifact=last_artifact,
+                            reasoning_requested=reasoning_was_requested,
+                        )
+                    except StreamPartialError as e:
+                        # M5: emit synthetic terminal events so partial content
+                        # is preserved (live FE keeps showing what it had; events
+                        # persisted by the route layer once Task 14 lands).
+                        if e.partial_content:
+                            context.emit_event(
+                                {
+                                    "type": "chunk",
+                                    "content": e.partial_content,
+                                }
+                            )
+                        if e.partial_reasoning:
+                            context.emit_event(
+                                {
+                                    "type": "reasoning",
+                                    "step": step,
+                                    "source": "thinking",
+                                    "content": e.partial_reasoning,
+                                }
+                            )
+                        context.emit_event(
+                            {"type": "error", "error": str(e), "step": step}
+                        )
+                        raise
+                else:
+                    # Kill-switch-off path — preserves today's exact behavior
+                    assistant_msg = response.choices[0].message
+                    finish_reason = response.choices[0].finish_reason
+                    usage = self._extract_usage(response)
+
+                # Accumulate usage — `usage` was set in the streaming/non-streaming
+                # branches above. Iterate the running-total dict's keys so any new
+                # fields (reasoning_tokens, cached_tokens) are also rolled up.
+                step_usage = usage
                 if step_usage:
                     for k in total_usage:
                         total_usage[k] += step_usage.get(k, 0)
@@ -462,10 +639,9 @@ class Agent:
                         steps=step,
                         tool_calls=all_tool_calls,
                         events=collected_events,
+                        reasoning_artifact=last_artifact,
+                        reasoning_requested=reasoning_was_requested,
                     )
-
-                assistant_msg = response.choices[0].message
-                finish_reason = response.choices[0].finish_reason
 
                 # Determine if the LLM requested tool calls
                 has_tool_calls = (
@@ -493,6 +669,19 @@ class Agent:
                         for tc in assistant_msg.tool_calls
                     ]
 
+                # Attach reasoning artifact for intra-run replay (Phase B).
+                # Required for Anthropic+thinking+tools to survive the next
+                # tool-result LLM call without 400-ing.
+                artifact = extract_reasoning_artifact(
+                    model=state.current_model,
+                    assembled_message=assistant_msg,
+                    final_response=response,
+                    requested_effort=self._resolved_effort_for(state.current_model),
+                )
+                if artifact is not None:
+                    msg_dict["reasoning"] = artifact.model_dump(exclude_none=True)
+                    last_artifact = artifact
+
                 working_messages = list(state.messages) + [msg_dict]
 
                 # Emit reasoning from LiteLLM's reasoning_content field
@@ -510,7 +699,11 @@ class Agent:
 
                 # Emit intermediary content when the LLM explains its
                 # thinking alongside tool calls.
-                if has_tool_calls and assistant_msg.content:
+                # NOTE: gated off in streaming mode — the prose was already
+                # streamed via content_delta to the chat bubble; emitting it
+                # again here as a reasoning event would duplicate (issue #106
+                # Q1 resolution).
+                if has_tool_calls and assistant_msg.content and not streaming_enabled:
                     context.emit_event(
                         {
                             "type": "reasoning",
@@ -538,6 +731,13 @@ class Agent:
                                     "type": "output_recovery",
                                     "step": step,
                                     "attempt": state.output_recovery_count + 1,
+                                }
+                            )
+                            context.emit_event(
+                                {
+                                    "type": "step_reset",
+                                    "step": step,
+                                    "reason": "output_recovery",
                                 }
                             )
                             state = state.with_output_recovery(
@@ -643,6 +843,8 @@ class Agent:
                         steps=step,
                         tool_calls=all_tool_calls,
                         events=collected_events,
+                        reasoning_artifact=last_artifact,
+                        reasoning_requested=reasoning_was_requested,
                     )
 
                 # Compaction check: summarize history if context is growing large
@@ -673,6 +875,8 @@ class Agent:
                             steps=step,
                             tool_calls=all_tool_calls,
                             events=collected_events,
+                            reasoning_artifact=last_artifact,
+                            reasoning_requested=reasoning_was_requested,
                         )
 
                 # ===== PHASE 5: CONTINUATION =====
@@ -723,6 +927,8 @@ class Agent:
                 steps=step,
                 tool_calls=all_tool_calls,
                 events=collected_events,
+                reasoning_artifact=last_artifact,
+                reasoning_requested=reasoning_was_requested,
             )
 
         except Exception as e:
@@ -734,6 +940,8 @@ class Agent:
                 completed_at=datetime.now(),
                 error=str(e),
                 messages=self._build_messages(input, session),
+                reasoning_artifact=last_artifact,
+                reasoning_requested=reasoning_was_requested,
             )
         finally:
             if timer is not None:
@@ -1149,7 +1357,9 @@ class Agent:
 
         # Build result diagnostics for debugging
         if isinstance(result, list):
-            block_types = [b.get("type", "unknown") for b in result if isinstance(b, dict)]
+            block_types = [
+                b.get("type", "unknown") for b in result if isinstance(b, dict)
+            ]
             result_meta = {
                 "result_type": "multimodal",
                 "block_count": len(result),
@@ -1167,7 +1377,11 @@ class Agent:
                 "step": step,
                 "tool_name": tool_name,
                 "call_id": tc.id,
-                "result_preview": (result[:200] if isinstance(result, str) else "[multimodal content]") if result else "",
+                "result_preview": (
+                    result[:200] if isinstance(result, str) else "[multimodal content]"
+                )
+                if result
+                else "",
                 "result_meta": result_meta,
                 "duration_ms": tool_duration_ms,
             }
@@ -1200,7 +1414,11 @@ class Agent:
                 "step": step,
                 "tool_name": tool_name,
                 "call_id": tc.id,
-                "result_preview": (result[:200] if isinstance(result, str) else "[multimodal content]") if result else "",
+                "result_preview": (
+                    result[:200] if isinstance(result, str) else "[multimodal content]"
+                )
+                if result
+                else "",
                 "duration_ms": tool_duration_ms,
             }
         )

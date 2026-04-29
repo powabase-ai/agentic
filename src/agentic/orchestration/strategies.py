@@ -125,11 +125,23 @@ class SupervisorEngine(StrategyEngine):
                 if entity.entity_type == "tool" and entity.tool:
                     delegate_tools[entity.tool.name] = entity.tool
 
-            # Create the orchestrator agent
+            # Create the orchestrator agent. orchestrator_config is the
+            # canonical source for orchestrator-specific settings (model,
+            # api_key); settings.get("model") is preserved as a back-compat
+            # fallback. api_key is None unless the project-service injected
+            # one for this request via build_orchestration → litellm then
+            # falls back to env vars.
+            orchestrator_model = orchestration.orchestrator_config.get(
+                "model"
+            ) or orchestration.settings.get("model", "gpt-5.4")
             orchestrator = Agent(
-                model=orchestration.settings.get("model", "gpt-5.4"),
+                model=orchestrator_model,
                 system_prompt=_build_orchestrator_prompt(orchestration, entities),
                 name=f"{orchestration.name}_orchestrator",
+                api_key=orchestration.orchestrator_config.get("api_key"),
+                reasoning_effort=orchestration.orchestrator_config.get(
+                    "reasoning_effort"
+                ),
             )
 
             # Build input with history for multi-turn conversations

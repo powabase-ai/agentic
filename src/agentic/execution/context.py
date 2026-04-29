@@ -126,6 +126,16 @@ class ExecutionContext:
         if self.on_event is not None:
             self.on_event(event)
 
+    def emit_delta_event(self, event: dict[str, Any]) -> None:
+        """Like emit_event but skips seq/ts injection.
+
+        Used for high-volume delta events (content_delta, reasoning_delta) where
+        ordering and timing aren't consumed downstream. Saves a datetime.now()
+        per event on streaming runs of reasoning models.
+        """
+        if self.on_event is not None:
+            self.on_event(event)
+
     def with_metadata(self, **kwargs: Any) -> ExecutionContext:
         """Create a new context with additional metadata."""
         new_metadata = {**self.metadata, **kwargs}

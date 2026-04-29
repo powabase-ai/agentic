@@ -60,6 +60,47 @@ def _mock_tool_call_response(tool_name, arguments, call_id="call_1"):
     )
 
 
+def _mock_streaming_response(
+    content: str = "",
+    reasoning: str = "",
+    tool_calls: list[dict] | None = None,
+    finish_reason: str = "stop",
+):
+    """Streaming variant of _mock_completion_response.
+
+    Returns an iterator of FakeChunk objects matching what
+    ``litellm.completion(stream=True)`` yields.
+    """
+    from tests.fixtures.streams import (
+        content_chunks,
+        fake_stream,
+        finish_chunk,
+        reasoning_chunks,
+        role_chunk,
+        tool_call_chunks,
+        usage_chunk,
+    )
+
+    chunks = [role_chunk()]
+    if reasoning:
+        chunks.extend(reasoning_chunks(reasoning, fragments=3))
+    if content:
+        chunks.extend(content_chunks(content, fragments=3))
+    if tool_calls:
+        for i, tc in enumerate(tool_calls):
+            chunks.extend(
+                tool_call_chunks(
+                    name=tc["name"],
+                    args=tc.get("args", {}),
+                    index=i,
+                    frag_count=2,
+                )
+            )
+    chunks.append(finish_chunk(finish_reason))
+    chunks.append(usage_chunk(prompt_tokens=10, completion_tokens=5))
+    return fake_stream(*chunks)
+
+
 class TestReactLoopNoTools:
     """Without tools, the loop should run one iteration (backward compat)."""
 
@@ -218,3 +259,332 @@ class TestAbortIntegration:
 
         assert output.status.value in ("cancelled", "failed")
         mock_litellm.completion.assert_not_called()
+
+
+class TestStreamingKillSwitch:
+    """Regression guard: AGENT_LLM_STREAMING_ENABLED=false preserves today's behavior."""
+
+    @patch("agentic.agent.agent.litellm")
+    def test_streaming_disabled_via_env_preserves_today_behavior(
+        self, mock_litellm, monkeypatch
+    ):
+        """Kill-switch off -> behavior identical to pre-PR. Regression guard.
+
+        With AGENT_LLM_STREAMING_ENABLED=false, agent.run() must:
+          - Use the non-streaming litellm.completion path (no stream=True kwarg).
+          - Return AgentOutput.content matching the mock response exactly.
+          - Emit zero content_delta / reasoning_delta events via on_event.
+        """
+        # Conftest already pins to "false"; explicit here for clarity / belt-and-braces.
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "false")
+
+        mock_litellm.completion.return_value = _mock_completion_response("hi")
+
+        events = []
+        ctx = ExecutionContext(execution_id="test", on_event=lambda e: events.append(e))
+
+        agent = Agent(model="gpt-4o-mini", system_prompt="test")
+        output = agent.run("Hello", context=ctx)
+
+        # AgentOutput shape matches today's non-streaming behavior.
+        assert output.content == "hi"
+        assert output.status.is_success()
+        assert output.steps == 1
+        assert output.tool_calls == []
+
+        # litellm was called in non-streaming mode.
+        mock_litellm.completion.assert_called_once()
+        call_kwargs = mock_litellm.completion.call_args.kwargs
+        assert not call_kwargs.get(
+            "stream"
+        ), "kill-switch off must not pass stream=True"
+
+        # No streaming-specific events were emitted.
+        emitted_types = [e["type"] for e in events]
+        assert "content_delta" not in emitted_types
+        assert "reasoning_delta" not in emitted_types
+        assert output.events == events
+
+
+class TestStreamingContentDeltaEmission:
+    """Streaming on -> content_delta events fire; line ~563 reasoning emit is suppressed.
+
+    Q1 resolution (issue #106): when streaming is enabled, the LLM's intermediary
+    prose alongside tool calls is already streamed via content_delta to the chat
+    bubble — re-emitting it as a terminal reasoning event would duplicate.
+    """
+
+    @patch("agentic.agent.agent.litellm")
+    def test_streaming_emits_content_delta_events(self, mock_litellm, monkeypatch):
+        """Streaming on -> content_delta events fire for each fragment, no
+        duplicate reasoning event from line ~563 (Q1 fix)."""
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
+
+        # Step 1: streaming response with content + tool call (triggers
+        # has_tool_calls=True AND assistant_msg.content non-empty path).
+        # Step 2: streaming response with content only (loop terminates).
+        step1 = _mock_streaming_response(
+            content="thinking out loud",
+            tool_calls=[{"name": "search_kb", "args": {"q": "x"}}],
+            finish_reason="tool_calls",
+        )
+        step2 = _mock_streaming_response(content="done", finish_reason="stop")
+        mock_litellm.completion.side_effect = [step1, step2]
+
+        tool = BuiltinTool(
+            name="search_kb",
+            description="Search the KB",
+            input_schema={
+                "type": "object",
+                "properties": {"q": {"type": "string"}},
+            },
+            handler=lambda args, ctx: "result",
+        )
+
+        events = []
+        ctx = ExecutionContext(execution_id="test", on_event=lambda e: events.append(e))
+
+        agent = Agent(model="gpt-4o-mini", system_prompt="test")
+        output = agent.run("What's in the KB?", context=ctx, tools={"search_kb": tool})
+
+        assert output.status.is_success()
+
+        # 1. content_delta events fire for each fragment.
+        content_deltas = [e for e in events if e.get("type") == "content_delta"]
+        assert len(content_deltas) > 0, "expected at least one content_delta event"
+
+        # 2. Concatenated content_delta deltas equal the prose from step 1.
+        # (step 2's "done" deltas also flow, so check that step 1's prose is a
+        # contiguous substring of the concatenation, OR sum to the full string.)
+        joined = "".join(e["delta"] for e in content_deltas)
+        assert (
+            "thinking out loud" in joined
+        ), f"expected step-1 prose in joined deltas, got: {joined!r}"
+
+        # 3. No reasoning event WITHOUT a "source" field (line ~563 must not fire
+        # when streaming is on). The reasoning emit at line ~552 (with
+        # source="thinking") would not fire either since the mock has no
+        # reasoning_content.
+        bare_reasoning_events = [
+            e for e in events if e.get("type") == "reasoning" and "source" not in e
+        ]
+        assert bare_reasoning_events == [], (
+            f"line ~563 reasoning emit must be gated off when streaming is on; "
+            f"got: {bare_reasoning_events}"
+        )
+
+    @patch("agentic.agent.agent.litellm")
+    def test_line_506_emits_when_streaming_disabled(self, mock_litellm, monkeypatch):
+        """Kill switch off -> line ~563 still fires for has_tool_calls + content
+        steps. Regression guard for today's behavior."""
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "false")
+
+        # Non-streaming response with BOTH content and a tool call.
+        step1 = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="let me search for that",
+                        role="assistant",
+                        tool_calls=[
+                            SimpleNamespace(
+                                id="call_1",
+                                type="function",
+                                function=SimpleNamespace(
+                                    name="search_kb",
+                                    arguments='{"q": "x"}',
+                                ),
+                            )
+                        ],
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            usage=SimpleNamespace(
+                prompt_tokens=10, completion_tokens=5, total_tokens=15
+            ),
+        )
+        step2 = _mock_completion_response("done")
+        mock_litellm.completion.side_effect = [step1, step2]
+
+        tool = BuiltinTool(
+            name="search_kb",
+            description="Search the KB",
+            input_schema={
+                "type": "object",
+                "properties": {"q": {"type": "string"}},
+            },
+            handler=lambda args, ctx: "result",
+        )
+
+        events = []
+        ctx = ExecutionContext(execution_id="test", on_event=lambda e: events.append(e))
+
+        agent = Agent(model="gpt-4o-mini", system_prompt="test")
+        output = agent.run("What's in the KB?", context=ctx, tools={"search_kb": tool})
+
+        assert output.status.is_success()
+
+        # Line ~563 must fire: a reasoning event with NO source field, content =
+        # the assistant's prose alongside the tool call.
+        bare_reasoning_events = [
+            e for e in events if e.get("type") == "reasoning" and "source" not in e
+        ]
+        assert (
+            len(bare_reasoning_events) == 1
+        ), f"expected exactly one bare reasoning event, got: {bare_reasoning_events}"
+        assert bare_reasoning_events[0]["content"] == "let me search for that"
+
+
+class TestMidStreamErrorSyntheticEvents:
+    """T10/M5: when accumulate_stream raises StreamPartialError mid-iteration,
+    agent.py emits synthetic terminal events (chunk + reasoning + error) so
+    the FE retains partial context and the route layer can persist them."""
+
+    @patch("agentic.agent.agent.litellm")
+    def test_mid_stream_error_emits_chunk_and_reasoning_then_error(
+        self, mock_litellm, monkeypatch
+    ):
+        """M5/M2: stream raises mid-iteration with both partial content and
+        partial reasoning -> synthetic terminal events emitted in order:
+        chunk, reasoning (source=thinking), error."""
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
+
+        from tests.fixtures.streams import (
+            content_chunks,
+            reasoning_chunks,
+            role_chunk,
+        )
+
+        def failing_stream():
+            yield role_chunk()
+            yield from reasoning_chunks("thinking hard", fragments=2)
+            yield from content_chunks("partial answer", fragments=2)
+            raise ConnectionError("upstream connection dropped")
+
+        mock_litellm.completion.return_value = failing_stream()
+
+        events = []
+        ctx = ExecutionContext(execution_id="test", on_event=lambda e: events.append(e))
+        agent = Agent(model="gpt-4o-mini", system_prompt="test")
+        output = agent.run("Hello", context=ctx)
+
+        # Outer except catches the re-raised StreamPartialError -> FAILED
+        assert output.status.value == "failed"
+
+        # Live deltas fired before the error
+        content_deltas = [e for e in events if e.get("type") == "content_delta"]
+        reasoning_deltas = [e for e in events if e.get("type") == "reasoning_delta"]
+        assert len(content_deltas) > 0, "expected content_delta events before error"
+        assert len(reasoning_deltas) > 0, "expected reasoning_delta events before error"
+
+        # Find the synthetic terminal events fired AFTER the deltas
+        # (they live alongside step_started/etc., so filter by type and
+        # check ordering by index in the events list).
+        synth_chunk = [e for e in events if e.get("type") == "chunk"]
+        synth_reasoning = [
+            e
+            for e in events
+            if e.get("type") == "reasoning" and e.get("source") == "thinking"
+        ]
+        error_events = [e for e in events if e.get("type") == "error"]
+
+        assert (
+            len(synth_chunk) == 1
+        ), f"expected exactly 1 synthetic chunk event, got: {synth_chunk}"
+        assert (
+            len(synth_reasoning) == 1
+        ), f"expected exactly 1 synthetic reasoning event, got: {synth_reasoning}"
+        assert (
+            len(error_events) == 1
+        ), f"expected exactly 1 error event, got: {error_events}"
+
+        # Synthetic chunk content == joined content fragments
+        assert synth_chunk[0]["content"] == "partial answer"
+        # Synthetic reasoning content == joined reasoning fragments, source=thinking
+        assert synth_reasoning[0]["content"] == "thinking hard"
+        assert synth_reasoning[0]["source"] == "thinking"
+
+        # Order: chunk -> reasoning -> error
+        chunk_idx = events.index(synth_chunk[0])
+        reasoning_idx = events.index(synth_reasoning[0])
+        error_idx = events.index(error_events[0])
+        assert chunk_idx < reasoning_idx < error_idx, (
+            f"expected chunk -> reasoning -> error order, got indices "
+            f"chunk={chunk_idx}, reasoning={reasoning_idx}, error={error_idx}"
+        )
+
+    @patch("agentic.agent.agent.litellm")
+    def test_mid_stream_error_only_content(self, mock_litellm, monkeypatch):
+        """Variant: stream errors after content but before reasoning ever fires.
+        Expect synthetic chunk + error, NO synthetic reasoning."""
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
+
+        from tests.fixtures.streams import content_chunks, role_chunk
+
+        def failing_stream():
+            yield role_chunk()
+            yield from content_chunks("hello world", fragments=2)
+            raise ConnectionError("upstream closed")
+
+        mock_litellm.completion.return_value = failing_stream()
+
+        events = []
+        ctx = ExecutionContext(execution_id="test", on_event=lambda e: events.append(e))
+        agent = Agent(model="gpt-4o-mini", system_prompt="test")
+        output = agent.run("Hi", context=ctx)
+
+        assert output.status.value == "failed"
+
+        synth_chunk = [e for e in events if e.get("type") == "chunk"]
+        synth_reasoning = [
+            e
+            for e in events
+            if e.get("type") == "reasoning" and e.get("source") == "thinking"
+        ]
+        error_events = [e for e in events if e.get("type") == "error"]
+
+        assert len(synth_chunk) == 1, f"expected synthetic chunk, got: {synth_chunk}"
+        assert synth_chunk[0]["content"] == "hello world"
+        assert (
+            synth_reasoning == []
+        ), f"expected NO synthetic reasoning, got: {synth_reasoning}"
+        assert len(error_events) == 1
+
+    @patch("agentic.agent.agent.litellm")
+    def test_mid_stream_error_only_reasoning(self, mock_litellm, monkeypatch):
+        """Variant: stream errors after reasoning but before any content fragment.
+        Expect synthetic reasoning + error, NO synthetic chunk (m3 v3 edge case)."""
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
+
+        from tests.fixtures.streams import reasoning_chunks, role_chunk
+
+        def failing_stream():
+            yield role_chunk()
+            yield from reasoning_chunks("just thinking", fragments=2)
+            raise ConnectionError("upstream closed")
+
+        mock_litellm.completion.return_value = failing_stream()
+
+        events = []
+        ctx = ExecutionContext(execution_id="test", on_event=lambda e: events.append(e))
+        agent = Agent(model="gpt-4o-mini", system_prompt="test")
+        output = agent.run("Hi", context=ctx)
+
+        assert output.status.value == "failed"
+
+        synth_chunk = [e for e in events if e.get("type") == "chunk"]
+        synth_reasoning = [
+            e
+            for e in events
+            if e.get("type") == "reasoning" and e.get("source") == "thinking"
+        ]
+        error_events = [e for e in events if e.get("type") == "error"]
+
+        assert synth_chunk == [], f"expected NO synthetic chunk, got: {synth_chunk}"
+        assert (
+            len(synth_reasoning) == 1
+        ), f"expected synthetic reasoning, got: {synth_reasoning}"
+        assert synth_reasoning[0]["content"] == "just thinking"
+        assert synth_reasoning[0]["source"] == "thinking"
+        assert len(error_events) == 1
