@@ -580,7 +580,11 @@ class PDFExtractor(Extractor):
             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
                 temp_path = f.name
                 f.write(pdf_bytes)
-            client = Mistral(api_key=self.mistral_api_key)
+            # 5-min per-operation timeout. Without this, an OCR call that
+            # never completes blocks the worker thread forever and wedges the
+            # entire Celery threads pool (no thread becomes free to pick up
+            # new tasks; pod looks Running to K8s but processes nothing).
+            client = Mistral(api_key=self.mistral_api_key, timeout_ms=300_000)
 
             with open(temp_path, "rb") as f:
                 uploaded_file = client.files.upload(
