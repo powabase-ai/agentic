@@ -447,6 +447,13 @@ class Agent:
                                 "to": fallback_model,
                             }
                         )
+                        context.emit_event(
+                            {
+                                "type": "step_reset",
+                                "step": step,
+                                "reason": "rate_limit",
+                            }
+                        )
                         state = state.with_fallback_model(fallback_model)
                         continue
 
@@ -457,6 +464,13 @@ class Agent:
                         and state.compact_failure_count < 3
                     ):
                         context.emit_event({"type": "reactive_compact", "step": step})
+                        context.emit_event(
+                            {
+                                "type": "step_reset",
+                                "step": step,
+                                "reason": "prompt_too_long",
+                            }
+                        )
                         try:
                             pruned = prune_messages(list(state.messages))
                             compacted = compact_messages(pruned)
@@ -486,6 +500,13 @@ class Agent:
                                 "step": step,
                                 "from": state.current_model,
                                 "to": fallback_model,
+                            }
+                        )
+                        context.emit_event(
+                            {
+                                "type": "step_reset",
+                                "step": step,
+                                "reason": "model_error",
                             }
                         )
                         state = state.with_fallback_model(fallback_model)
@@ -703,6 +724,13 @@ class Agent:
                                     "type": "output_recovery",
                                     "step": step,
                                     "attempt": state.output_recovery_count + 1,
+                                }
+                            )
+                            context.emit_event(
+                                {
+                                    "type": "step_reset",
+                                    "step": step,
+                                    "reason": "output_recovery",
                                 }
                             )
                             state = state.with_output_recovery(
