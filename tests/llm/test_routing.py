@@ -69,6 +69,48 @@ def test_does_not_route_when_supports_reasoning_raises():
         )
 
 
+def test_routes_bare_openai_model_via_get_llm_provider():
+    """Agent UI stores models bare (e.g. ``gpt-5.4`` not ``openai/gpt-5.4``).
+    The router must resolve provider via litellm.get_llm_provider and still
+    reroute through the Responses bridge."""
+    with (
+        patch(
+            "agentic.llm.routing.litellm.get_llm_provider",
+            return_value=("gpt-5.4", "openai", None, None),
+        ),
+        patch("litellm.supports_reasoning", return_value=True),
+    ):
+        assert (
+            maybe_route_through_responses("gpt-5.4", "medium")
+            == "openai/responses/gpt-5.4"
+        )
+
+
+def test_does_not_route_bare_anthropic_model():
+    """Bare ``claude-opus-4-7`` resolves to provider ``anthropic`` → unchanged
+    (Anthropic returns reasoning natively on Chat Completions)."""
+    with patch(
+        "agentic.llm.routing.litellm.get_llm_provider",
+        return_value=("claude-opus-4-7", "anthropic", None, None),
+    ):
+        assert (
+            maybe_route_through_responses("claude-opus-4-7", "medium")
+            == "claude-opus-4-7"
+        )
+
+
+def test_does_not_route_when_get_llm_provider_raises():
+    """Custom / unknown models that get_llm_provider can't resolve: leave alone."""
+    with patch(
+        "agentic.llm.routing.litellm.get_llm_provider",
+        side_effect=Exception("unknown"),
+    ):
+        assert (
+            maybe_route_through_responses("custom/unknown-model", "medium")
+            == "custom/unknown-model"
+        )
+
+
 # ===== reasoning_call_kwargs =====
 
 

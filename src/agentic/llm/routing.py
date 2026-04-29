@@ -27,26 +27,45 @@ def maybe_route_through_responses(model: str, reasoning_effort: str | None) -> s
     """For OpenAI/Azure reasoning models with reasoning_effort set, route via
     the Responses bridge by inserting `responses/` after the provider prefix.
 
+    Provider is resolved via ``litellm.get_llm_provider`` so bare model names
+    (e.g. ``gpt-5.4``, what the agent UI stores) are handled the same as
+    prefixed forms (``openai/gpt-5.4``).
+
     Examples:
-        openai/gpt-5.4    + medium → openai/responses/gpt-5.4
-        azure/my-deploy   + medium → azure/responses/my-deploy
-        anthropic/...     + medium → unchanged (Anthropic returns reasoning natively)
-        openai/gpt-4o     + medium → unchanged (no reasoning support)
+        gpt-5.4                  + medium → openai/responses/gpt-5.4   (bare → resolved to openai)
+        openai/gpt-5.4           + medium → openai/responses/gpt-5.4
+        azure/my-deploy          + medium → azure/responses/my-deploy
+        claude-opus-4-7          + medium → unchanged (Anthropic returns reasoning natively)
+        anthropic/...            + medium → unchanged
+        gpt-4o                   + medium → unchanged (no reasoning support)
         openai/responses/gpt-5.4 + medium → unchanged (already routed)
     """
     if reasoning_effort is None:
         return model
-    if not model.startswith(("openai/", "azure/")):
-        return model
     if "/responses/" in model:
         return model
+
+    # Resolve provider for bare or prefixed model names.
+    try:
+        _, provider, _, _ = litellm.get_llm_provider(model)
+    except Exception:
+        return model
+
+    if provider not in ("openai", "azure"):
+        return model
+
     try:
         if not litellm.supports_reasoning(model=model):
             return model
     except Exception:
         return model
-    prefix, rest = model.split("/", 1)
-    return f"{prefix}/responses/{rest}"
+
+    # Insert /responses/ after the provider prefix, or synthesize one for
+    # bare model names.
+    if "/" in model:
+        prefix, rest = model.split("/", 1)
+        return f"{prefix}/responses/{rest}"
+    return f"{provider}/responses/{model}"
 
 
 def reasoning_call_kwargs(reasoning_effort: str | None, model: str) -> dict:
