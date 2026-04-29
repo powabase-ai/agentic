@@ -14,10 +14,41 @@ and unit-testable without ExecutionContext or threading.
 from __future__ import annotations
 
 import json
+import re
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
+
+_THINK_TAG_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+
+
+def _extract_reasoning_from_delta(delta) -> str | None:
+    """Robust extraction tolerating field-name variations and known leakage bugs.
+
+    Defends against:
+    - Field-name variation (LiteLLM #21386): some providers use `reasoning`
+      instead of `reasoning_content`.
+    - <think> tags leaked into content (LiteLLM #26326, Fireworks AI bug).
+    - THOUGHT: prefix in content (google-genai #2121, Gemini 2.5 bug).
+
+    Returns None when no reasoning is detected.
+    """
+    rc = getattr(delta, "reasoning_content", None)
+    if rc:
+        return rc
+    r = getattr(delta, "reasoning", None)
+    if r:
+        return r
+    content = getattr(delta, "content", "") or ""
+    if "<think>" in content:
+        match = _THINK_TAG_RE.search(content)
+        if match:
+            return match.group(1)
+    if content.startswith("THOUGHT:"):
+        return content[len("THOUGHT:") :].strip()
+    return None
+
 
 # ===== Exceptions =====
 
@@ -194,7 +225,7 @@ def accumulate_stream(
                     on_content_delta(content_frag)
 
             # Reasoning fragment
-            reasoning_frag = getattr(delta, "reasoning_content", None)
+            reasoning_frag = _extract_reasoning_from_delta(delta)
             if reasoning_frag:
                 reasoning_buf += reasoning_frag
                 if on_reasoning_delta is not None:
