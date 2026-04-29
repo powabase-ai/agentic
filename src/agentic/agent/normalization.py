@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from typing import Any
 
-_STANDARD_FIELDS = {"role", "content", "tool_calls", "tool_call_id", "name"}
+_STANDARD_FIELDS = {
+    "role",
+    "content",
+    "tool_calls",
+    "tool_call_id",
+    "name",
+    "thinking_blocks",  # Anthropic reasoning replay
+    "provider_specific_fields",  # OpenAI/Gemini reasoning replay
+}
 
 
 def normalize_messages(
