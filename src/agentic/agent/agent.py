@@ -254,9 +254,15 @@ class Agent:
             # Accumulator state (not part of LoopState since these only grow)
             all_tool_calls: list[ToolCallRecord] = []
             collected_events: list[dict] = []
+            # Track reasoning_tokens / cached_tokens too — reasoning models
+            # report them and the platform observability layer aggregates the
+            # full breakdown. Limiting this dict to the standard 3 keys
+            # silently drops reasoning info from multi-step ReAct loops.
             total_usage: dict[str, int] = {
                 "prompt_tokens": 0,
                 "completion_tokens": 0,
+                "reasoning_tokens": 0,
+                "cached_tokens": 0,
                 "total_tokens": 0,
             }
             # For doom loop detection: list of (tool_name, arguments_str) tuples
@@ -413,10 +419,12 @@ class Agent:
                     # Unrecoverable — re-raise to outer exception handler
                     raise
 
-                # Accumulate usage
+                # Accumulate usage. Iterate the running-total dict's keys so
+                # any new fields (reasoning_tokens, cached_tokens) are also
+                # rolled up.
                 step_usage = self._extract_usage(response)
                 if step_usage:
-                    for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                    for k in total_usage:
                         total_usage[k] += step_usage.get(k, 0)
 
                 # Budget enforcement: consume tokens and check limits

@@ -231,9 +231,13 @@ class SequentialEngine(StrategyEngine):
             ]
         else:
             current_input: str | list[dict] = input
+        # Include reasoning/cached so downstream observability surfaces the
+        # full token mix when the chain contains a reasoning model.
         total_usage: dict[str, int] = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
+            "reasoning_tokens": 0,
+            "cached_tokens": 0,
             "total_tokens": 0,
         }
 
@@ -356,9 +360,13 @@ class ParallelEngine(StrategyEngine):
             }
         )
 
+        # Include reasoning/cached so downstream observability surfaces the
+        # full token mix when the chain contains a reasoning model.
         total_usage: dict[str, int] = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
+            "reasoning_tokens": 0,
+            "cached_tokens": 0,
             "total_tokens": 0,
         }
 
