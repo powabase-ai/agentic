@@ -92,9 +92,38 @@ class Message:
     content: str = ""
     reasoning_content: str = ""
     tool_calls: list[_ToolCall] = field(default_factory=list)
+    thinking_blocks: list[dict] = field(default_factory=list)
+    provider_specific_fields: dict = field(default_factory=dict)
 
 
 # ===== Accumulator =====
+
+
+def _combine_thinking_blocks(blocks: list[dict]) -> list[dict]:
+    """Combine streamed thinking-block deltas into final form, grouping by index.
+
+    Anthropic emits content_block_start (type=thinking), content_block_delta
+    (type=thinking_delta) chunks of partial thinking text, then signature_delta,
+    then content_block_stop. LiteLLM normalizes to delta.thinking_blocks per
+    chunk that share an `index` per logical block.
+
+    Local implementation rather than coupling to LiteLLM internals — equivalent
+    algorithm, fewer cross-version surprises (verified at litellm/main.py for
+    processor.get_combined_thinking_content).
+    """
+    by_index: dict[int, dict] = {}
+    for block in blocks:
+        idx = block.get("index", 0)
+        existing = by_index.setdefault(
+            idx, {"type": block.get("type", "thinking"), "thinking": ""}
+        )
+        if "thinking" in block and block["thinking"]:
+            existing["thinking"] += block["thinking"]
+        if "signature" in block and block["signature"]:
+            existing["signature"] = block["signature"]
+        if block.get("type"):
+            existing["type"] = block["type"]
+    return [by_index[i] for i in sorted(by_index)]
 
 
 def accumulate_stream(
@@ -123,6 +152,8 @@ def accumulate_stream(
     # {id, name, args_str}. JSON-decoded at end of stream; raises
     # StreamTruncationError on malformed args.
     tool_calls_acc: dict[int, dict[str, Any]] = {}
+    thinking_blocks_acc: list[dict] = []
+    psf_acc: dict[str, Any] = {}
     finish_reason: str | None = None
     usage: dict | None = None
 
@@ -187,6 +218,22 @@ def accumulate_stream(
                     tcd_args = getattr(tcd_function, "arguments", None)
                     if tcd_args:
                         entry["args_str"] += tcd_args
+
+            # Anthropic thinking_blocks delta capture (verified at
+            # litellm/main.py:6350-6361). Each chunk's delta.thinking_blocks
+            # is a list of partial blocks identified by index.
+            chunk_thinking = getattr(delta, "thinking_blocks", None) or []
+            for block in chunk_thinking:
+                thinking_blocks_acc.append(block)
+
+            # OpenAI Responses / Gemini provider_specific_fields delta capture.
+            # List-valued fields concat; scalar fields last-write-wins.
+            chunk_psf = getattr(delta, "provider_specific_fields", None) or {}
+            for k, v in chunk_psf.items():
+                if isinstance(v, list):
+                    psf_acc.setdefault(k, []).extend(v)
+                else:
+                    psf_acc[k] = v
     except (AbortedError, StreamPartialError):
         # Already wrapped — propagate as-is
         raise
@@ -225,6 +272,8 @@ def accumulate_stream(
             content=content_buf,
             reasoning_content=reasoning_buf,
             tool_calls=tool_calls,
+            thinking_blocks=_combine_thinking_blocks(thinking_blocks_acc),
+            provider_specific_fields=psf_acc,
         ),
         finish_reason,
         usage,
