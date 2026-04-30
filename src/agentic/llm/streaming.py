@@ -312,9 +312,51 @@ def accumulate_stream(
 
 
 def _extract_usage(chunk_usage: Any) -> dict:
-    """Normalize the usage chunk's shape to a plain dict."""
-    return {
-        "prompt_tokens": getattr(chunk_usage, "prompt_tokens", 0) or 0,
-        "completion_tokens": getattr(chunk_usage, "completion_tokens", 0) or 0,
-        "total_tokens": getattr(chunk_usage, "total_tokens", 0) or 0,
+    """Normalize the usage chunk's shape to a plain dict.
+
+    Mirrors Agent._extract_usage in agent.py: captures `reasoning_tokens` and
+    `cached_tokens` from their nested details objects so the streaming path
+    surfaces them for reasoning-capable models. Without this, streaming runs
+    persisted `reasoning_tokens=0` even when the model clearly used reasoning.
+    Naming variation across APIs:
+      - Chat Completions:  completion_tokens_details.reasoning_tokens,
+                           prompt_tokens_details.cached_tokens
+      - Responses API:     output_tokens_details.reasoning_tokens,
+                           input_tokens_details.cached_tokens
+    """
+    def _get(obj: Any, key: str) -> Any:
+        if obj is None:
+            return None
+        if isinstance(obj, dict):
+            return obj.get(key)
+        return getattr(obj, key, None)
+
+    prompt = _get(chunk_usage, "prompt_tokens")
+    if prompt is None:
+        prompt = _get(chunk_usage, "input_tokens")
+    completion = _get(chunk_usage, "completion_tokens")
+    if completion is None:
+        completion = _get(chunk_usage, "output_tokens")
+    total = _get(chunk_usage, "total_tokens")
+
+    out: dict[str, int] = {
+        "prompt_tokens": prompt or 0,
+        "completion_tokens": completion or 0,
+        "total_tokens": total or 0,
     }
+
+    for details_key in ("completion_tokens_details", "output_tokens_details"):
+        details = _get(chunk_usage, details_key)
+        reasoning = _get(details, "reasoning_tokens")
+        if reasoning is not None:
+            out["reasoning_tokens"] = reasoning
+            break
+
+    for details_key in ("prompt_tokens_details", "input_tokens_details"):
+        details = _get(chunk_usage, details_key)
+        cached = _get(details, "cached_tokens")
+        if cached is not None:
+            out["cached_tokens"] = cached
+            break
+
+    return out
