@@ -88,6 +88,51 @@ def test_delegate_tool_without_hook_works_as_before():
     assert tool.execute({"task": "hi"}, ctx) == "done"
 
 
+def test_delegate_tool_propagates_agent_id_to_hook_payload():
+    """The platform layer threads its agent UUID through OrchestrationEntity
+    → DelegateTool.agent_id; the hook payload must echo it so the platform
+    can persist child agent_runs with the right agent_id (otherwise the
+    per-agent dashboard breakdown under-counts).
+    """
+    fake_agent = MagicMock()
+    fake_agent.name = "Specialist"
+    fake_agent.run.return_value = _make_agent_output()
+
+    captured = {}
+
+    def hook(payload):
+        captured.update(payload)
+
+    tool = DelegateTool(
+        name="delegate_to_Specialist",
+        description="",
+        agent=fake_agent,
+        on_run_complete=hook,
+        agent_id="agent-uuid-123",
+    )
+    ctx = ExecutionContext()
+    tool.execute({"task": "do it"}, ctx)
+    assert captured["agent_id"] == "agent-uuid-123"
+
+
+def test_delegate_tool_agent_id_defaults_to_none():
+    """Callers that don't register an agent_id (non-platform delegations)
+    still get a payload — agent_id is None, not missing or KeyError."""
+    fake_agent = MagicMock()
+    fake_agent.name = "Specialist"
+    fake_agent.run.return_value = _make_agent_output()
+
+    captured = {}
+    tool = DelegateTool(
+        name="delegate_to_Specialist",
+        description="",
+        agent=fake_agent,
+        on_run_complete=lambda p: captured.update(p),
+    )
+    tool.execute({"task": "do it"}, ExecutionContext())
+    assert captured["agent_id"] is None
+
+
 # ---------------------------------------------------------------------------
 # 3b: Sequential and Parallel engines invoke the hook
 # ---------------------------------------------------------------------------
@@ -190,3 +235,49 @@ def test_parallel_engine_invokes_hook_per_agent():
         assert isinstance(p["tool_calls"], list)
         assert "messages" in p
         assert "reasoning_steps" not in p
+
+
+def test_sequential_engine_propagates_agent_id():
+    """Sequential's hook payload must echo entity.agent_id so the platform
+    layer can persist child agent_runs with the right agent_id."""
+    from agentic.orchestration.strategies import SequentialEngine
+
+    entity_a = _make_mock_entity("AgentA")
+    entity_a.position = 0
+    entity_a.agent_id = "uuid-a"
+    entity_b = _make_mock_entity("AgentB")
+    entity_b.position = 1
+    entity_b.agent_id = "uuid-b"
+
+    orch = _make_orchestration("sequential", [entity_a, entity_b])
+    captured = []
+    SequentialEngine().execute(
+        orch, "go", None, ExecutionContext(), on_delegate_complete=captured.append
+    )
+    assert {p["agent_id"] for p in captured} == {"uuid-a", "uuid-b"}
+
+
+def test_parallel_engine_propagates_agent_id():
+    """Same propagation contract for the parallel engine."""
+    from agentic.orchestration.strategies import ParallelEngine
+
+    entity_a = _make_mock_entity("ParAgentA")
+    entity_a.agent_id = "uuid-par-a"
+    entity_b = _make_mock_entity("ParAgentB")
+    entity_b.agent_id = "uuid-par-b"
+
+    orch = _make_orchestration("parallel", [entity_a, entity_b])
+    captured = []
+
+    import unittest.mock as mock
+
+    with mock.patch("agentic.orchestration.strategies.Agent") as MockAgent:
+        merge_output = _make_agent_output(content="merged")
+        mock_merger = MagicMock()
+        mock_merger.run.return_value = merge_output
+        MockAgent.return_value = mock_merger
+        ParallelEngine().execute(
+            orch, "go", None, ExecutionContext(), on_delegate_complete=captured.append
+        )
+
+    assert {p["agent_id"] for p in captured} == {"uuid-par-a", "uuid-par-b"}

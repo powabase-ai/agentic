@@ -25,6 +25,11 @@ class OrchestrationEntity:
     config: dict[str, Any] = field(default_factory=dict)
     position: int | None = None
     agent_tools: dict[str, ToolDefinition] | None = None
+    # Opaque platform identifier for the registered agent. The core library
+    # has no opinion on what this is — the platform layer (project-service)
+    # passes its own ai.agents UUID so delegated agent_runs can be persisted
+    # with the right agent_id. None for callers that don't have one.
+    agent_id: str | None = None
 
 
 class Orchestration:
@@ -74,6 +79,7 @@ class Orchestration:
         config: dict[str, Any] | None = None,
         position: int | None = None,
         agent_tools: dict[str, ToolDefinition] | None = None,
+        agent_id: str | None = None,
     ) -> None:
         """Add an agent or tool entity to this orchestration."""
         entity = OrchestrationEntity(
@@ -84,6 +90,7 @@ class Orchestration:
             config=config or {},
             position=position,
             agent_tools=agent_tools,
+            agent_id=agent_id,
         )
         self.entities.append(entity)
 

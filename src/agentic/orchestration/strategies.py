@@ -73,6 +73,7 @@ def _build_delegate_tools(
                 agent_tools=entity.agent_tools or {},
                 max_steps=entity.config.get("max_steps", 10),
                 on_run_complete=on_run_complete,
+                agent_id=entity.agent_id,
             )
     return tools
 
@@ -160,12 +161,22 @@ class SupervisorEngine(StrategyEngine):
                 max_steps=orchestration.settings.get("max_steps", 25),
             )
 
-            # output.usage holds the ORCHESTRATOR's own LLM tokens only — the
-            # children land in their respective agent_run rows via the
-            # on_delegate_complete persistence hook. Keeping the orchestration
-            # row leaf-only avoids double-counting in the platform's
-            # "tokens by all sources" dashboard rollup. Per-run drill-down UI
-            # sums orch_run + child_runs explicitly.
+            # output.usage = ORCHESTRATOR LLM tokens ONLY. Children persist
+            # their own usage via on_delegate_complete; the orchestration
+            # row stays leaf-only so the platform's "tokens by all sources"
+            # dashboard rollup can sum across orchestration_runs + agent_runs
+            # without double-counting Supervisor delegations. Per-run
+            # drill-down UI sums orch_run + child_runs explicitly.
+            #
+            # Engine contract divergence: SequentialEngine and ParallelEngine
+            # set output.usage to the SUM of their children (no orchestrator
+            # LLM exists in those engines), so per-project charts that read
+            # both ai.orchestration_runs.usage AND ai.agent_runs.usage will
+            # DOUBLE-COUNT those engines. The control-plane org-stats rollup
+            # queries agent_runs only (see ai.observability_agent_run_buckets
+            # in migration 0019) and is unaffected. See
+            # docs/observability-token-tracking.md for the dashboard
+            # implications.
             output.content = agent_output.content
             output.status = agent_output.status
             output.steps = agent_output.steps
@@ -273,6 +284,7 @@ class SequentialEngine(StrategyEngine):
                         on_delegate_complete(
                             {
                                 "agent_name": agent_name,
+                                "agent_id": entity.agent_id,
                                 "model": entity.agent.model if entity.agent else None,
                                 "child_execution_id": child_ctx.execution_id,
                                 "orchestration_run_id": context.orchestration_run_id,
@@ -317,6 +329,18 @@ class SequentialEngine(StrategyEngine):
 
             output.content = current_input
             output.status = ExecutionStatus.COMPLETED
+            # output.usage = sum of children — diverges from SupervisorEngine,
+            # which sets output.usage to the orchestrator's own LLM tokens
+            # only. Sequential has no orchestrator LLM, so the sum *is* the
+            # whole orchestration's spend. Caveat for the platform: each
+            # child also fires on_delegate_complete with its own usage, so
+            # the per-project token chart double-counts when it sums
+            # ai.orchestration_runs.usage AND ai.agent_runs.usage for a
+            # Sequential/Parallel run. The control-plane org rollup queries
+            # agent_runs only and is unaffected; the per-project chart
+            # surfaces both at the user's request via the source filter.
+            # See docs/observability-token-tracking.md "Engine token
+            # accounting" for the full contract.
             output.usage = total_usage
             output.steps = len(agent_entities)
         except Exception as e:
@@ -421,6 +445,7 @@ class ParallelEngine(StrategyEngine):
                             on_delegate_complete(
                                 {
                                     "agent_name": agent_name,
+                                    "agent_id": entity.agent_id,
                                     "model": entity.agent.model if entity.agent else None,
                                     "child_execution_id": child_ctx.execution_id,
                                     "orchestration_run_id": context.orchestration_run_id,
@@ -457,6 +482,11 @@ class ParallelEngine(StrategyEngine):
             if failed:
                 output.status = ExecutionStatus.FAILED
                 output.error = f"Agents failed: {', '.join(failed.keys())}"
+                # output.usage = sum of children. Same divergence from
+                # SupervisorEngine as SequentialEngine — see that engine's
+                # comment for the full contract. Per-project token charts
+                # that read both ai.orchestration_runs.usage and
+                # ai.agent_runs.usage will double-count Parallel runs.
                 output.usage = total_usage
                 output.completed_at = datetime.now(UTC)
                 context.emit_event(
@@ -468,6 +498,8 @@ class ParallelEngine(StrategyEngine):
                 only_output = next(iter(agent_outputs.values()))
                 output.content = only_output.content
                 output.status = only_output.status
+                # See note above + the SequentialEngine comment for the
+                # children-summed-AND-persisted-per-child caveat.
                 output.usage = total_usage
                 output.steps = 1
                 output.completed_at = datetime.now(UTC)
@@ -505,6 +537,12 @@ class ParallelEngine(StrategyEngine):
 
             output.content = merge_output.content
             output.status = ExecutionStatus.COMPLETED
+            # output.usage = sum of children + merge agent. Children also
+            # fire on_delegate_complete with their own usage; the merge
+            # agent does NOT (it runs in the parent context). So per-project
+            # charts will double-count children but correctly count the
+            # merge step. See SequentialEngine comment + the docs for the
+            # full contract.
             output.usage = total_usage
             output.steps = len(agent_entities) + 1
         except Exception as e:
