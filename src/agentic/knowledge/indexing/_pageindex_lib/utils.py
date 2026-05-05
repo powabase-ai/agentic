@@ -730,7 +730,7 @@ assigned to this section. Either way, use it as a topical guide.
 The text below may include content that belongs to neighboring sections
 (before or after this one). Summarize ONLY the content that is relevant to
 the topic described by the title above. Ignore any content that clearly
-belongs to a different section or topic.
+belongs to a different section or topic. Try to keep the summary between 4-8 sentences and capture any key metrics, entities, facts, and statistics.
 
 Section text:
 {text}

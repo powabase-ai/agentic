@@ -83,7 +83,7 @@ PAGEINDEX_SUMMARY_TOKEN_THRESHOLD = 1500
 # --- Document Description ---
 # Maximum input tokens for the document-description prompt.
 # The structure is truncated beyond this to stay within TPM / context limits.
-PAGEINDEX_DOC_DESCRIPTION_MAX_TOKENS = 100_000
+PAGEINDEX_DOC_DESCRIPTION_MAX_TOKENS = 80_000
 
 # --- LLM Concurrency ---
 # Maximum concurrent LLM calls during PageIndex indexing.
@@ -244,7 +244,7 @@ DOC2JSON_MAX_RETRIES = 3
 # Maximum tokens per single embedding API request.
 # OpenAI's text-embedding-3-small allows max 300k tokens/request.
 # Use 250k to leave margin for overhead.
-EMBEDDING_MAX_TOKENS_PER_BATCH = 250_000
+EMBEDDING_MAX_TOKENS_PER_BATCH = 200_000
 
 
 # =============================================================================
