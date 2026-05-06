@@ -334,6 +334,7 @@ class PageIndexAlgorithm(IndexingAlgorithm):
         extra = config.extra or {}
         source_name = extra.get("source_name")
         model = extra.get("model", PAGEINDEX_INDEXING_MODEL)
+        reasoning_effort = extra.get("reasoning_effort")  # None preserves provider default
         if_add_node_summary = extra.get("if_add_node_summary", "yes")
         if_thinning = extra.get("if_thinning", False)
         min_token_threshold = extra.get("min_token_threshold", PAGEINDEX_MIN_TOKEN_THRESHOLD)
@@ -353,9 +354,13 @@ class PageIndexAlgorithm(IndexingAlgorithm):
         max_token_num_each_node = extra.get("max_token_num_each_node", PAGEINDEX_MAX_TOKEN_NUM_EACH_NODE)
         toc_gap_tolerance = extra.get("toc_gap_tolerance", PAGEINDEX_TOC_GAP_TOLERANCE)
 
-        # --- Init LLM concurrency semaphore ---
-        from agentic.knowledge.indexing._pageindex_lib.utils import init_llm_semaphore
+        # --- Init LLM concurrency semaphore + reasoning effort ---
+        from agentic.knowledge.indexing._pageindex_lib.utils import (
+            init_llm_semaphore,
+            init_reasoning_effort,
+        )
         init_llm_semaphore(llm_max_concurrent)
+        init_reasoning_effort(reasoning_effort)
 
         # --- Route to the correct pipeline ---
         if page_texts and len(page_texts) >= 2:

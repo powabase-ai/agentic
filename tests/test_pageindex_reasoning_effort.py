@@ -93,3 +93,82 @@ async def test_init_reasoning_effort_clears_to_none():
     kwargs = mock_acompletion.await_args.kwargs
     assert "reasoning_effort" not in kwargs
     assert "extra_body" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_extractor_reads_reasoning_effort_from_extra():
+    """PageIndexExtractor.extract() must call init_reasoning_effort with the
+    value from config.extra['reasoning_effort'] before invoking the pipeline."""
+    from agentic.knowledge.indexing import PageIndexAlgorithm
+    from agentic.knowledge.models import IndexingConfig
+
+    captured: dict[str, object] = {}
+
+    async def fake_md_to_tree(**kwargs):
+        # Read the contextvar at call time — this is what the pipeline does.
+        from agentic.knowledge.indexing._pageindex_lib.utils import (
+            _reasoning_effort_var,
+        )
+        captured["effort"] = _reasoning_effort_var.get()
+        return {"doc_name": "x", "structure": []}
+
+    config = IndexingConfig(
+        strategy="page_index",
+        extra={
+            "source_name": "doc",
+            "model": "gpt-5-mini",
+            "reasoning_effort": "low",
+            "if_add_node_summary": "no",
+        },
+    )
+
+    with patch(
+        "agentic.knowledge.indexing._pageindex_lib.page_index_md.md_to_tree",
+        new=AsyncMock(side_effect=fake_md_to_tree),
+    ):
+        await PageIndexAlgorithm().aindex(
+            content="# Hello\n\nworld\n",
+            config=config,
+            source_id="src1",
+        )
+
+    assert captured["effort"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_extractor_omits_reasoning_effort_when_unset():
+    """If extra has no reasoning_effort key, the contextvar must remain None."""
+    from agentic.knowledge.indexing import PageIndexAlgorithm
+    from agentic.knowledge.indexing._pageindex_lib.utils import (
+        _reasoning_effort_var,
+        init_reasoning_effort,
+    )
+    from agentic.knowledge.models import IndexingConfig
+
+    init_reasoning_effort(None)  # ensure clean state
+    captured: dict[str, object] = {}
+
+    async def fake_md_to_tree(**kwargs):
+        captured["effort"] = _reasoning_effort_var.get()
+        return {"doc_name": "x", "structure": []}
+
+    config = IndexingConfig(
+        strategy="page_index",
+        extra={
+            "source_name": "doc",
+            "model": "gpt-5-mini",
+            "if_add_node_summary": "no",
+        },
+    )
+
+    with patch(
+        "agentic.knowledge.indexing._pageindex_lib.page_index_md.md_to_tree",
+        new=AsyncMock(side_effect=fake_md_to_tree),
+    ):
+        await PageIndexAlgorithm().aindex(
+            content="# Hello\n\nworld\n",
+            config=config,
+            source_id="src1",
+        )
+
+    assert captured["effort"] is None
