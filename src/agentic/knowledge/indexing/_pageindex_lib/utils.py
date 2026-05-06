@@ -25,6 +25,17 @@ def init_llm_semaphore(max_concurrent: int) -> None:
 def reset_llm_semaphore() -> None:
     _llm_semaphore_var.set(None)
 
+_reasoning_effort_var: contextvars.ContextVar[str | None] = (
+    contextvars.ContextVar("_reasoning_effort", default=None)
+)
+
+
+def init_reasoning_effort(effort: str | None) -> None:
+    """Set the reasoning_effort applied to all _llm_completion calls in this
+    asyncio context. Call once per indexing run, before invoking the pipeline.
+    Pass None (or omit the call entirely) to leave provider defaults in place."""
+    _reasoning_effort_var.set(effort)
+
 __all__ = [
     # Underscore-prefixed helpers used by page_index_md.py / page_index.py via star import
     "_ensure_pypdf2",
@@ -33,6 +44,7 @@ __all__ = [
     "_llm_json",
     "init_llm_semaphore",
     "reset_llm_semaphore",
+    "init_reasoning_effort",
     # Token counting
     "count_tokens",
     # JSON extraction
@@ -137,16 +149,26 @@ async def _llm_completion(
     temperature: float = 0,
 ) -> tuple[str, str]:
     """Call LLM, return (content, finish_reason). Raises on failure."""
+    from agentic.llm.routing import (
+        maybe_route_through_responses,
+        reasoning_call_kwargs,
+    )
+
     messages = list(chat_history) if chat_history else []
     messages.append({"role": "user", "content": prompt})
 
+    reasoning_effort = _reasoning_effort_var.get()
+    routed_model = maybe_route_through_responses(model, reasoning_effort)
+    extra = reasoning_call_kwargs(reasoning_effort, routed_model)
+
     async def _call():
         return await litellm.acompletion(
-            model=model,
+            model=routed_model,
             messages=messages,
             temperature=temperature,
             drop_params=True,
             num_retries=3,
+            **extra,
         )
 
     sem = _llm_semaphore_var.get()
