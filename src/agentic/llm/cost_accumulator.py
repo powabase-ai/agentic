@@ -87,6 +87,19 @@ def init_accumulator() -> CostAccumulator:
     return acc
 
 
+def _extract_metadata(kwargs: dict) -> dict:
+    """Pull caller-supplied metadata out of the callback kwargs.
+
+    LiteLLM relocates the user-passed `metadata` kwarg into
+    `kwargs["litellm_params"]["metadata"]` before invoking the callback (see
+    litellm_core_utils/litellm_logging.py:_init_kwargs_for_logging). Some
+    callback paths may also leave metadata at the top level. Read both,
+    preferring litellm_params since that's the canonical location.
+    """
+    lp = kwargs.get("litellm_params") or {}
+    return lp.get("metadata") or kwargs.get("metadata") or {}
+
+
 def _extract_effort(kwargs: dict) -> str | None:
     """reasoning_effort lives in different places on each provider path:
     - Responses bridge: kwargs["extra_body"]["reasoning"]["effort"]
@@ -110,7 +123,7 @@ async def _async_cb(kwargs, response, start_time, end_time):
         acc = _acc_var.get()
         if acc is None:
             return
-        metadata = kwargs.get("metadata") or {}
+        metadata = _extract_metadata(kwargs)
         stage = metadata.get("stage", "unknown")
         cost = (getattr(response, "_hidden_params", None) or {}).get("response_cost")
         effort = _extract_effort(kwargs)

@@ -134,6 +134,28 @@ async def test_callback_routes_by_metadata_stage():
 
 
 @pytest.mark.asyncio
+async def test_callback_reads_metadata_from_litellm_params():
+    """REGRESSION: In real LiteLLM callback invocations, the user-supplied
+    `metadata` kwarg is moved into kwargs['litellm_params']['metadata']
+    before the callback is invoked (see litellm_logging.py
+    _init_kwargs_for_logging). The first iteration of this callback only
+    checked the top-level kwargs.get('metadata') and bucketed every call
+    as 'unknown' in production. This test pins the canonical location.
+    """
+    acc = init_accumulator()
+    kwargs = {
+        "model": "openai/responses/gpt-5-mini",
+        "litellm_params": {"metadata": {"stage": "tree"}},
+    }
+    response = _fake_response(prompt=100, completion=80, reasoning=30, cost=0.0001)
+    await _async_cb(kwargs, response, 0.0, 0.1)
+
+    d = acc.to_dict()
+    assert "tree" in d["by_stage"]
+    assert "unknown" not in d["by_stage"]
+
+
+@pytest.mark.asyncio
 async def test_callback_no_op_when_var_unset():
     """If no accumulator was init'd for this context, the callback is a no-op."""
     _acc_var.set(None)
