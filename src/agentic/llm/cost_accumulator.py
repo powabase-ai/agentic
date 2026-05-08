@@ -32,7 +32,7 @@ import litellm
 
 logger = logging.getLogger(__name__)
 
-_acc_var: contextvars.ContextVar["CostAccumulator | None"] = contextvars.ContextVar(
+_acc_var: contextvars.ContextVar[CostAccumulator | None] = contextvars.ContextVar(
     "llm_cost_accumulator", default=None
 )
 
@@ -127,8 +127,12 @@ async def _async_cb(kwargs, response, start_time, end_time):
 
 
 def install() -> None:
-    """Register the cost-tracking callback once. Safe to call repeatedly."""
-    existing = list(litellm.async_success_callback or [])
-    if _async_cb in existing:
+    """Register the cost-tracking callback once. Safe to call repeatedly.
+
+    Routes through litellm's logging_callback_manager which auto-detects the
+    async callable and stores it on the internal _async_success_callback list.
+    LiteLLM's manager dedupes identical callable references.
+    """
+    if _async_cb in (litellm._async_success_callback or []):
         return
-    litellm.async_success_callback = [*existing, _async_cb]
+    litellm.logging_callback_manager.add_litellm_async_success_callback(_async_cb)

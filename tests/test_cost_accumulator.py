@@ -13,8 +13,8 @@ import pytest
 
 from agentic.llm.cost_accumulator import (
     CostAccumulator,
-    _async_cb,
     _acc_var,
+    _async_cb,
     init_accumulator,
     install,
 )
@@ -100,11 +100,13 @@ def test_install_is_idempotent():
     import litellm
 
     # Reset to a known state for the test
-    litellm.async_success_callback = []
+    litellm._async_success_callback = []
     install()
     install()
     install()
-    count = sum(1 for cb in (litellm.async_success_callback or []) if cb is _async_cb)
+    count = sum(
+        1 for cb in (litellm._async_success_callback or []) if cb is _async_cb
+    )
     assert count == 1
 
 
