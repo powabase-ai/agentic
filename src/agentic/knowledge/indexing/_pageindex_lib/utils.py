@@ -168,6 +168,7 @@ async def _llm_completion(
             temperature=temperature,
             drop_params=True,
             num_retries=3,
+            metadata={"stage": "tree"},
             **extra,
         )
 
