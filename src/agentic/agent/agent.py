@@ -796,10 +796,9 @@ class Agent:
                     with ThreadPoolExecutor(max_workers=len(concurrent_calls)) as pool:
                         futures = {}
                         for tc in concurrent_calls:
-                            ctx = contextvars.copy_context()
                             futures[
                                 pool.submit(
-                                    ctx.run,
+                                    contextvars.copy_context().run,
                                     self._execute_single_tool,
                                     tc,
                                     tools,
