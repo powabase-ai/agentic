@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import contextvars
 import logging
 import re
 from collections.abc import Callable
@@ -426,11 +427,17 @@ class ParallelEngine(StrategyEngine):
                 return agent_out, child_ctx
 
             agent_outputs: dict[str, Any] = {}
+            # ThreadPoolExecutor.submit does not propagate contextvars to
+            # workers (see agent.py for the full pattern + rationale).
+            # Capture a fresh copy of the parent context PER submission so
+            # each worker enters its own Context once (Context.run rejects
+            # re-entry).
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=len(agent_entities)
             ) as pool:
                 future_to_entity = {
-                    pool.submit(run_agent, e): e for e in agent_entities
+                    pool.submit(contextvars.copy_context().run, run_agent, e): e
+                    for e in agent_entities
                 }
                 for future in concurrent.futures.as_completed(future_to_entity):
                     entity = future_to_entity[future]
@@ -446,7 +453,9 @@ class ParallelEngine(StrategyEngine):
                                 {
                                     "agent_name": agent_name,
                                     "agent_id": entity.agent_id,
-                                    "model": entity.agent.model if entity.agent else None,
+                                    "model": entity.agent.model
+                                    if entity.agent
+                                    else None,
                                     "child_execution_id": child_ctx.execution_id,
                                     "orchestration_run_id": context.orchestration_run_id,
                                     "task": parallel_input
