@@ -353,6 +353,164 @@ class TestAgentStream:
         assert "LLM Streaming Error" in output.error
 
 
+def _make_streaming_chunks(
+    content_fragments: list[str] | None = None,
+    reasoning_fragments: list[str] | None = None,
+    thinking_blocks: list[dict] | None = None,
+    usage: dict | None = None,
+):
+    """Build a list of LiteLLM-shaped streaming chunks for tests.
+
+    Each chunk has `choices[0].delta` with content/reasoning fields. A trailing
+    chunk with `choices=[]` and a `usage` attribute is emitted when `usage` is
+    set (mirrors LiteLLM's `stream_options={"include_usage": True}` behavior).
+    """
+    from types import SimpleNamespace
+
+    chunks: list = []
+    n = max(
+        len(content_fragments or []),
+        len(reasoning_fragments or []),
+        len(thinking_blocks or []),
+    )
+    for i in range(n):
+        delta = SimpleNamespace(
+            content=(content_fragments or [None] * n)[i] if content_fragments else None,
+            reasoning_content=(reasoning_fragments or [None] * n)[i]
+            if reasoning_fragments
+            else None,
+            thinking_blocks=[thinking_blocks[i]]
+            if thinking_blocks and i < len(thinking_blocks)
+            else None,
+            tool_calls=None,
+            provider_specific_fields=None,
+        )
+        chunk = SimpleNamespace(
+            choices=[SimpleNamespace(delta=delta, finish_reason=None)],
+            usage=None,
+        )
+        chunks.append(chunk)
+    if usage is not None:
+        chunks.append(
+            SimpleNamespace(
+                choices=[],
+                usage=SimpleNamespace(**usage),
+            )
+        )
+    return chunks
+
+
+class TestAgentStreamCallbacks:
+    """Issue #274: Agent.stream() must invoke on_content_delta /
+    on_reasoning_delta callbacks per fragment and populate reasoning_artifact
+    on the returned AgentOutput.
+    """
+
+    def test_stream_invokes_on_content_delta_callback(self, monkeypatch):
+        """on_content_delta fires for each non-empty content fragment."""
+        from unittest.mock import patch
+
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
+        chunks = _make_streaming_chunks(content_fragments=["Hello", " ", "World"])
+        with patch("agentic.agent.agent.litellm") as mock_litellm:
+            mock_litellm.completion.return_value = iter(chunks)
+            agent = Agent(system_prompt="hi")
+
+            received: list[str] = []
+            gen = agent.stream(
+                "go",
+                on_content_delta=lambda d: received.append(d),
+            )
+            _consume_stream(gen)
+
+        assert received == ["Hello", " ", "World"]
+
+    def test_stream_invokes_on_reasoning_delta_callback(self, monkeypatch):
+        """on_reasoning_delta fires for each reasoning_content fragment."""
+        from unittest.mock import patch
+
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
+        chunks = _make_streaming_chunks(
+            content_fragments=["A", "B"],
+            reasoning_fragments=["thinking ", "more"],
+        )
+        with patch("agentic.agent.agent.litellm") as mock_litellm:
+            mock_litellm.completion.return_value = iter(chunks)
+            agent = Agent(system_prompt="hi")
+
+            content_received: list[str] = []
+            reasoning_received: list[str] = []
+            gen = agent.stream(
+                "go",
+                on_content_delta=lambda d: content_received.append(d),
+                on_reasoning_delta=lambda d: reasoning_received.append(d),
+            )
+            _consume_stream(gen)
+
+        assert content_received == ["A", "B"]
+        assert reasoning_received == ["thinking ", "more"]
+
+    def test_stream_populates_reasoning_artifact_for_anthropic(self, monkeypatch):
+        """AgentOutput.reasoning_artifact carries thinking_blocks for Anthropic."""
+        from unittest.mock import patch
+
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
+        chunks = _make_streaming_chunks(
+            content_fragments=["answer"],
+            reasoning_fragments=["I'm thinking"],
+            thinking_blocks=[
+                {
+                    "index": 0,
+                    "type": "thinking",
+                    "thinking": "step 1",
+                    "signature": "sig",
+                },
+            ],
+        )
+        with patch("agentic.agent.agent.litellm") as mock_litellm:
+            mock_litellm.completion.return_value = iter(chunks)
+            mock_litellm.get_llm_provider.return_value = (
+                "claude-sonnet-4-6",
+                "anthropic",
+                None,
+                None,
+            )
+
+            agent = Agent(
+                model="claude-sonnet-4-6",
+                system_prompt="hi",
+                reasoning_effort="high",
+            )
+
+            _, output = _consume_stream(agent.stream("go"))
+
+        assert output.reasoning_artifact is not None
+        assert output.reasoning_requested is True
+        assert output.reasoning_artifact.summary_text == "I'm thinking"
+        assert len(output.reasoning_artifact.thinking_blocks) == 1
+
+    def test_stream_no_artifact_when_no_reasoning(self, monkeypatch):
+        """reasoning_artifact stays None when model emits no reasoning."""
+        from unittest.mock import patch
+
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
+        chunks = _make_streaming_chunks(content_fragments=["plain answer"])
+        with patch("agentic.agent.agent.litellm") as mock_litellm:
+            mock_litellm.completion.return_value = iter(chunks)
+            mock_litellm.get_llm_provider.return_value = (
+                "gpt-4o-mini",
+                "openai",
+                None,
+                None,
+            )
+            agent = Agent(system_prompt="hi")
+
+            _, output = _consume_stream(agent.stream("go"))
+
+        assert output.reasoning_artifact is None
+        assert output.reasoning_requested is False
+
+
 class TestAgentAstream:
     """Tests for Agent.astream() async method."""
 

@@ -5,9 +5,10 @@ Agent - single LLM-powered agent definition and execution.
 import json
 import logging
 import os
+import queue
 import threading
 import time
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, Callable, Generator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any
@@ -1035,38 +1036,42 @@ class Agent:
         input: str | list[dict[str, Any]],
         session: AgentSession | None = None,
         context: ExecutionContext | None = None,
+        *,
+        on_content_delta: Callable[[str], None] | None = None,
+        on_reasoning_delta: Callable[[str], None] | None = None,
     ) -> Generator[str, None, AgentOutput]:
         """
         Stream the agent's response, yielding chunks as they arrive.
 
-        This method returns a generator that yields content chunks (strings)
-        as they stream from the LLM. After iteration completes, you can get
-        the final AgentOutput by calling `.send(None)` or using the generator's
-        return value.
+        Drives the LLM stream through ``accumulate_stream`` on a worker thread
+        so the assembled message (with reasoning_content + thinking_blocks)
+        and the reasoning artifact can be surfaced on the returned
+        ``AgentOutput``. See issue #274 for context.
 
         Args:
             input: The user input. Can be a string or a list of message dicts.
             session: Optional session for multi-turn conversations.
             context: Optional execution context.
+            on_content_delta: Optional callback invoked with each non-empty
+                content fragment as it arrives.
+            on_reasoning_delta: Optional callback invoked with each non-empty
+                reasoning fragment (``delta.reasoning_content`` and known
+                provider variants).
 
         Yields:
             str: Content chunks as they stream from the LLM.
 
         Returns:
-            AgentOutput: The final output after streaming completes.
-
-        Example:
-            >>> agent = Agent(system_prompt="You are helpful")
-            >>> gen = agent.stream("Tell me a story")
-            >>> for chunk in gen:
-            ...     print(chunk, end="", flush=True)
-            >>> # After iteration, get the final output
-            >>> try:
-            ...     gen.send(None)
-            ... except StopIteration as e:
-            ...     output = e.value
-            ...     print(f"\\nTotal tokens: {output.total_tokens()}")
+            AgentOutput: The final output, with ``reasoning_artifact`` and
+            ``reasoning_requested`` populated when the model produced
+            reasoning.
         """
+        from agentic.llm.streaming import (
+            AbortedError,
+            StreamPartialError,
+            accumulate_stream,
+        )
+
         # Create execution context if not provided
         if context is None:
             context = ExecutionContext(
@@ -1075,7 +1080,7 @@ class Agent:
 
         started_at = datetime.now()
         messages = self._build_messages(input, session)
-        content_chunks: list[str] = []
+        reasoning_was_requested = self._resolved_effort_for(self.model) is not None
 
         try:
             # Call LLM with streaming + usage reporting
@@ -1098,24 +1103,72 @@ class Agent:
                 **({"api_key": self.api_key} if self.api_key is not None else {}),
             )
 
-            # Yield chunks as they arrive, capturing the final usage chunk
-            usage_data = None
-            for chunk in response:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    content = chunk.choices[0].delta.content
-                    content_chunks.append(content)
-                    yield content
-                # The final chunk has usage but an empty choices list. Some
-                # providers emit multiple cumulative-usage chunks mid-stream,
-                # so don't emit the cost event here — just remember the last
-                # usage and emit once after the loop.
-                if hasattr(chunk, "usage") and chunk.usage is not None:
-                    usage_data = self._extract_usage(chunk)
+            # Drive accumulate_stream on a worker thread so we can keep the
+            # generator semantics (per-fragment yielding) while delegating
+            # chunk parsing to the canonical assembler. Content fragments
+            # arrive on yield_queue; a sentinel signals the worker finished.
+            yield_queue: queue.Queue = queue.Queue()
+            sentinel = object()
+            result_holder: dict[str, Any] = {}
 
-            # Build final content
-            final_content = "".join(content_chunks)
+            def _on_content(d: str) -> None:
+                yield_queue.put(d)
+                if on_content_delta is not None:
+                    on_content_delta(d)
 
-            # Add assistant message to messages list
+            def _on_reasoning(d: str) -> None:
+                if on_reasoning_delta is not None:
+                    on_reasoning_delta(d)
+
+            def _worker() -> None:
+                try:
+                    msg, _finish_reason, usage = accumulate_stream(
+                        response,
+                        on_content_delta=_on_content,
+                        on_reasoning_delta=_on_reasoning,
+                        abort_signal=getattr(context, "abort_signal", None),
+                    )
+                    result_holder["msg"] = msg
+                    result_holder["usage"] = usage
+                except (AbortedError, StreamPartialError, Exception) as worker_exc:
+                    result_holder["error"] = worker_exc
+                finally:
+                    yield_queue.put(sentinel)
+
+            worker = threading.Thread(target=_worker, daemon=True)
+            worker.start()
+
+            while True:
+                item = yield_queue.get()
+                if item is sentinel:
+                    break
+                yield item
+
+            worker.join(timeout=30)
+
+            if "error" in result_holder:
+                raise result_holder["error"]
+
+            assistant_msg = result_holder.get("msg")
+            usage_data = result_holder.get("usage")
+
+            if assistant_msg is None:
+                # Defensive — worker should always set msg or error
+                raise RuntimeError("Stream worker finished without a result")
+
+            # Extract reasoning artifact (Anthropic thinking blocks, OpenAI
+            # reasoning summary, Gemini thought signatures). The streaming
+            # path has no separate final response object — the assembled
+            # message carries thinking_blocks + provider_specific_fields,
+            # which is sufficient for extraction.
+            artifact = extract_reasoning_artifact(
+                model=self.model,
+                assembled_message=assistant_msg,
+                final_response=None,
+                requested_effort=self._resolved_effort_for(self.model),
+            )
+
+            final_content = assistant_msg.content
             messages.append({"role": "assistant", "content": final_content})
 
             return AgentOutput(
@@ -1126,6 +1179,8 @@ class Agent:
                 content=final_content,
                 messages=messages,
                 usage=usage_data,
+                reasoning_artifact=artifact,
+                reasoning_requested=reasoning_was_requested,
             )
 
         except Exception as e:
@@ -1137,6 +1192,7 @@ class Agent:
                 completed_at=datetime.now(),
                 error=str(e),
                 messages=messages,
+                reasoning_requested=reasoning_was_requested,
             )
 
     async def astream(
@@ -1150,6 +1206,12 @@ class Agent:
 
         This is the async version of stream(). Unlike the sync version,
         this is a pure async generator that yields content chunks.
+
+        NOTE: astream() does not yet emit reasoning fragments or surface a
+        reasoning_artifact — its return type is ``AsyncGenerator[str]`` with
+        no return value, so there's no place to expose ``AgentOutput``.
+        Closing this gap (issue #274 follow-up) requires either a return-type
+        change or a sibling ``astream_with_output()`` method.
 
         Args:
             input: The user input. Can be a string or a list of message dicts.
