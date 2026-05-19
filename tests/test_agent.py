@@ -2,6 +2,8 @@
 Tests for the Agent module.
 """
 
+from unittest.mock import patch
+
 import pytest
 
 from agentic import Agent, AgentOutput, AgentSession, ExecutionStatus
@@ -367,6 +369,9 @@ def _make_streaming_chunks(
     """
     from types import SimpleNamespace
 
+    def _at(seq: list | None, i: int):
+        return seq[i] if seq and i < len(seq) else None
+
     chunks: list = []
     n = max(
         len(content_fragments or []),
@@ -374,42 +379,32 @@ def _make_streaming_chunks(
         len(thinking_blocks or []),
     )
     for i in range(n):
+        block = _at(thinking_blocks, i)
         delta = SimpleNamespace(
-            content=(content_fragments or [None] * n)[i] if content_fragments else None,
-            reasoning_content=(reasoning_fragments or [None] * n)[i]
-            if reasoning_fragments
-            else None,
-            thinking_blocks=[thinking_blocks[i]]
-            if thinking_blocks and i < len(thinking_blocks)
-            else None,
+            content=_at(content_fragments, i),
+            reasoning_content=_at(reasoning_fragments, i),
+            thinking_blocks=[block] if block else None,
             tool_calls=None,
             provider_specific_fields=None,
         )
-        chunk = SimpleNamespace(
-            choices=[SimpleNamespace(delta=delta, finish_reason=None)],
-            usage=None,
-        )
-        chunks.append(chunk)
-    if usage is not None:
         chunks.append(
             SimpleNamespace(
-                choices=[],
-                usage=SimpleNamespace(**usage),
+                choices=[SimpleNamespace(delta=delta, finish_reason=None)],
+                usage=None,
             )
+        )
+    if usage is not None:
+        chunks.append(
+            SimpleNamespace(choices=[], usage=SimpleNamespace(**usage)),
         )
     return chunks
 
 
 class TestAgentStreamCallbacks:
-    """Issue #274: Agent.stream() must invoke on_content_delta /
-    on_reasoning_delta callbacks per fragment and populate reasoning_artifact
-    on the returned AgentOutput.
-    """
+    """Issue #274 contract — callbacks fire per fragment + reasoning_artifact
+    surfaces on the returned AgentOutput."""
 
     def test_stream_invokes_on_content_delta_callback(self, monkeypatch):
-        """on_content_delta fires for each non-empty content fragment."""
-        from unittest.mock import patch
-
         monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
         chunks = _make_streaming_chunks(content_fragments=["Hello", " ", "World"])
         with patch("agentic.agent.agent.litellm") as mock_litellm:
@@ -417,18 +412,13 @@ class TestAgentStreamCallbacks:
             agent = Agent(system_prompt="hi")
 
             received: list[str] = []
-            gen = agent.stream(
-                "go",
-                on_content_delta=lambda d: received.append(d),
+            _consume_stream(
+                agent.stream("go", on_content_delta=lambda d: received.append(d))
             )
-            _consume_stream(gen)
 
         assert received == ["Hello", " ", "World"]
 
     def test_stream_invokes_on_reasoning_delta_callback(self, monkeypatch):
-        """on_reasoning_delta fires for each reasoning_content fragment."""
-        from unittest.mock import patch
-
         monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
         chunks = _make_streaming_chunks(
             content_fragments=["A", "B"],
@@ -440,20 +430,18 @@ class TestAgentStreamCallbacks:
 
             content_received: list[str] = []
             reasoning_received: list[str] = []
-            gen = agent.stream(
-                "go",
-                on_content_delta=lambda d: content_received.append(d),
-                on_reasoning_delta=lambda d: reasoning_received.append(d),
+            _consume_stream(
+                agent.stream(
+                    "go",
+                    on_content_delta=lambda d: content_received.append(d),
+                    on_reasoning_delta=lambda d: reasoning_received.append(d),
+                )
             )
-            _consume_stream(gen)
 
         assert content_received == ["A", "B"]
         assert reasoning_received == ["thinking ", "more"]
 
     def test_stream_populates_reasoning_artifact_for_anthropic(self, monkeypatch):
-        """AgentOutput.reasoning_artifact carries thinking_blocks for Anthropic."""
-        from unittest.mock import patch
-
         monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
         chunks = _make_streaming_chunks(
             content_fragments=["answer"],
@@ -466,6 +454,11 @@ class TestAgentStreamCallbacks:
                     "signature": "sig",
                 },
             ],
+            usage={
+                "prompt_tokens": 10,
+                "completion_tokens": 42,
+                "total_tokens": 52,
+            },
         )
         with patch("agentic.agent.agent.litellm") as mock_litellm:
             mock_litellm.completion.return_value = iter(chunks)
@@ -488,11 +481,10 @@ class TestAgentStreamCallbacks:
         assert output.reasoning_requested is True
         assert output.reasoning_artifact.summary_text == "I'm thinking"
         assert len(output.reasoning_artifact.thinking_blocks) == 1
+        # N-3: token counts must round-trip through the usage stub.
+        assert output.reasoning_artifact.output_tokens == 42
 
     def test_stream_no_artifact_when_no_reasoning(self, monkeypatch):
-        """reasoning_artifact stays None when model emits no reasoning."""
-        from unittest.mock import patch
-
         monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
         chunks = _make_streaming_chunks(content_fragments=["plain answer"])
         with patch("agentic.agent.agent.litellm") as mock_litellm:
@@ -509,6 +501,53 @@ class TestAgentStreamCallbacks:
 
         assert output.reasoning_artifact is None
         assert output.reasoning_requested is False
+
+    def test_stream_worker_error_returns_failed_output(self, monkeypatch):
+        """C-4: a worker exception must surface as a FAILED AgentOutput, not
+        leak. Also covers the worker error branch added for N-2/C-3."""
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("synthetic provider boom")
+
+        with patch("agentic.llm.streaming.accumulate_stream", side_effect=explode):
+            with patch("agentic.agent.agent.litellm") as mock_litellm:
+                mock_litellm.completion.return_value = iter([])
+                agent = Agent(system_prompt="hi")
+
+                _, output = _consume_stream(agent.stream("go"))
+
+        assert output.status == ExecutionStatus.FAILED
+        assert "synthetic provider boom" in (output.error or "")
+        # reasoning_requested still populates on the FAILED branch
+        assert output.reasoning_requested is False
+
+    def test_stream_aborts_on_generator_close(self, monkeypatch):
+        """N-1 + N-2: closing the generator (e.g. SSE client disconnect)
+        sets the context's abort_signal so the underlying LLM stream is
+        signalled to stop, rather than leaking the worker thread."""
+        import threading as _threading
+
+        from agentic.execution.context import ExecutionContext
+
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
+        chunks = _make_streaming_chunks(
+            content_fragments=["a", "b", "c", "d", "e"],
+        )
+        with patch("agentic.agent.agent.litellm") as mock_litellm:
+            mock_litellm.completion.return_value = iter(chunks)
+            agent = Agent(system_prompt="hi")
+            abort_event = _threading.Event()
+            gen = agent.stream(
+                "go",
+                context=ExecutionContext(abort_signal=abort_event),
+            )
+            next(gen)
+            gen.close()
+
+        assert (
+            abort_event.is_set()
+        ), "generator close should propagate to the context's abort_signal"
 
 
 class TestAgentAstream:
