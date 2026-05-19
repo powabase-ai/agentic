@@ -522,6 +522,40 @@ class TestAgentStreamCallbacks:
         # reasoning_requested still populates on the FAILED branch
         assert output.reasoning_requested is False
 
+    def test_stream_passes_reasoning_effort_to_litellm(self, monkeypatch):
+        """The reasoning_effort configured on the agent must reach
+        litellm.completion — otherwise the model never reasons even when the
+        start event says reasoning_requested=true (seen in prod on a tool-less
+        reasoning-capable agent)."""
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
+        chunks = _make_streaming_chunks(content_fragments=["hi"])
+        with patch("agentic.agent.agent.litellm") as mock_litellm:
+            mock_litellm.completion.return_value = iter(chunks)
+            mock_litellm.supports_reasoning.return_value = True
+            mock_litellm.get_llm_provider.return_value = (
+                "claude-sonnet-4-6",
+                "anthropic",
+                None,
+                None,
+            )
+            agent = Agent(
+                model="claude-sonnet-4-6",
+                system_prompt="hi",
+                reasoning_effort="high",
+            )
+            _consume_stream(agent.stream("go"))
+
+            call_kwargs = mock_litellm.completion.call_args.kwargs
+            # Non-Responses path: top-level reasoning_effort. Responses path:
+            # extra_body.reasoning.effort. Either is acceptable.
+            top_level = call_kwargs.get("reasoning_effort")
+            nested = (
+                (call_kwargs.get("extra_body") or {}).get("reasoning", {}).get("effort")
+            )
+            assert (
+                top_level == "high" or nested == "high"
+            ), f"reasoning_effort missing from litellm call: {call_kwargs}"
+
     def test_stream_aborts_on_generator_close(self, monkeypatch):
         """N-1 + N-2: closing the generator (e.g. SSE client disconnect)
         sets the context's abort_signal so the underlying LLM stream is

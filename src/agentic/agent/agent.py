@@ -1094,24 +1094,28 @@ class Agent:
         result_holder: dict[str, Any] = {}
 
         try:
-            response = litellm.completion(
-                model=self.model,
-                messages=messages,
-                stream=True,
-                stream_options={"include_usage": True},
-                num_retries=3,
-                **(
-                    {"temperature": self.temperature}
-                    if self.temperature is not None
-                    else {}
-                ),
-                **(
-                    {"max_tokens": self.max_tokens}
-                    if self.max_tokens is not None
-                    else {}
-                ),
-                **({"api_key": self.api_key} if self.api_key is not None else {}),
-            )
+            # Apply reasoning_effort to the LLM call. Without these kwargs, a
+            # reasoning-capable model used by an agent with reasoning_effort
+            # set will silently NOT reason — start event says
+            # reasoning_requested=true but no thinking content is produced.
+            # Mirrors the ReAct path's call-kwarg assembly.
+            routed_model = maybe_route_through_responses(self.model, effort)
+            call_kwargs: dict[str, Any] = {
+                "model": routed_model,
+                "messages": messages,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+                "num_retries": 3,
+            }
+            if self.temperature is not None:
+                call_kwargs["temperature"] = self.temperature
+            if self.max_tokens is not None:
+                call_kwargs["max_tokens"] = self.max_tokens
+            if self.api_key is not None:
+                call_kwargs["api_key"] = self.api_key
+            call_kwargs.update(reasoning_call_kwargs(effort, routed_model))
+
+            response = litellm.completion(**call_kwargs)
 
             def _on_content(d: str) -> None:
                 yield_queue.put(d)
