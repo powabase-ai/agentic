@@ -14,11 +14,14 @@ and unit-testable without ExecutionContext or threading.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _THINK_TAG_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
@@ -162,6 +165,8 @@ def accumulate_stream(
     on_content_delta: Callable[[str], None] | None = None,
     on_reasoning_delta: Callable[[str], None] | None = None,
     abort_signal: threading.Event | None = None,
+    *,
+    model: str | None = None,
 ) -> tuple[Message, str | None, dict | None]:
     """Iterate an LLM stream, invoking callbacks per non-empty fragment.
 
@@ -298,6 +303,38 @@ def accumulate_stream(
             )
         )
 
+    # Workaround for LiteLLM's Anthropic streaming usage gap: in
+    # non-streaming responses, `AnthropicConfig.calculate_usage` counts
+    # reasoning_tokens from the reasoning_content text. In streaming mode,
+    # `ModelResponseIterator._handle_usage` calls `calculate_usage` with
+    # `reasoning_content=None`, so reasoning_tokens always lands as 0 on
+    # completion_tokens_details — even when the model actually emitted
+    # thinking blocks. Same gap shows up for any provider whose streaming
+    # path forwards the raw usage without re-counting. Best-effort fallback:
+    # if we accumulated reasoning text but usage says 0, count the tokens
+    # ourselves using the same tokenizer the provider would use.
+    if (
+        model is not None
+        and reasoning_buf
+        and usage is not None
+        and not usage.get("reasoning_tokens")
+    ):
+        try:
+            import litellm
+
+            counted = litellm.token_counter(model=model, text=reasoning_buf)
+            if counted > 0:
+                usage["reasoning_tokens"] = counted
+        except Exception:
+            # Best-effort — never fail the stream over a token count. Log at
+            # debug so a missing tokenizer mapping is grep-able when reasoning
+            # token counts stay zero in production for a particular model.
+            logger.debug(
+                "reasoning_tokens backfill failed for model=%s",
+                model,
+                exc_info=True,
+            )
+
     return (
         Message(
             content=content_buf,
@@ -324,6 +361,7 @@ def _extract_usage(chunk_usage: Any) -> dict:
       - Responses API:     output_tokens_details.reasoning_tokens,
                            input_tokens_details.cached_tokens
     """
+
     def _get(obj: Any, key: str) -> Any:
         if obj is None:
             return None

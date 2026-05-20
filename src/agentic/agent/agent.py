@@ -575,6 +575,7 @@ class Agent:
                                 }
                             ),
                             abort_signal=context.abort_signal,
+                            model=state.current_model,
                         )
                     except AbortedError:
                         # B2 v3: streaming abort produces the same AgentOutput shape
@@ -1133,6 +1134,7 @@ class Agent:
                         on_content_delta=_on_content,
                         on_reasoning_delta=_on_reasoning,
                         abort_signal=abort_signal,
+                        model=self.model,
                     )
                     result_holder["msg"] = msg
                     result_holder["usage"] = usage
