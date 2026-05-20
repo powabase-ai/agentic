@@ -8,6 +8,7 @@ This algorithm:
 """
 
 import logging
+import time
 from dataclasses import dataclass, field
 
 from agentic.knowledge.chunking.base import ChunkingStrategy
@@ -171,14 +172,29 @@ class ChunkAndEmbedAlgorithm(IndexingAlgorithm):
             self.chunker.overlap = config.overlap
 
         # Step 1: Chunk (sync - usually fast)
+        t_chunk = time.monotonic()
         text_chunks = self.chunker.chunk(content, source_id=source_id)
+        chunk_secs = time.monotonic() - t_chunk
 
         if not text_chunks:
+            logger.info(
+                "chunk_embed_timing chunk_secs=%.2f embed_secs=0 chunks=0",
+                chunk_secs,
+            )
             return ChunkEmbedResult(chunks=[], source_id=source_id)
 
         # Step 2: Async embed
+        t_embed = time.monotonic()
         chunk_texts = [chunk.text for chunk in text_chunks]
         embeddings = await self.embedder.aembed_batch(chunk_texts)
+        embed_secs = time.monotonic() - t_embed
+
+        logger.info(
+            "chunk_embed_timing chunk_secs=%.2f embed_secs=%.2f chunks=%d",
+            chunk_secs,
+            embed_secs,
+            len(text_chunks),
+        )
 
         # Step 3: Combine
         from agentic.knowledge.chunking.token_utils import count_tokens
