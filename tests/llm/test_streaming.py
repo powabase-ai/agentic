@@ -109,6 +109,93 @@ def test_provider_variance_no_reasoning_field():
     assert msg.reasoning_content == ""
 
 
+def test_anthropic_streaming_reasoning_tokens_workaround():
+    """LiteLLM's Anthropic streaming path passes reasoning_content=None to
+    calculate_usage (handler.py:589-594) so the per-chunk usage always
+    carries reasoning_tokens=0 even when thinking blocks were emitted.
+    accumulate_stream backfills the count from reasoning_buf when a model
+    is provided.
+    """
+    from dataclasses import dataclass
+
+    from agentic.llm.streaming import accumulate_stream
+
+    @dataclass
+    class _UsageNoReasoning:
+        # Mirrors what LiteLLM's Anthropic streaming handler produces:
+        # top-level totals are correct, completion_tokens_details exists
+        # but reasoning_tokens is stuck at 0 because reasoning_content
+        # wasn't threaded through the streaming usage call.
+        prompt_tokens: int = 100
+        completion_tokens: int = 250  # includes thinking
+        total_tokens: int = 350
+
+    anthropic_streaming_usage = FakeChunk(
+        choices=[],
+        usage=_UsageNoReasoning(),
+    )
+
+    msg, _, usage = accumulate_stream(
+        fake_stream(
+            role_chunk(),
+            *reasoning_chunks(
+                "Let me think step by step about this hard problem.", fragments=3
+            ),
+            *content_chunks("answer", fragments=1),
+            finish_chunk("stop"),
+            anthropic_streaming_usage,
+        ),
+        model="claude-sonnet-4-6",
+    )
+
+    # Without the workaround, this stays 0 / missing — the Anthropic
+    # streaming path stalls reasoning_tokens at 0 in litellm.
+    assert msg.reasoning_content == "Let me think step by step about this hard problem."
+    assert usage is not None
+    assert (
+        usage.get("reasoning_tokens", 0) > 0
+    ), "reasoning_tokens must be backfilled when streaming usage drops them"
+
+
+def test_reasoning_tokens_not_overwritten_when_provider_supplies_them():
+    """If the provider's usage chunk already has reasoning_tokens (OpenAI
+    o-series), accumulate_stream MUST NOT overwrite it from the tokenizer.
+    """
+    from dataclasses import dataclass
+
+    from agentic.llm.streaming import accumulate_stream
+
+    @dataclass
+    class _Details:
+        reasoning_tokens: int = 42
+
+    @dataclass
+    class _Usage:
+        prompt_tokens: int = 10
+        completion_tokens: int = 50
+        total_tokens: int = 60
+        completion_tokens_details: _Details = None  # type: ignore[assignment]
+
+        def __post_init__(self):
+            if self.completion_tokens_details is None:
+                self.completion_tokens_details = _Details()
+
+    _, _, usage = accumulate_stream(
+        fake_stream(
+            role_chunk(),
+            *reasoning_chunks(
+                "something very long that would count to way more than 42"
+            ),
+            *content_chunks("ok"),
+            finish_chunk("stop"),
+            FakeChunk(choices=[], usage=_Usage()),
+        ),
+        model="gpt-5",
+    )
+
+    assert usage["reasoning_tokens"] == 42
+
+
 def test_single_tool_call_fragmented_args():
     """B1 v3 fix: tc.function.name and tc.function.arguments are ATTRIBUTE access
     (not dict subscript); arguments is a JSON STRING (not a parsed dict) — matches
