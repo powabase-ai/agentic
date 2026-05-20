@@ -14,11 +14,14 @@ and unit-testable without ExecutionContext or threading.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _THINK_TAG_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
@@ -301,11 +304,10 @@ def accumulate_stream(
         )
 
     # Workaround for LiteLLM's Anthropic streaming usage gap: in
-    # non-streaming responses, AnthropicConfig.calculate_usage counts
+    # non-streaming responses, `AnthropicConfig.calculate_usage` counts
     # reasoning_tokens from the reasoning_content text. In streaming mode,
-    # the ModelResponseIterator calls _handle_usage with
-    # reasoning_content=None (verified at litellm/llms/anthropic/chat/
-    # handler.py:589), so reasoning_tokens always lands as 0 on
+    # `ModelResponseIterator._handle_usage` calls `calculate_usage` with
+    # `reasoning_content=None`, so reasoning_tokens always lands as 0 on
     # completion_tokens_details — even when the model actually emitted
     # thinking blocks. Same gap shows up for any provider whose streaming
     # path forwards the raw usage without re-counting. Best-effort fallback:
@@ -324,8 +326,14 @@ def accumulate_stream(
             if counted > 0:
                 usage["reasoning_tokens"] = counted
         except Exception:
-            # Best-effort — never fail the stream over a token count.
-            pass
+            # Best-effort — never fail the stream over a token count. Log at
+            # debug so a missing tokenizer mapping is grep-able when reasoning
+            # token counts stay zero in production for a particular model.
+            logger.debug(
+                "reasoning_tokens backfill failed for model=%s",
+                model,
+                exc_info=True,
+            )
 
     return (
         Message(

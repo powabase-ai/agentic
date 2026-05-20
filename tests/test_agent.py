@@ -522,11 +522,10 @@ class TestAgentStreamCallbacks:
         # reasoning_requested still populates on the FAILED branch
         assert output.reasoning_requested is False
 
-    def test_stream_passes_reasoning_effort_to_litellm(self, monkeypatch):
-        """The reasoning_effort configured on the agent must reach
-        litellm.completion — otherwise the model never reasons even when the
-        start event says reasoning_requested=true (seen in prod on a tool-less
-        reasoning-capable agent)."""
+    def test_stream_passes_reasoning_effort_anthropic_top_level(self, monkeypatch):
+        """Non-Responses providers (Anthropic direct) get a top-level
+        `reasoning_effort` kwarg AND must NOT get `extra_body` (the two
+        shapes are mutually exclusive — see routing.py)."""
         monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
         chunks = _make_streaming_chunks(content_fragments=["hi"])
         with patch("agentic.agent.agent.litellm") as mock_litellm:
@@ -546,15 +545,67 @@ class TestAgentStreamCallbacks:
             _consume_stream(agent.stream("go"))
 
             call_kwargs = mock_litellm.completion.call_args.kwargs
-            # Non-Responses path: top-level reasoning_effort. Responses path:
-            # extra_body.reasoning.effort. Either is acceptable.
-            top_level = call_kwargs.get("reasoning_effort")
-            nested = (
-                (call_kwargs.get("extra_body") or {}).get("reasoning", {}).get("effort")
+            assert call_kwargs.get("reasoning_effort") == "high"
+            assert (
+                "extra_body" not in call_kwargs
+            ), "Responses-bridge shape must not appear on the non-Responses path"
+
+    def test_stream_passes_reasoning_effort_openai_responses_bridge(self, monkeypatch):
+        """OpenAI reasoning models route through `openai/responses/<model>`
+        and must pack effort under `extra_body.reasoning.effort` — and MUST
+        NOT carry a top-level `reasoning_effort` (litellm silently drops it
+        on the Responses path)."""
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
+        chunks = _make_streaming_chunks(content_fragments=["hi"])
+        with patch("agentic.agent.agent.litellm") as mock_litellm:
+            mock_litellm.completion.return_value = iter(chunks)
+            mock_litellm.supports_reasoning.return_value = True
+            mock_litellm.get_llm_provider.return_value = (
+                "gpt-5",
+                "openai",
+                None,
+                None,
+            )
+            agent = Agent(
+                model="gpt-5",
+                system_prompt="hi",
+                reasoning_effort="high",
+            )
+            _consume_stream(agent.stream("go"))
+
+            call_kwargs = mock_litellm.completion.call_args.kwargs
+            assert call_kwargs.get("model") == "openai/responses/gpt-5", (
+                f"OpenAI reasoning model should route through Responses bridge; "
+                f"got {call_kwargs.get('model')}"
             )
             assert (
-                top_level == "high" or nested == "high"
-            ), f"reasoning_effort missing from litellm call: {call_kwargs}"
+                call_kwargs.get("extra_body", {}).get("reasoning", {}).get("effort")
+                == "high"
+            )
+            assert "reasoning_effort" not in call_kwargs, (
+                "litellm silently drops top-level reasoning_effort on the "
+                "Responses path — must not be set"
+            )
+
+    def test_stream_no_effort_passes_no_reasoning_kwargs(self, monkeypatch):
+        """An agent without reasoning_effort must not inject any reasoning
+        kwargs into the litellm call."""
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
+        chunks = _make_streaming_chunks(content_fragments=["hi"])
+        with patch("agentic.agent.agent.litellm") as mock_litellm:
+            mock_litellm.completion.return_value = iter(chunks)
+            mock_litellm.get_llm_provider.return_value = (
+                "gpt-4o-mini",
+                "openai",
+                None,
+                None,
+            )
+            agent = Agent(model="gpt-4o-mini", system_prompt="hi")
+            _consume_stream(agent.stream("go"))
+
+            call_kwargs = mock_litellm.completion.call_args.kwargs
+            assert "reasoning_effort" not in call_kwargs
+            assert "extra_body" not in call_kwargs
 
     def test_stream_aborts_on_generator_close(self, monkeypatch):
         """N-1 + N-2: closing the generator (e.g. SSE client disconnect)
