@@ -2,6 +2,7 @@
 Agent - single LLM-powered agent definition and execution.
 """
 
+import contextvars
 import json
 import logging
 import os
@@ -803,13 +804,29 @@ class Agent:
                 # responses for a given assistant message to be consecutive.
                 deferred_image_msgs = []
 
-                # Execute concurrent-safe tools in parallel
+                # Execute concurrent-safe tools in parallel.
+                # ThreadPoolExecutor.submit() does NOT propagate the caller's
+                # contextvars to workers (stdlib's _WorkItem.run() invokes
+                # fn() directly, not via Context.run()). Capture a FRESH
+                # copy of the parent context per submission and submit
+                # ``ctx.run`` so each worker runs inside its own copy of the
+                # live ContextVar bindings. A single shared ctx would fail:
+                # ``Context.run()`` can only be entered once per Context
+                # object, so concurrent submissions would race and crash
+                # with "cannot enter context: ... is already entered".
+                #
+                # This is the path consumers (e.g. agentic-platform's
+                # billing_context) rely on to propagate the current run_id
+                # into wrapped tool handlers; without ctx.run, workers see
+                # ContextVar defaults and downstream billing falls back to
+                # non-deterministic ids → retries double-charge.
                 if concurrent_calls:
                     with ThreadPoolExecutor(max_workers=len(concurrent_calls)) as pool:
                         futures = {}
                         for tc in concurrent_calls:
                             futures[
                                 pool.submit(
+                                    contextvars.copy_context().run,
                                     self._execute_single_tool,
                                     tc,
                                     tools,
