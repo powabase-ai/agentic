@@ -66,10 +66,16 @@ select = [
     "I",      # isort
     "UP",     # pyupgrade
     "B",      # flake8-bugbear
+    "TID",    # flake8-tidy-imports (enforces billing-agnostic invariant)
 ]
 ignore = [
     "E501",   # line too long (handled by formatter)
 ]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"agentic_billing_service".msg = "agentic/ must stay billing-agnostic. Use contextvars/callbacks instead. See spec 2026-05-26-credit-system-v1.5-design.md."
+"agentic_project_service.billing".msg = "agentic/ must stay billing-agnostic."
+"agentic_control_plane".msg = "agentic/ must stay control-plane-agnostic."
 
 [tool.ruff.format]
 quote-style = "double"
