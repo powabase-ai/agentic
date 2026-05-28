@@ -14,6 +14,15 @@ def _make_block(config=None):
     return AgentBlock(config=config or {"model": "gpt-4o-mini", "input": "hello"})
 
 
+def _resolver(model: str) -> str | None:
+    """Stub resolver that returns None (BYOK not configured in unit tests).
+
+    IMP-NEW-2: AgentBlock.execute() / .stream() now require 'resolve_agent_api_key'
+    in services (fail-closed). All BlockInput() calls must include it.
+    """
+    return None
+
+
 def test_agent_block_calls_services_hook_after_run():
     called = {}
 
@@ -32,7 +41,9 @@ def test_agent_block_calls_services_hook_after_run():
         instance = FakeAgentCls.return_value
         instance.arun = AsyncMock(return_value=fake_output)
 
-        bi = BlockInput(services={"on_agent_run_complete": hook})
+        bi = BlockInput(
+            services={"on_agent_run_complete": hook, "resolve_agent_api_key": _resolver}
+        )
         result = asyncio.run(block.execute(bi))
 
     assert result.data["output"] == "response"
@@ -57,7 +68,9 @@ def test_agent_block_without_hook_works_as_before():
         instance = FakeAgentCls.return_value
         instance.arun = AsyncMock(return_value=fake_output)
 
-        bi = BlockInput()  # no services hook
+        bi = BlockInput(
+            services={"resolve_agent_api_key": _resolver}
+        )  # no hook, but resolver required
         result = asyncio.run(block.execute(bi))
 
     assert result.data["output"] == "response"
@@ -80,7 +93,9 @@ def test_agent_block_stream_calls_services_hook_after_run():
         instance = FakeAgentCls.return_value
         instance.astream = fake_astream
 
-        bi = BlockInput(services={"on_agent_run_complete": hook})
+        bi = BlockInput(
+            services={"on_agent_run_complete": hook, "resolve_agent_api_key": _resolver}
+        )
 
         async def _run():
             outputs = []
@@ -121,7 +136,12 @@ def test_agent_block_hook_exceptions_do_not_break_execute():
         instance = FakeAgentCls.return_value
         instance.arun = AsyncMock(return_value=fake_output)
 
-        bi = BlockInput(services={"on_agent_run_complete": bad_hook})
+        bi = BlockInput(
+            services={
+                "on_agent_run_complete": bad_hook,
+                "resolve_agent_api_key": _resolver,
+            }
+        )
         result = asyncio.run(block.execute(bi))
 
     assert result.data["output"] == "response"
@@ -147,7 +167,9 @@ def test_agent_block_execute_passes_status_and_error_from_output():
         instance = FakeAgentCls.return_value
         instance.arun = AsyncMock(return_value=fake_output)
 
-        bi = BlockInput(services={"on_agent_run_complete": hook})
+        bi = BlockInput(
+            services={"on_agent_run_complete": hook, "resolve_agent_api_key": _resolver}
+        )
         asyncio.run(block.execute(bi))
 
     assert called["status"] == ExecutionStatus.FAILED
@@ -172,7 +194,9 @@ def test_agent_block_execute_passes_status_completed_on_success():
         instance = FakeAgentCls.return_value
         instance.arun = AsyncMock(return_value=fake_output)
 
-        bi = BlockInput(services={"on_agent_run_complete": hook})
+        bi = BlockInput(
+            services={"on_agent_run_complete": hook, "resolve_agent_api_key": _resolver}
+        )
         asyncio.run(block.execute(bi))
 
     assert called["status"] == ExecutionStatus.COMPLETED
@@ -197,7 +221,9 @@ def test_agent_block_stream_fires_hook_on_astream_error_and_re_raises():
         instance = FakeAgentCls.return_value
         instance.astream = failing_astream
 
-        bi = BlockInput(services={"on_agent_run_complete": hook})
+        bi = BlockInput(
+            services={"on_agent_run_complete": hook, "resolve_agent_api_key": _resolver}
+        )
 
         async def _consume():
             async for _ in block.stream(bi):
@@ -227,11 +253,60 @@ def test_agent_block_stream_hook_exceptions_do_not_suppress_original_error():
         instance = FakeAgentCls.return_value
         instance.astream = failing_astream
 
-        bi = BlockInput(services={"on_agent_run_complete": bad_hook})
+        bi = BlockInput(
+            services={
+                "on_agent_run_complete": bad_hook,
+                "resolve_agent_api_key": _resolver,
+            }
+        )
 
         async def _consume():
             async for _ in block.stream(bi):
                 pass
 
         with pytest.raises(RuntimeError, match="original failure"):
+            asyncio.run(_consume())
+
+
+def test_agent_block_fails_closed_without_resolver():
+    """IMP-NEW-2: AgentBlock.execute() must raise RuntimeError when
+    'resolve_agent_api_key' is absent from services.
+
+    This prevents the silent BYOK bypass where a missing injection would
+    use api_key=None (platform key) and bypass billing recoup.
+    """
+    block = _make_block()
+    with patch("agentic.workflow.blocks.agent.Agent") as FakeAgentCls:
+        instance = FakeAgentCls.return_value
+        instance.arun = AsyncMock(return_value=MagicMock())
+
+        # No resolver → RuntimeError
+        bi = BlockInput()  # empty services
+        with pytest.raises(RuntimeError, match="resolve_agent_api_key"):
+            asyncio.run(block.execute(bi))
+
+        # With hook but no resolver → same RuntimeError
+        bi_with_hook = BlockInput(services={"on_agent_run_complete": lambda _: None})
+        with pytest.raises(RuntimeError, match="resolve_agent_api_key"):
+            asyncio.run(block.execute(bi_with_hook))
+
+
+def test_agent_block_stream_fails_closed_without_resolver():
+    """IMP-NEW-2: same fail-closed check for AgentBlock.stream()."""
+    block = _make_block()
+    with patch("agentic.workflow.blocks.agent.Agent") as FakeAgentCls:
+        instance = FakeAgentCls.return_value
+
+        async def _noop(prompt):
+            yield "chunk"
+
+        instance.astream = _noop
+
+        bi = BlockInput()  # no resolver
+
+        async def _consume():
+            async for _ in block.stream(bi):
+                pass
+
+        with pytest.raises(RuntimeError, match="resolve_agent_api_key"):
             asyncio.run(_consume())

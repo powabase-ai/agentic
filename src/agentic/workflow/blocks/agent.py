@@ -91,8 +91,17 @@ class AgentBlock(BaseBlock):
         system_prompt = await self._build_system_prompt(block_input)
         prompt = self._resolve_prompt(block_input)
 
-        resolve_api_key = block_input.services.get("resolve_agent_api_key")
-        api_key = resolve_api_key(model) if resolve_api_key is not None else None
+        # IMP-NEW-2: fail-closed — resolver is required so a missing injection
+        # causes a loud error rather than silently bypassing BYOK and billing
+        # the platform key without recoup.  Workflow runners MUST inject it via
+        # make_services().
+        if "resolve_agent_api_key" not in block_input.services:
+            raise RuntimeError(
+                "AgentBlock requires 'resolve_agent_api_key' in services. "
+                "Workflow runner must inject it via make_services()."
+            )
+        resolve_api_key = block_input.services["resolve_agent_api_key"]
+        api_key = resolve_api_key(model)
         agent = self._build_agent(model, system_prompt, api_key=api_key)
         output = await agent.arun(prompt)
 
@@ -136,8 +145,14 @@ class AgentBlock(BaseBlock):
         system_prompt = await self._build_system_prompt(block_input)
         prompt = self._resolve_prompt(block_input)
 
-        resolve_api_key = block_input.services.get("resolve_agent_api_key")
-        api_key = resolve_api_key(model) if resolve_api_key is not None else None
+        # IMP-NEW-2: same fail-closed check as execute() above.
+        if "resolve_agent_api_key" not in block_input.services:
+            raise RuntimeError(
+                "AgentBlock requires 'resolve_agent_api_key' in services. "
+                "Workflow runner must inject it via make_services()."
+            )
+        resolve_api_key = block_input.services["resolve_agent_api_key"]
+        api_key = resolve_api_key(model)
         agent = self._build_agent(model, system_prompt, api_key=api_key)
         chunks: list[str] = []
 
