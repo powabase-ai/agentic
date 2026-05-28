@@ -54,7 +54,9 @@ class AgentBlock(BaseBlock):
 
         return system_prompt
 
-    def _build_agent(self, model: str, system_prompt: str) -> Agent:
+    def _build_agent(
+        self, model: str, system_prompt: str, api_key: str | None = None
+    ) -> Agent:
         temperature = self.config.get("temperature")
         max_tokens = self.config.get("max_tokens")
 
@@ -72,11 +74,16 @@ class AgentBlock(BaseBlock):
             except (ValueError, TypeError):
                 pass
 
+        # Workflow agent blocks are user automations; if api_key was provided in
+        # the workflow's services dict (from the project-service caller), use it
+        # so the recoupable wrap at the workflow execution driver correctly
+        # signals "user paid" via the BillingLogger BYOK skip.
         return Agent(
             model=model,
             system_prompt=system_prompt,
             temperature=parsed_temp,
             max_tokens=parsed_max,
+            api_key=api_key,
         )
 
     async def execute(self, block_input: BlockInput) -> BlockOutput:
@@ -84,7 +91,9 @@ class AgentBlock(BaseBlock):
         system_prompt = await self._build_system_prompt(block_input)
         prompt = self._resolve_prompt(block_input)
 
-        agent = self._build_agent(model, system_prompt)
+        resolve_api_key = block_input.services.get("resolve_agent_api_key")
+        api_key = resolve_api_key(model) if resolve_api_key is not None else None
+        agent = self._build_agent(model, system_prompt, api_key=api_key)
         output = await agent.arun(prompt)
 
         hook = block_input.services.get("on_agent_run_complete")
@@ -127,7 +136,9 @@ class AgentBlock(BaseBlock):
         system_prompt = await self._build_system_prompt(block_input)
         prompt = self._resolve_prompt(block_input)
 
-        agent = self._build_agent(model, system_prompt)
+        resolve_api_key = block_input.services.get("resolve_agent_api_key")
+        api_key = resolve_api_key(model) if resolve_api_key is not None else None
+        agent = self._build_agent(model, system_prompt, api_key=api_key)
         chunks: list[str] = []
 
         # Agent.astream is a pure async generator with no internal try/except —
