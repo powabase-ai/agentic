@@ -310,3 +310,40 @@ def test_agent_block_stream_fails_closed_without_resolver():
 
         with pytest.raises(RuntimeError, match="resolve_agent_api_key"):
             asyncio.run(_consume())
+
+
+def test_agent_block_execute_passes_api_key_to_agent():
+    """IMP-NEW-6: resolver return value must be forwarded as api_key= to Agent().
+
+    Counterfactual: if AgentBlock called Agent() without passing api_key, the
+    Agent would fall back to the platform's ambient OPENAI_API_KEY instead of
+    the user's BYOK key, silently bypassing billing recoup.  Removing the
+    `api_key=api_key` argument from the _build_agent call causes this test to
+    FAIL because FakeAgentCls would be called with api_key=None (or absent).
+    """
+    fake_output = MagicMock()
+    fake_output.content = "result"
+    fake_output.usage = {}
+    fake_output.status = MagicMock()
+    fake_output.error = None
+
+    def _byok_resolver(model: str) -> str | None:
+        return "sk-user-byok-key"
+
+    block = _make_block()
+    with patch("agentic.workflow.blocks.agent.Agent") as FakeAgentCls:
+        instance = FakeAgentCls.return_value
+        instance.arun = AsyncMock(return_value=fake_output)
+
+        bi = BlockInput(services={"resolve_agent_api_key": _byok_resolver})
+        asyncio.run(block.execute(bi))
+
+    # Agent must have been constructed with the key the resolver returned.
+    assert FakeAgentCls.called, "Agent was never constructed"
+    call_kwargs = FakeAgentCls.call_args.kwargs
+    assert (
+        "api_key" in call_kwargs
+    ), f"Agent() was not called with api_key kwarg; got kwargs={call_kwargs}"
+    assert (
+        call_kwargs["api_key"] == "sk-user-byok-key"
+    ), f"Expected api_key='sk-user-byok-key'; got {call_kwargs['api_key']!r}"
