@@ -385,9 +385,7 @@ def get_text_of_pages(pdf_path, start_page, end_page, tag=True):
         page = pdf_reader.pages[page_num]
         page_text = page.extract_text()
         if tag:
-            text += (
-                f"<start_index_{page_num+1}>\n{page_text}\n<end_index_{page_num+1}>\n"
-            )
+            text += f"<start_index_{page_num + 1}>\n{page_text}\n<end_index_{page_num + 1}>\n"
         else:
             text += page_text
     return text
@@ -581,7 +579,7 @@ def get_text_of_pdf_pages(pdf_pages, start_page, end_page):
 def get_text_of_pdf_pages_with_labels(pdf_pages, start_page, end_page):
     text = ""
     for page_num in range(start_page - 1, end_page):
-        text += f"<physical_index_{page_num+1}>\n{pdf_pages[page_num][0]}\n<physical_index_{page_num+1}>\n"
+        text += f"<physical_index_{page_num + 1}>\n{pdf_pages[page_num][0]}\n<physical_index_{page_num + 1}>\n"
     return text
 
 
@@ -705,7 +703,7 @@ def convert_physical_index_to_int(data):
                             data[i]["physical_index"] = None
                             logging.warning(
                                 f"[convert_physical_index_to_int] item[{i}] "
-                                f"title={data[i].get('title','?')!r}: "
+                                f"title={data[i].get('title', '?')!r}: "
                                 f"int conversion failed for: {original_value!r}"
                             )
                     elif data[i]["physical_index"].startswith("physical_index_"):
@@ -717,14 +715,14 @@ def convert_physical_index_to_int(data):
                             data[i]["physical_index"] = None
                             logging.warning(
                                 f"[convert_physical_index_to_int] item[{i}] "
-                                f"title={data[i].get('title','?')!r}: "
+                                f"title={data[i].get('title', '?')!r}: "
                                 f"int conversion failed for: {original_value!r}"
                             )
                     else:
                         data[i]["physical_index"] = None
                         logging.warning(
                             f"[convert_physical_index_to_int] item[{i}] "
-                            f"title={data[i].get('title','?')!r}: "
+                            f"title={data[i].get('title', '?')!r}: "
                             f"unrecognized physical_index format: {original_value!r}"
                         )
     elif isinstance(data, str):
