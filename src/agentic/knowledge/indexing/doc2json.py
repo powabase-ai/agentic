@@ -185,10 +185,12 @@ class Doc2JSONAlgorithm(IndexingAlgorithm):
         for img in images:
             fmt = img.get("format", "png").lower()
             mime = f"image/{fmt}" if fmt not in ("jpg", "jpeg") else "image/jpeg"
-            blocks.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:{mime};base64,{img['content']}"},
-            })
+            blocks.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{img['content']}"},
+                }
+            )
         return blocks
 
     def _group_images_into_windows(
@@ -305,6 +307,9 @@ Analyze the page images below and extract the relevant information."""
                     max_tokens=DOC2JSON_EXTRACTION_MAX_TOKENS,
                     response_format=response_format,
                     drop_params=True,
+                    num_retries=0,
+                    max_retries=0,
+                    timeout=60,
                 )
 
                 raw = response.choices[0].message.content.strip()
@@ -390,7 +395,9 @@ Analyze the page images below and extract the relevant information."""
                 pages_per_window,
             )
 
-            image_windows = self._group_images_into_windows(page_images, pages_per_window)
+            image_windows = self._group_images_into_windows(
+                page_images, pages_per_window
+            )
 
             if not image_windows:
                 empty_summary = "Empty document with no pages."
@@ -406,7 +413,11 @@ Analyze the page images below and extract the relevant information."""
 
             for i, img_window in enumerate(image_windows):
                 try:
-                    summary, extraction, tokens_used = await self._process_window_with_images(
+                    (
+                        summary,
+                        extraction,
+                        tokens_used,
+                    ) = await self._process_window_with_images(
                         images=img_window,
                         window_index=i,
                         total_windows=len(image_windows),
@@ -418,13 +429,17 @@ Analyze the page images below and extract the relevant information."""
                     extracted_json = self._merge_json(extracted_json, extraction)
                     pages_in_window = [img.get("page", "?") for img in img_window]
 
-                    window_summaries.append({
-                        "window_idx": i,
-                        "pages": pages_in_window,
-                        "summary": summary,
-                        "extracted_fields": list(extraction.keys()) if extraction else [],
-                        "tokens_used": tokens_used,
-                    })
+                    window_summaries.append(
+                        {
+                            "window_idx": i,
+                            "pages": pages_in_window,
+                            "summary": summary,
+                            "extracted_fields": list(extraction.keys())
+                            if extraction
+                            else [],
+                            "tokens_used": tokens_used,
+                        }
+                    )
                     total_input_tokens += tokens_used
 
                     logger.debug(
@@ -437,11 +452,13 @@ Analyze the page images below and extract the relevant information."""
 
                 except Exception as e:
                     logger.warning("Image window %d failed: %s", i, e)
-                    window_summaries.append({
-                        "window_idx": i,
-                        "summary": "",
-                        "error": str(e),
-                    })
+                    window_summaries.append(
+                        {
+                            "window_idx": i,
+                            "summary": "",
+                            "error": str(e),
+                        }
+                    )
 
             stats = {
                 "window_count": len(image_windows),
@@ -484,12 +501,16 @@ Analyze the page images below and extract the relevant information."""
 
                     extracted_json = self._merge_json(extracted_json, extraction)
 
-                    window_summaries.append({
-                        "window_idx": i,
-                        "summary": summary,
-                        "extracted_fields": list(extraction.keys()) if extraction else [],
-                        "tokens_used": tokens_used,
-                    })
+                    window_summaries.append(
+                        {
+                            "window_idx": i,
+                            "summary": summary,
+                            "extracted_fields": list(extraction.keys())
+                            if extraction
+                            else [],
+                            "tokens_used": tokens_used,
+                        }
+                    )
                     total_input_tokens += tokens_used
 
                     logger.debug(
@@ -501,11 +522,13 @@ Analyze the page images below and extract the relevant information."""
 
                 except Exception as e:
                     logger.warning("Window %d failed: %s", i, e)
-                    window_summaries.append({
-                        "window_idx": i,
-                        "summary": "",
-                        "error": str(e),
-                    })
+                    window_summaries.append(
+                        {
+                            "window_idx": i,
+                            "summary": "",
+                            "error": str(e),
+                        }
+                    )
 
             stats = {
                 "window_count": len(windows),
@@ -651,6 +674,9 @@ Return a JSON object with exactly two keys:
                     max_tokens=DOC2JSON_EXTRACTION_MAX_TOKENS,
                     response_format=response_format,
                     drop_params=True,
+                    num_retries=0,
+                    max_retries=0,
+                    timeout=60,
                 )
 
                 raw = response.choices[0].message.content.strip()
@@ -915,9 +941,7 @@ Return a JSON object with exactly two keys:
         """Generate a combined summary from all window summaries."""
         # Collect non-empty summaries
         summaries = [
-            ws.get("summary", "")
-            for ws in window_summaries
-            if ws.get("summary")
+            ws.get("summary", "") for ws in window_summaries if ws.get("summary")
         ]
 
         if not summaries:
@@ -931,7 +955,7 @@ Return a JSON object with exactly two keys:
         combined_text = "\n".join(f"- {s}" for s in summaries)
 
         system_prompt = """You are a document summarizer. Given per-section summaries from a document,
-create a single coherent summary that captures all key information across sections. Make sure you capture all 
+create a single coherent summary that captures all key information across sections. Make sure you capture all
 relevant entities, key insights, key events, key metrics or numbers, etc. Be concise (4-6 sentences)."""
 
         user_prompt = f"""## Section Summaries
@@ -951,6 +975,9 @@ Generate a concise summary that captures the most important information from thi
                 ],
                 temperature=0,
                 max_tokens=DOC2JSON_SUMMARY_MAX_TOKENS,
+                num_retries=0,
+                max_retries=0,
+                timeout=60,
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
