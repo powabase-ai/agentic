@@ -4,6 +4,7 @@ import copy
 import json
 import logging
 import os
+import re
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -394,7 +395,7 @@ def get_text_of_pages(pdf_path, start_page, end_page, tag=True):
 
 def get_first_start_page_from_text(text):
     start_page = -1
-    start_page_match = re.search(r"<start_index_(\d+)>", text)  # noqa: F821
+    start_page_match = re.search(r"<start_index_(\d+)>", text)
     if start_page_match:
         start_page = int(start_page_match.group(1))
     return start_page
@@ -403,7 +404,7 @@ def get_first_start_page_from_text(text):
 def get_last_start_page_from_text(text):
     start_page = -1
     # Find all matches of start_index tags
-    start_page_matches = re.finditer(r"<start_index_(\d+)>", text)  # noqa: F821
+    start_page_matches = re.finditer(r"<start_index_(\d+)>", text)
     # Convert iterator to list and get the last match if any exist
     matches_list = list(start_page_matches)
     if matches_list:
