@@ -191,6 +191,9 @@ GRAPHINDEX_EMBEDDING_MODEL = "text-embedding-3-small"
 
 # Maximum number of concurrent LLM calls during referenced_nodes enrichment.
 GRAPHINDEX_ENRICHMENT_MAX_CONCURRENT = 7
+GRAPHINDEX_ENRICHMENT_BATCH_SIZE = (
+    50  # nodes per batch; bounds per-batch retained memory + billing granularity
+)
 
 # Maximum tokens for LLM response during referenced_nodes enrichment.
 GRAPHINDEX_ENRICHMENT_MAX_TOKENS = 5000
@@ -301,9 +304,9 @@ LIGHTON_TIMEOUT = 60  # seconds per page
 # =============================================================================
 # Global LiteLLM debug configuration
 # =============================================================================
-import os
+import os  # noqa: E402
 
-import litellm
+import litellm  # noqa: E402
 
 if os.environ.get("LITELLM_DEBUG", "").lower() in ("1", "true"):
     litellm._turn_on_debug()
