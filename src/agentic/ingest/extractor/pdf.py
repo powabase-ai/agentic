@@ -2,7 +2,7 @@
 PDFExtractor - extract text from PDF documents with fallback strategy.
 
 Adapted from proven implementation in agentic/etl/transformers/extractors/pdf.py.
-Uses fallback strategy: Mistral OCR → OpenDataLoader → PyMuPDF (fitz) → pdfplumber
+Uses fallback strategy: LightOnOCR → OpenDataLoader → PyMuPDF (fitz) → pdfplumber
 """
 
 import asyncio
@@ -75,13 +75,17 @@ class PDFExtractor(Extractor):
     PDF extraction with fallback strategy.
 
     Extraction methods (in order of preference):
-    1. Mistral OCR - Best for scanned PDFs (requires API key)
+    1. LightOnOCR - Default OCR head for scanned PDFs (auto mode; requires API key)
     2. OpenDataLoader - High-accuracy structural extraction (local, needs Java)
     3. PyMuPDF (fitz) - Fast, good for text-based PDFs
     4. pdfplumber - Fallback for edge cases
 
-    When an explicit cloud OCR method (mistral, paddleocr, lighton) fails,
-    extraction falls back to local methods (opendataloader → fitz → pdfplumber).
+    In auto mode LightOnOCR runs first as the default head (it is skipped when
+    no API key is configured), then falls back to the local chain
+    (opendataloader → fitz → pdfplumber). Mistral and PaddleOCR are available
+    only when explicitly requested. When an explicitly requested cloud OCR
+    method (mistral, paddleocr, lighton) fails, extraction falls back to those
+    same local methods.
 
     Example:
         >>> extractor = PDFExtractor()
@@ -314,9 +318,17 @@ class PDFExtractor(Extractor):
 
         # Auto mode — iterate fallback chain
         chain = list(EXTRACTION_FALLBACK_CHAIN)
-        # Skip mistral in the chain when no API key is configured
-        if not self.mistral_api_key and "mistral" in chain:
-            chain = [m for m in chain if m != "mistral"]
+        # Skip lighton in the chain when no API key is configured. lighton is the
+        # default OCR head, so make the skip observable: an operator who forgot to
+        # set LIGHTON_API_KEY would otherwise silently get the local-only chain
+        # (no OCR on scanned PDFs) with nothing in the logs to explain it.
+        if not self.lighton_api_key and "lighton" in chain:
+            logger.info(
+                "LIGHTON_API_KEY not configured; skipping lighton (the default OCR "
+                "head) and using the local fallback chain (opendataloader → fitz → "
+                "pdfplumber) instead"
+            )
+            chain = [m for m in chain if m != "lighton"]
 
         last_error: Exception | None = None
         for i, method in enumerate(chain):
@@ -337,7 +349,7 @@ class PDFExtractor(Extractor):
             f"All extraction methods failed. Last error: {last_error}",
             extractor_name=self.name,
             source_uri=raw.source_uri,
-        )
+        ) from last_error
 
     def _extract_opendataloader(self, raw: RawContent) -> ExtractionResult:
         """Extract using opendataloader-pdf — high-accuracy structural extraction.

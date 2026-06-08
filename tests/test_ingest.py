@@ -2,6 +2,7 @@
 Tests for the Content Ingestion module.
 """
 
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -831,14 +832,24 @@ class TestPDFExtractorOCRLocalFallback:
 
 
 class TestPDFExtractorAutoMode:
-    """Test that auto mode does NOT include paddleocr/lighton."""
+    """Test the auto-mode fallback chain: lighton-first, paddleocr/mistral excluded."""
 
     @pytest.mark.asyncio
-    async def test_auto_mode_skips_paddleocr_and_lighton(self):
-        """Auto mode should not try paddleocr or lighton methods."""
+    async def test_auto_mode_tries_lighton_first_then_skips_paddleocr_and_mistral(self):
+        """Auto mode must try lighton FIRST (the default OCR head this PR ships),
+        walk the local chain in order, and never reach paddleocr/mistral.
+
+        Asserting only the negatives (paddle/mistral not called) is not enough:
+        with every chain method patched-to-fail, a regression that dropped lighton
+        from the chain entirely would still raise "All extraction methods failed"
+        and still skip paddle/mistral — so the negative-only test would pass while
+        the headline change silently regressed. We therefore record call order and
+        assert lighton actually ran, and ran first.
+        """
         extractor = PDFExtractor(
             paddleocr_api_key="key",
             lighton_api_key="key",
+            mistral_api_key="key",
         )
         raw = RawContent(
             content=b"%PDF-1.4 fake",
@@ -847,17 +858,75 @@ class TestPDFExtractorAutoMode:
             metadata={"extraction_model": "auto"},
         )
 
-        # All fallback methods should fail, but paddleocr/lighton should NOT be tried
-        with patch.object(extractor, "_extract_opendataloader", side_effect=Exception("odl fail")), \
-             patch.object(extractor, "_extract_fitz", side_effect=Exception("fitz fail")), \
-             patch.object(extractor, "_extract_pdfplumber", side_effect=Exception("plumber fail")), \
+        call_order: list[str] = []
+
+        def _record(name):
+            # Raise ExtractionError (re-raised without retry) so each method is
+            # invoked exactly once and the call order is unambiguous.
+            def _fail(*args, **kwargs):
+                call_order.append(name)
+                raise ExtractionError(
+                    f"{name} fail", extractor_name="pdf", source_uri="upload://test.pdf"
+                )
+            return _fail
+
+        with patch.object(extractor, "_extract_lighton", side_effect=_record("lighton")) as mock_lighton, \
+             patch.object(extractor, "_extract_opendataloader", side_effect=_record("opendataloader")), \
+             patch.object(extractor, "_extract_fitz", side_effect=_record("fitz")), \
+             patch.object(extractor, "_extract_pdfplumber", side_effect=_record("pdfplumber")), \
              patch.object(extractor, "_extract_paddleocr") as mock_paddle, \
-             patch.object(extractor, "_extract_lighton") as mock_lighton:
+             patch.object(extractor, "_extract_mistral") as mock_mistral:
             with pytest.raises(ExtractionError, match="All extraction methods failed"):
                 await extractor.extract(raw)
 
+        # The change this PR ships: lighton is the head and is tried first.
+        mock_lighton.assert_called_once()
+        assert call_order == ["lighton", "opendataloader", "fitz", "pdfplumber"]
+        # paddleocr/mistral are explicit-only — never reached in auto mode.
         mock_paddle.assert_not_called()
+        mock_mistral.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_auto_mode_strips_lighton_when_no_key(self, caplog):
+        """Without LIGHTON_API_KEY, auto mode skips lighton and proceeds to the
+        local chain — but the skip is observable (INFO log), not silent.
+
+        lighton is the advertised default head; an operator who forgets the key
+        must not silently get local-only output (no OCR on scanned PDFs) with
+        nothing in the logs. The skip is an expected condition, so it is logged
+        at INFO, not escalated to WARNING/ERROR.
+        """
+        extractor = PDFExtractor()  # no lighton_api_key
+        raw = RawContent(
+            content=b"%PDF-1.4 fake",
+            mime_type="application/pdf",
+            source_uri="upload://test.pdf",
+            metadata={"extraction_model": "auto"},
+        )
+
+        mock_result = ExtractionResult(
+            source_uri="upload://test.pdf",
+            mime_type="application/pdf",
+            derivatives=[Derivative(type="markdown", content="odl text")],
+            extraction_method="opendataloader",
+        )
+
+        with caplog.at_level(logging.INFO):
+            with patch.object(extractor, "_extract_lighton") as mock_lighton, \
+                 patch.object(extractor, "_extract_opendataloader", return_value=mock_result):
+                result = await extractor.extract(raw)
+
+        # lighton is dropped from the chain — never invoked — and opendataloader
+        # becomes the head.
         mock_lighton.assert_not_called()
+        assert result.extraction_method == "opendataloader"
+        # The skip is logged at INFO and explains itself...
+        assert any(
+            r.levelno == logging.INFO and "lighton" in r.message.lower()
+            for r in caplog.records
+        )
+        # ...and is NOT escalated to a warning/error (it is an expected config).
+        assert not any(r.levelno >= logging.WARNING for r in caplog.records)
 
 
 class TestDocxExtractor:
@@ -950,7 +1019,7 @@ class TestPptxExtractor:
             source_uri="upload://slides.pptx",
             mime_type="application/pdf",
             derivatives=[Derivative(type="text", content="Slide content")],
-            extraction_method="pdf-mistral-ocr",
+            extraction_method="pdf-lighton-ocr",
         )
         mock_pdf_extractor.extract = AsyncMock(return_value=mock_pdf_result)
 
@@ -975,7 +1044,7 @@ class TestPptxExtractor:
         # Verify result is tagged correctly
         assert result.extraction_method == "pptx-via-pdf"
         assert result.mime_type == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-        assert result.auto_metadata["pdf_extraction_method"] == "pdf-mistral-ocr"
+        assert result.auto_metadata["pdf_extraction_method"] == "pdf-lighton-ocr"
 
     @pytest.mark.asyncio
     async def test_pptx_convert_to_pdf_libreoffice_not_found(self):

@@ -279,8 +279,8 @@ AGENT_DEFAULT_MODEL = "gpt-4o-mini"
 EXTRACTION_DEFAULT_METHOD = "auto"  # "auto", "mistral", "opendataloader", "paddleocr", "lighton", "fitz", "pdfplumber"
 
 # Ordered fallback chain used when extraction_model is "auto".
-# paddleocr and lighton are NOT in the chain — user-selectable only.
-EXTRACTION_FALLBACK_CHAIN = ["mistral", "opendataloader", "fitz", "pdfplumber"]
+# paddleocr and mistral are NOT in the chain — user-selectable only.
+EXTRACTION_FALLBACK_CHAIN = ["lighton", "opendataloader", "fitz", "pdfplumber"]
 
 # --- PaddleOCR-VL configuration ---
 PADDLEOCR_DEFAULT_BASE_URL = "https://s1naa1u9e7v9f7ub.aistudio-app.com"
