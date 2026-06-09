@@ -56,7 +56,8 @@ async def test_reasoning_effort_for_anthropic_passes_top_level():
 @pytest.mark.asyncio
 async def test_reasoning_effort_for_openai_routes_through_responses():
     """For OpenAI reasoning models, the model is rewritten to the Responses
-    bridge and the effort is packed into extra_body.reasoning."""
+    bridge and the effort is packed into extra_body.reasoning. No summary is
+    requested by default (unverified OpenAI orgs 400 on summary requests)."""
     init_reasoning_effort("low")
     with (
         patch(
@@ -67,12 +68,36 @@ async def test_reasoning_effort_for_openai_routes_through_responses():
             "agentic.llm.routing.litellm.supports_reasoning",
             return_value=True,
         ),
+        # Hermetic: force summary-off regardless of ambient env.
+        patch.dict("os.environ", {"OPENAI_REASONING_SUMMARY": ""}),
     ):
         await _llm_completion(model="openai/gpt-5-mini", prompt="hi")
     kwargs = mock_acompletion.await_args.kwargs
     # Top-level reasoning_effort must be absent (would be silently dropped
     # on the Responses bridge per routing.py docstring).
     assert "reasoning_effort" not in kwargs
+    assert kwargs["model"] == "openai/responses/gpt-5-mini"
+    assert kwargs["extra_body"] == {"reasoning": {"effort": "low"}}
+
+
+@pytest.mark.asyncio
+async def test_reasoning_effort_for_openai_includes_summary_when_opted_in():
+    """With OPENAI_REASONING_SUMMARY=1 (verified org), the summary is requested
+    again so the reasoning-display UI gets summary text."""
+    init_reasoning_effort("low")
+    with (
+        patch(
+            "agentic.knowledge.indexing._pageindex_lib.utils.litellm.acompletion",
+            new=AsyncMock(return_value=_fake_response()),
+        ) as mock_acompletion,
+        patch(
+            "agentic.llm.routing.litellm.supports_reasoning",
+            return_value=True,
+        ),
+        patch.dict("os.environ", {"OPENAI_REASONING_SUMMARY": "1"}),
+    ):
+        await _llm_completion(model="openai/gpt-5-mini", prompt="hi")
+    kwargs = mock_acompletion.await_args.kwargs
     assert kwargs["model"] == "openai/responses/gpt-5-mini"
     assert kwargs["extra_body"] == {
         "reasoning": {"effort": "low", "summary": "detailed"}

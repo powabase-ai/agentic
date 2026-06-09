@@ -52,14 +52,18 @@ def test_anthropic_passes_reasoning_effort_at_top_level():
 
 def test_openai_routes_through_responses_with_packed_extra_body():
     """OpenAI reasoning models get rerouted to openai/responses/<model>.
-    Effort and summary are packed into extra_body['reasoning']. Top-level
-    reasoning_effort must NOT be set (LiteLLM 1.83.14 bug avoidance)."""
+    Effort is packed into extra_body['reasoning']; by default NO summary is
+    requested (unverified OpenAI orgs 400 on reasoning-summary requests).
+    Top-level reasoning_effort must NOT be set (LiteLLM 1.83.14 bug avoidance)."""
     with (
         patch("litellm.supports_reasoning", return_value=True),
         patch(
             "agentic.agent.agent.litellm.completion", return_value=_make_response()
         ) as mock_completion,
-        patch.dict("os.environ", {"AGENT_LLM_STREAMING_ENABLED": "false"}),
+        patch.dict(
+            "os.environ",
+            {"AGENT_LLM_STREAMING_ENABLED": "false", "OPENAI_REASONING_SUMMARY": ""},
+        ),
     ):
         agent = Agent(
             model="openai/gpt-5.4",
@@ -69,11 +73,31 @@ def test_openai_routes_through_responses_with_packed_extra_body():
 
     call_kwargs = mock_completion.call_args.kwargs
     assert call_kwargs["model"] == "openai/responses/gpt-5.4"
+    assert call_kwargs["extra_body"] == {"reasoning": {"effort": "medium"}}
+    # Critical: NO top-level reasoning_effort on the Responses path
+    assert "reasoning_effort" not in call_kwargs
+
+
+def test_openai_responses_includes_summary_when_opted_in():
+    """With OPENAI_REASONING_SUMMARY=1 (verified org), the summary is requested
+    again so the reasoning-display UI gets summary text."""
+    with (
+        patch("litellm.supports_reasoning", return_value=True),
+        patch(
+            "agentic.agent.agent.litellm.completion", return_value=_make_response()
+        ) as mock_completion,
+        patch.dict(
+            "os.environ",
+            {"AGENT_LLM_STREAMING_ENABLED": "false", "OPENAI_REASONING_SUMMARY": "1"},
+        ),
+    ):
+        agent = Agent(model="openai/gpt-5.4", reasoning_effort="medium")
+        agent.run("hi", context=ExecutionContext())
+
+    call_kwargs = mock_completion.call_args.kwargs
     assert call_kwargs["extra_body"] == {
         "reasoning": {"effort": "medium", "summary": "detailed"}
     }
-    # Critical: NO top-level reasoning_effort on the Responses path
-    assert "reasoning_effort" not in call_kwargs
 
 
 def test_no_reasoning_effort_means_no_routing_no_extra_body():

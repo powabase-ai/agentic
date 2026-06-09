@@ -1,5 +1,6 @@
 """Tests for per-call routing helpers."""
 
+import os
 from unittest.mock import patch
 
 from agentic.llm.routing import (
@@ -145,19 +146,41 @@ def test_call_kwargs_for_openai_chat_completions_uses_top_level_effort():
     }
 
 
-def test_call_kwargs_for_responses_path_packs_effort_and_summary_in_extra_body():
-    """Responses-routed models MUST use extra_body['reasoning'] for both effort
-    and summary. Top-level reasoning_effort is silently dropped on the
-    Responses path in litellm 1.83.14 — verified empirically in A0.1."""
-    assert reasoning_call_kwargs("medium", "openai/responses/gpt-5.4") == {
-        "extra_body": {"reasoning": {"effort": "medium", "summary": "detailed"}}
-    }
+def test_call_kwargs_for_responses_path_packs_effort_only_by_default():
+    """Responses-routed models put effort in extra_body['reasoning']. By
+    default NO summary is requested: OpenAI rejects reasoning-summary requests
+    from unverified orgs with HTTP 400 ("Your organization must be verified to
+    generate reasoning summaries"), which would fail the whole call for every
+    OpenAI reasoning model. Top-level reasoning_effort is still omitted (it is
+    silently dropped on the Responses path in litellm 1.83.14 — A0.1)."""
+    with patch.dict(os.environ, {"OPENAI_REASONING_SUMMARY": ""}):
+        assert reasoning_call_kwargs("medium", "openai/responses/gpt-5.4") == {
+            "extra_body": {"reasoning": {"effort": "medium"}}
+        }
 
 
-def test_call_kwargs_for_azure_responses_path():
-    assert reasoning_call_kwargs("low", "azure/responses/my-deployment") == {
-        "extra_body": {"reasoning": {"effort": "low", "summary": "detailed"}}
-    }
+def test_call_kwargs_for_azure_responses_path_effort_only_by_default():
+    with patch.dict(os.environ, {"OPENAI_REASONING_SUMMARY": ""}):
+        assert reasoning_call_kwargs("low", "azure/responses/my-deployment") == {
+            "extra_body": {"reasoning": {"effort": "low"}}
+        }
+
+
+def test_call_kwargs_responses_path_includes_summary_when_opted_in():
+    """Verified-org deployments can re-enable reasoning summaries (for the
+    reasoning-display UI) via OPENAI_REASONING_SUMMARY=1."""
+    with patch.dict(os.environ, {"OPENAI_REASONING_SUMMARY": "1"}):
+        assert reasoning_call_kwargs("medium", "openai/responses/gpt-5.4") == {
+            "extra_body": {"reasoning": {"effort": "medium", "summary": "detailed"}}
+        }
+
+
+def test_call_kwargs_responses_path_summary_opt_in_truthy_values():
+    for val in ("true", "TRUE", "yes", "on"):
+        with patch.dict(os.environ, {"OPENAI_REASONING_SUMMARY": val}):
+            assert reasoning_call_kwargs("high", "openai/responses/gpt-5.4") == {
+                "extra_body": {"reasoning": {"effort": "high", "summary": "detailed"}}
+            }
 
 
 def test_call_kwargs_does_not_set_top_level_effort_on_responses_path():

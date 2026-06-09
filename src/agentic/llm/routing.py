@@ -13,12 +13,24 @@ is passed; no transformation needed.
 A0 verification (Task 1) revealed a LiteLLM 1.83.14 quirk: when going through
 the Responses bridge, passing `reasoning_effort` at the top level is silently
 dropped from the outgoing request. The verified working pattern is to pack
-both `effort` and `summary` into `extra_body['reasoning']` and to NOT pass
-top-level reasoning_effort on the Responses path. `reasoning_call_kwargs`
-returns the right shape per route.
+the `effort` into `extra_body['reasoning']` and to NOT pass top-level
+reasoning_effort on the Responses path. `reasoning_call_kwargs` returns the
+right shape per route.
+
+Reasoning *summaries* are NOT requested by default. OpenAI only returns
+reasoning summaries (`reasoning.summary`) for org-verified accounts; an
+unverified org gets HTTP 400 "Your organization must be verified to generate
+reasoning summaries" — which fails the entire call for EVERY OpenAI reasoning
+model (o-series and the gpt-5 families) whenever reasoning_effort is set.
+Since this platform is multi-tenant BYOK and most orgs are unverified, we omit
+the summary request by default. Deployments whose OpenAI org is verified can
+opt back in (to surface reasoning summaries in the UI) by setting the env var
+``OPENAI_REASONING_SUMMARY=1``.
 """
 
 from __future__ import annotations
+
+import os
 
 import litellm
 
@@ -68,26 +80,41 @@ def maybe_route_through_responses(model: str, reasoning_effort: str | None) -> s
     return f"{provider}/responses/{model}"
 
 
+def _reasoning_summary_enabled() -> bool:
+    """Whether to request an OpenAI Responses reasoning *summary*.
+
+    Off by default — requesting a summary from an OpenAI org that isn't
+    verified fails the whole call with HTTP 400 ("Your organization must be
+    verified to generate reasoning summaries"). Verified-org deployments can
+    opt in via ``OPENAI_REASONING_SUMMARY`` (1/true/yes/on).
+    """
+    return os.getenv("OPENAI_REASONING_SUMMARY", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def reasoning_call_kwargs(reasoning_effort: str | None, model: str) -> dict:
     """Return the kwargs dict to merge into litellm.completion(...) for
     requesting reasoning from this model.
 
     For non-Responses paths: {"reasoning_effort": effort}
-    For Responses paths:     {"extra_body": {"reasoning": {"effort": effort, "summary": "detailed"}}}
+    For Responses paths:     {"extra_body": {"reasoning": {"effort": effort}}}
+                             (plus "summary": "detailed" iff opt-in — see
+                             _reasoning_summary_enabled)
 
     The Responses-path packing is required because litellm 1.83.14 silently
     drops top-level `reasoning_effort` when the call routes through the
-    Responses bridge. Verified empirically in A0.1.
+    Responses bridge. Verified empirically in A0.1. The summary is omitted by
+    default to avoid the unverified-org 400 (see module docstring).
     """
     if reasoning_effort is None:
         return {}
     if "/responses/" in model:
-        return {
-            "extra_body": {
-                "reasoning": {
-                    "effort": reasoning_effort,
-                    "summary": "detailed",
-                }
-            }
-        }
+        reasoning: dict[str, str] = {"effort": reasoning_effort}
+        if _reasoning_summary_enabled():
+            reasoning["summary"] = "detailed"
+        return {"extra_body": {"reasoning": reasoning}}
     return {"reasoning_effort": reasoning_effort}
