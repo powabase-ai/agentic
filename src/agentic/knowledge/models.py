@@ -96,6 +96,10 @@ class RetrievalConfig:
         similarity_threshold: Minimum similarity score (0.0 to 1.0)
         filter_metadata: Optional metadata filters for narrowing results
         reranker: Optional reranker config for post-retrieval re-scoring
+        min_per_source: Diversity floor — guarantee each matched source contributes
+            at least this many items before any source gets extra (None/0 disables)
+        max_per_source: Hard cap — at most this many items from any one source
+            (None/0 disables)
         extra: Additional method-specific configuration
     """
 
@@ -104,6 +108,8 @@ class RetrievalConfig:
     similarity_threshold: float = 0.0
     filter_metadata: dict[str, Any] | None = None
     reranker: RerankerConfig | None = None
+    min_per_source: int | None = None
+    max_per_source: int | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 

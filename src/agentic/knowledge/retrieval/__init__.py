@@ -29,6 +29,7 @@ Example:
 
 from agentic.knowledge.retrieval.base import RetrievalAlgorithm
 from agentic.knowledge.retrieval.bm25 import bm25_score, parse_tsvector
+from agentic.knowledge.retrieval.diversity import apply_source_limits
 from agentic.knowledge.retrieval.fusion import reciprocal_rank_fusion
 from agentic.knowledge.retrieval.tree_search import SelectedNode, TreeSearchAlgorithm
 from agentic.knowledge.retrieval.vector_search import (
@@ -45,6 +46,7 @@ __all__ = [
     "TreeSearchAlgorithm",
     "SelectedNode",
     "reciprocal_rank_fusion",
+    "apply_source_limits",
     "bm25_score",
     "parse_tsvector",
 ]
