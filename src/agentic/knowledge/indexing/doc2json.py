@@ -39,6 +39,7 @@ from agentic.knowledge.model_config import (
     DOC2JSON_USE_IMAGES,
 )
 from agentic.knowledge.models import IndexingConfig
+from agentic.llm.routing import reasoning_call_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +221,7 @@ class Doc2JSONAlgorithm(IndexingAlgorithm):
         json_schema: dict,
         current_json: dict,
         model: str,
+        reasoning_effort: str | None = None,
     ) -> tuple[str, dict, int]:
         """Process a window of page images: extract summary and JSON fields.
 
@@ -310,6 +312,7 @@ Analyze the page images below and extract the relevant information."""
                     num_retries=0,
                     max_retries=0,
                     timeout=60,
+                    **reasoning_call_kwargs(reasoning_effort, model),
                 )
 
                 raw = response.choices[0].message.content.strip()
@@ -376,6 +379,11 @@ Analyze the page images below and extract the relevant information."""
         raw_schema = extra.get("json_schema", {"fields": []})
         json_schema = self._normalize_schema(raw_schema)
         model = extra.get("extraction_model", extra.get("model", self.model))
+        # Optional extended-reasoning budget for the extraction/summary LLM
+        # calls. Passed as a top-level reasoning_effort kwarg (drop_params=True
+        # makes non-reasoning models ignore it); not routed through the OpenAI
+        # Responses bridge so it stays compatible with response_format.
+        reasoning_effort = extra.get("reasoning_effort")
 
         # Check for image-based processing mode
         use_images = extra.get("use_images", self.use_images)
@@ -424,6 +432,7 @@ Analyze the page images below and extract the relevant information."""
                         json_schema=json_schema,
                         current_json=extracted_json,
                         model=model,
+                        reasoning_effort=reasoning_effort,
                     )
 
                     extracted_json = self._merge_json(extracted_json, extraction)
@@ -497,6 +506,7 @@ Analyze the page images below and extract the relevant information."""
                         json_schema=json_schema,
                         current_json=extracted_json,
                         model=model,
+                        reasoning_effort=reasoning_effort,
                     )
 
                     extracted_json = self._merge_json(extracted_json, extraction)
@@ -545,6 +555,7 @@ Analyze the page images below and extract the relevant information."""
             extracted_json=extracted_json,
             json_schema=json_schema,
             model=model,
+            reasoning_effort=reasoning_effort,
         )
 
         # Embed combined summary
@@ -599,6 +610,7 @@ Analyze the page images below and extract the relevant information."""
         json_schema: dict,
         current_json: dict,
         model: str,
+        reasoning_effort: str | None = None,
     ) -> tuple[str, dict, int]:
         """
         Process a single window: extract summary and JSON fields.
@@ -677,6 +689,7 @@ Return a JSON object with exactly two keys:
                     num_retries=0,
                     max_retries=0,
                     timeout=60,
+                    **reasoning_call_kwargs(reasoning_effort, model),
                 )
 
                 raw = response.choices[0].message.content.strip()
@@ -937,6 +950,7 @@ Return a JSON object with exactly two keys:
         extracted_json: dict,
         json_schema: dict,
         model: str,
+        reasoning_effort: str | None = None,
     ) -> str:
         """Generate a combined summary from all window summaries."""
         # Collect non-empty summaries
@@ -978,6 +992,8 @@ Generate a concise summary that captures the most important information from thi
                 num_retries=0,
                 max_retries=0,
                 timeout=60,
+                drop_params=True,
+                **reasoning_call_kwargs(reasoning_effort, model),
             )
             return response.choices[0].message.content.strip()
         except Exception as e:

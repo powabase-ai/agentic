@@ -117,6 +117,8 @@ __all__ = [
     "PAGEINDEX_MIN_TOKEN_THRESHOLD",
     "PAGEINDEX_SUMMARY_TOKEN_THRESHOLD",
     "PAGEINDEX_LLM_MAX_CONCURRENT",
+    "PAGEINDEX_LLM_NUM_RETRIES",
+    "PAGEINDEX_LLM_TIMEOUT",
 ]
 
 # Lazy imports for PDF-only dependencies (not needed for md_to_tree path)
@@ -178,9 +180,9 @@ async def _llm_completion(
             messages=messages,
             temperature=temperature,
             drop_params=True,
-            num_retries=0,
+            num_retries=PAGEINDEX_LLM_NUM_RETRIES,
             max_retries=0,
-            timeout=60,
+            timeout=PAGEINDEX_LLM_TIMEOUT,
             metadata={"stage": "tree"},
             **extra,
         )
@@ -931,6 +933,8 @@ from agentic.knowledge.model_config import (  # noqa: E402
     PAGEINDEX_DOC_DESCRIPTION_MAX_TOKENS,
     PAGEINDEX_INDEXING_MODEL,
     PAGEINDEX_LLM_MAX_CONCURRENT,
+    PAGEINDEX_LLM_NUM_RETRIES,
+    PAGEINDEX_LLM_TIMEOUT,
     PAGEINDEX_MAX_NODE_TOKENS,
     PAGEINDEX_MAX_PAGE_NUM_EACH_NODE,
     PAGEINDEX_MAX_TOKEN_NUM_EACH_NODE,

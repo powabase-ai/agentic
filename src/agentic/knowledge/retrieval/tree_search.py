@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass
 
 from agentic.knowledge.model_config import PAGEINDEX_RETRIEVAL_MODEL
+from agentic.llm.routing import maybe_route_through_responses, reasoning_call_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +245,9 @@ class TreeSearchAlgorithm:
         """
         config = config or {}
         retrieval_model = config.get("retrieval_model", PAGEINDEX_RETRIEVAL_MODEL)
+        reasoning_effort = config.get("retrieval_reasoning_effort")
+        routed_model = maybe_route_through_responses(retrieval_model, reasoning_effort)
+        reasoning_kwargs = reasoning_call_kwargs(reasoning_effort, routed_model)
 
         # Build compact summaries
         summaries = []
@@ -268,11 +272,12 @@ If all documents seem relevant, include all of them. If none seem relevant, retu
 
         try:
             response = await litellm.acompletion(
-                model=retrieval_model,
+                model=routed_model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
                 drop_params=True,
                 num_retries=3,
+                **reasoning_kwargs,
             )
 
             response_text = response.choices[0].message.content or ""
@@ -329,6 +334,9 @@ If all documents seem relevant, include all of them. If none seem relevant, retu
 
         config = config or {}
         retrieval_model = config.get("retrieval_model", PAGEINDEX_RETRIEVAL_MODEL)
+        reasoning_effort = config.get("retrieval_reasoning_effort")
+        routed_model = maybe_route_through_responses(retrieval_model, reasoning_effort)
+        reasoning_kwargs = reasoning_call_kwargs(reasoning_effort, routed_model)
         top_k = config.get("top_k", 5)
 
         # Build condensed views with document-scoped node ID prefixes.
@@ -362,11 +370,12 @@ Return the most relevant node IDs as a JSON array:"""
 
         try:
             response = await litellm.acompletion(
-                model=retrieval_model,
+                model=routed_model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
                 drop_params=True,
                 num_retries=3,
+                **reasoning_kwargs,
             )
             response_text = response.choices[0].message.content or ""
         except Exception as e:

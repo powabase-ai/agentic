@@ -310,3 +310,64 @@ import litellm  # noqa: E402
 
 if os.environ.get("LITELLM_DEBUG", "").lower() in ("1", "true"):
     litellm._turn_on_debug()
+
+# -----------------------------------------------------------------------------
+# Disable LiteLLM's aiohttp transport (default-on since ~1.74; we run 1.83.14).
+# -----------------------------------------------------------------------------
+# The aiohttp transport caches a ClientSession/connector bound to the event loop
+# it was first created on. Indexing runs inside Celery tasks via asyncio.run(),
+# which creates a FRESH event loop per task — so once a worker has handled a
+# task, the cached session is bound to a now-dead loop and the next
+# litellm.acompletion fails instantly ("Timeout on reading data from socket",
+# time taken=0.0s, "coroutine ... was never awaited"). Combined with
+# num_retries=0 in the PageIndex pipeline, one stale-session blip fails the
+# whole indexing job. Disabling the aiohttp transport falls back to httpx, which
+# builds per-request clients and is event-loop-safe across asyncio.run() calls.
+# Set LITELLM_AIOHTTP_TRANSPORT=1 to re-enable aiohttp if a future litellm fixes
+# the loop affinity and we want the perf back. The hasattr guard avoids silently
+# creating a dead attribute if litellm ever renames the flag — that rename is
+# caught loudly by test_model_config_resiliency.py (which asserts the attribute
+# exists), so this degrades gracefully in prod while CI fails on the regression.
+if (
+    hasattr(litellm, "disable_aiohttp_transport")
+    and os.environ.get("LITELLM_AIOHTTP_TRANSPORT", "").lower() not in ("1", "true")
+):
+    litellm.disable_aiohttp_transport = True
+
+
+# -----------------------------------------------------------------------------
+# PageIndex / GraphIndex LLM call resiliency
+# -----------------------------------------------------------------------------
+def _int_env(name: str, default: int) -> int:
+    """Parse an int env var, falling back to *default* (with a warning) on a
+    malformed value rather than raising at import time. These constants live in
+    a foundational module imported by ~all of agentic.knowledge (retrieval,
+    chat, query enrichment — not just indexing), so a bad operator-set value
+    must not take the whole module down."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Invalid %s=%r (not an int); falling back to %d", name, raw, default
+        )
+        return default
+
+
+# Per-call timeout (seconds) for the tree-building / ToC / summary LLM calls in
+# _pageindex_lib/utils.py::_llm_completion. The previous hardcoded 60s was too
+# low for reasoning models (gpt-5* / o-series) doing large ToC extraction on big
+# documents — they legitimately take 60-90s+, which tripped litellm.Timeout and,
+# with num_retries=0 (PR #445), failed the ENTIRE indexing job on a single slow
+# response. Env-overridable: PAGEINDEX_LLM_TIMEOUT.
+PAGEINDEX_LLM_TIMEOUT = _int_env("PAGEINDEX_LLM_TIMEOUT", 300)
+
+# litellm retry count for those calls. Default 1 gives a single retry on a
+# transient timeout/5xx without the unbounded re-send of PR #445's original 3
+# (each retry re-sends a large prompt — the bounded-memory concern). Set to 0 to
+# fully restore #445's no-retry behavior. Env-overridable: PAGEINDEX_LLM_NUM_RETRIES.
+PAGEINDEX_LLM_NUM_RETRIES = _int_env("PAGEINDEX_LLM_NUM_RETRIES", 1)
