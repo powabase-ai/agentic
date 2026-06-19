@@ -104,6 +104,8 @@ class PDFExtractor(Extractor):
         paddleocr_base_url: str | None = None,
         lighton_api_key: str | None = None,
         lighton_base_url: str | None = None,
+        llamaparse_api_key: str | None = None,
+        llamaparse_base_url: str | None = None,
         max_pages: int = 1000,
     ):
         """
@@ -115,6 +117,8 @@ class PDFExtractor(Extractor):
             paddleocr_base_url: Base URL for PaddleOCR-VL API (optional)
             lighton_api_key: API key for LightOnOCR (optional)
             lighton_base_url: Base URL for LightOnOCR API (optional)
+            llamaparse_api_key: API key for LlamaParse / LlamaCloud (optional)
+            llamaparse_base_url: Base URL for LlamaParse API (optional)
             max_pages: Maximum pages per Mistral OCR API call (batch size)
         """
         self.mistral_api_key = mistral_api_key
@@ -122,6 +126,8 @@ class PDFExtractor(Extractor):
         self.paddleocr_base_url = paddleocr_base_url
         self.lighton_api_key = lighton_api_key
         self.lighton_base_url = lighton_base_url
+        self.llamaparse_api_key = llamaparse_api_key
+        self.llamaparse_base_url = llamaparse_base_url
         self.max_pages = max_pages
 
     def _render_page_images(self, raw: RawContent, dpi: int = 150) -> list[Derivative]:
@@ -249,6 +255,18 @@ class PDFExtractor(Extractor):
             raise ExtractionError(
                 "LightOnOCR failed", extractor_name=self.name, source_uri=raw.source_uri
             )
+        elif method == "llamaparse":
+            if not self.llamaparse_api_key:
+                raise ExtractionError(
+                    "LlamaParse requested but LLAMAPARSE_API_KEY is not configured",
+                    extractor_name=self.name,
+                    source_uri=raw.source_uri,
+                )
+            # Deliberately NO outer retry loop here: parse_pages already retries
+            # the poll/result GETs against the SAME job internally. Retrying the
+            # whole flow would re-upload and start a NEW billable parse job on
+            # every transient error (up to 3 charges for one extraction).
+            return await self._extract_llamaparse(raw)
         elif method == "opendataloader":
             return self._extract_opendataloader(raw)
         elif method == "fitz":
@@ -930,6 +948,54 @@ class PDFExtractor(Extractor):
                 "char_count": len(fulltext),
             },
             extraction_method="lighton_ocr",
+            stats={"pages_processed": len(page_markdowns)},
+        )
+
+    async def _extract_llamaparse(self, raw: RawContent) -> ExtractionResult:
+        """Extract using LlamaParse (LlamaCloud) — advanced OCR for complex PDFs.
+
+        Delegates the v2 "Agentic Plus" parse to the shared LlamaParse client and
+        builds page_text + markdown derivatives plus rendered page images.
+        """
+        from agentic.ingest.extractor.llamaparse import parse_pages
+
+        pages = await parse_pages(
+            raw.content,
+            api_key=self.llamaparse_api_key,
+            base_url=self.llamaparse_base_url,
+            source_uri=raw.source_uri,
+            extractor_name=self.name,
+            mime_type=raw.mime_type,
+        )
+
+        page_markdowns = [p["markdown"] for p in pages]
+        page_text_derivs = [
+            Derivative(type="page_text", content=p["markdown"], format="plain", page=p["page_number"])
+            for p in pages
+        ]
+
+        fulltext = "\n\n".join(page_markdowns)
+
+        derivatives = [
+            Derivative(
+                type="markdown",
+                content=fulltext,
+                format="markdown",
+            ),
+        ]
+        derivatives.extend(page_text_derivs)
+        # Render page images for image-mode retrieval (consistent with other methods)
+        derivatives.extend(self._render_page_images(raw))
+
+        return ExtractionResult(
+            source_uri=raw.source_uri,
+            mime_type=raw.mime_type,
+            derivatives=derivatives,
+            auto_metadata={
+                "page_count": len(page_markdowns),
+                "char_count": len(fulltext),
+            },
+            extraction_method="llamaparse_ocr",
             stats={"pages_processed": len(page_markdowns)},
         )
 

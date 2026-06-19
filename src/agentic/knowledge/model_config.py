@@ -10,6 +10,8 @@ Frontend defaults (knowledge-bases/page.tsx, [kb_id]/page.tsx,
 constants.ts) must be updated separately to match.
 """
 
+import os
+
 # Indexing: tree building, ToC detection, summary generation, section splitting
 PAGEINDEX_INDEXING_MODEL = "gpt-5-mini"
 
@@ -276,10 +278,10 @@ AGENT_DEFAULT_MODEL = "gpt-4o-mini"
 # Extraction defaults
 # =============================================================================
 # Default extraction method for PDFs. "auto" uses the fallback chain below.
-EXTRACTION_DEFAULT_METHOD = "auto"  # "auto", "mistral", "opendataloader", "paddleocr", "lighton", "fitz", "pdfplumber"
+EXTRACTION_DEFAULT_METHOD = "auto"  # "auto", "mistral", "opendataloader", "paddleocr", "lighton", "llamaparse", "fitz", "pdfplumber"
 
 # Ordered fallback chain used when extraction_model is "auto".
-# paddleocr and mistral are NOT in the chain — user-selectable only.
+# paddleocr, mistral and llamaparse are NOT in the chain — user-selectable only.
 EXTRACTION_FALLBACK_CHAIN = ["lighton", "opendataloader", "fitz", "pdfplumber"]
 
 # --- PaddleOCR-VL configuration ---
@@ -300,12 +302,32 @@ LIGHTON_TEMPERATURE = 0.2
 LIGHTON_TOP_P = 0.9
 LIGHTON_TIMEOUT = 60  # seconds per page
 
+# --- LlamaParse (LlamaCloud) configuration ---
+# Uses the v2 Parse API with the most-advanced "Agentic Plus" tier (the standard
+# for advanced OCR). Flow: upload file -> get file_id, POST /api/v2/parse with
+# the tier, poll the job, then fetch per-page markdown. User-selectable only
+# ("llamaparse"); billed as advanced OCR. agentic_plus = 45 credits/page
+# ($0.05625 at $1.25/1k credits) — the cost basis the advanced_ocr price is set
+# against. (NOTE: v1 parse_document_with_agent is 90 credits/page — do NOT use
+# it, it would double the cost.)
+LLAMAPARSE_DEFAULT_BASE_URL = "https://api.cloud.llamaindex.ai"
+LLAMAPARSE_TIER = "agentic_plus"  # most advanced tier; v2 auto-selects the model
+# Pinned to a dated agentic_plus version so output schema + COGS stay reproducible
+# (the 2x markup is anchored to the current tier cost; "latest" would let upstream
+# re-tier our COGS silently). Override via the LLAMAPARSE_VERSION env when bumping
+# — an invalid value makes the API echo the list of valid versions in its 4xx body.
+LLAMAPARSE_VERSION = os.getenv("LLAMAPARSE_VERSION", "2026-06-11")
+LLAMAPARSE_TIMEOUT = 120  # seconds per HTTP request
+LLAMAPARSE_POLL_INTERVAL = 5  # seconds between job-status polls
+# agentic_plus (full-document agent + LVM) is slow on large docs. The Celery
+# extraction task allows up to 6h, so give the job generous headroom rather than
+# spuriously timing out and falling back to local extraction.
+LLAMAPARSE_MAX_POLL_SECONDS = 1800  # 30 min
+
 
 # =============================================================================
 # Global LiteLLM debug configuration
 # =============================================================================
-import os  # noqa: E402
-
 import litellm  # noqa: E402
 
 if os.environ.get("LITELLM_DEBUG", "").lower() in ("1", "true"):

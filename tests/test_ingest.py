@@ -21,6 +21,7 @@ from agentic.ingest import (
     RawContent,
     TextExtractor,
 )
+from agentic.ingest.extractor.image import ImageExtractor
 from agentic.ingest.extractor.pptx import PptxExtractor
 from agentic.ingest.extractor.xlsx import XlsxExtractor
 
@@ -674,6 +675,263 @@ class TestPDFExtractorLightOnOCR:
                 await extractor.extract(raw)
 
 
+class TestPDFExtractorLlamaParse:
+    """Tests for PDFExtractor LlamaParse method."""
+
+    def test_llamaparse_requires_api_key(self):
+        """LlamaParse should fail without API key."""
+        extractor = PDFExtractor()
+        raw = RawContent(
+            content=b"%PDF-1.4 fake",
+            mime_type="application/pdf",
+            source_uri="upload://test.pdf",
+            metadata={"extraction_model": "llamaparse"},
+        )
+        with pytest.raises(ExtractionError, match="LLAMAPARSE_API_KEY"):
+            import asyncio
+            asyncio.get_event_loop().run_until_complete(extractor.extract(raw))
+
+    @pytest.mark.asyncio
+    async def test_llamaparse_extraction(self):
+        """LlamaParse should upload, poll, and build derivatives from the result."""
+        extractor = PDFExtractor(llamaparse_api_key="test-key")
+        raw = RawContent(
+            content=b"%PDF-1.4 fake",
+            mime_type="application/pdf",
+            source_uri="upload://test.pdf",
+            metadata={"extraction_model": "llamaparse"},
+        )
+
+        mock_img_derivs = [
+            Derivative(type="image", content=b"fake-png-1", format="png", page=1),
+            Derivative(type="image", content=b"fake-png-2", format="png", page=2),
+        ]
+
+        upload_resp = MagicMock()
+        upload_resp.status_code = 200
+        upload_resp.json.return_value = {"id": "file-123"}
+
+        parse_resp = MagicMock()
+        parse_resp.status_code = 200
+        parse_resp.json.return_value = {"id": "job-123", "status": "PENDING"}
+
+        status_resp = MagicMock()
+        status_resp.status_code = 200
+        status_resp.json.return_value = {"job": {"status": "COMPLETED"}}
+
+        result_resp = MagicMock()
+        result_resp.status_code = 200
+        result_resp.json.return_value = {
+            "job": {"status": "COMPLETED"},
+            "markdown": {
+                "pages": [
+                    {"page_number": 1, "markdown": "# Page 1\nParsed text"},
+                    {"page_number": 2, "markdown": "# Page 2\nMore parsed text"},
+                ]
+            },
+        }
+
+        with patch.object(extractor, "_render_page_images", return_value=mock_img_derivs), \
+             patch("requests.post", side_effect=[upload_resp, parse_resp]), \
+             patch("requests.get", side_effect=[status_resp, result_resp]):
+            result = await extractor.extract(raw)
+
+        assert result.extraction_method == "llamaparse_ocr"
+        assert result.auto_metadata["page_count"] == 2
+
+        md_derivs = [d for d in result.derivatives if d.type == "markdown"]
+        assert len(md_derivs) == 1
+        assert "Page 1" in md_derivs[0].content
+        assert "Page 2" in md_derivs[0].content
+
+        page_derivs = [d for d in result.derivatives if d.type == "page_text"]
+        assert len(page_derivs) == 2
+        assert page_derivs[0].page == 1
+        assert page_derivs[1].page == 2
+
+        img_derivs = [d for d in result.derivatives if d.type == "image"]
+        assert len(img_derivs) == 2
+
+    @pytest.mark.asyncio
+    async def test_llamaparse_job_failure_raises(self):
+        """A terminal job error should raise ExtractionError (no infinite poll)."""
+        extractor = PDFExtractor(llamaparse_api_key="test-key")
+        raw = RawContent(
+            content=b"%PDF-1.4 fake",
+            mime_type="application/pdf",
+            source_uri="upload://test.pdf",
+            metadata={"extraction_model": "llamaparse"},
+        )
+
+        upload_resp = MagicMock()
+        upload_resp.status_code = 200
+        upload_resp.json.return_value = {"id": "file-err"}
+
+        parse_resp = MagicMock()
+        parse_resp.status_code = 200
+        parse_resp.json.return_value = {"id": "job-err", "status": "PENDING"}
+
+        status_resp = MagicMock()
+        status_resp.status_code = 200
+        status_resp.json.return_value = {"job": {"status": "FAILED"}}
+
+        with patch("requests.post", side_effect=[upload_resp, parse_resp]), \
+             patch("requests.get", return_value=status_resp):
+            with pytest.raises(ExtractionError, match="LlamaParse"):
+                await extractor._extract_llamaparse(raw)
+
+    @pytest.mark.asyncio
+    async def test_llamaparse_4xx_fails_fast_with_body(self):
+        """A 4xx response raises ExtractionError with the body — deterministic,
+        so _try_method does not retry (avoids re-uploading + re-billing)."""
+        extractor = PDFExtractor(llamaparse_api_key="test-key")
+        raw = RawContent(
+            content=b"%PDF-1.4 fake",
+            mime_type="application/pdf",
+            source_uri="upload://test.pdf",
+            metadata={"extraction_model": "llamaparse"},
+        )
+
+        bad_resp = MagicMock()
+        bad_resp.status_code = 422
+        bad_resp.text = "Unprocessable Entity: bad upload field"
+
+        with patch("requests.post", return_value=bad_resp) as mock_post:
+            with pytest.raises(ExtractionError, match="422"):
+                await extractor._extract_llamaparse(raw)
+        # Failed fast on the upload — no parse job was ever started.
+        assert mock_post.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_llamaparse_poll_timeout(self, monkeypatch):
+        """A perpetually-PENDING job gives up at LLAMAPARSE_MAX_POLL_SECONDS
+        instead of blocking forever."""
+        from agentic.knowledge import model_config
+
+        monkeypatch.setattr(model_config, "LLAMAPARSE_MAX_POLL_SECONDS", 10)
+        monkeypatch.setattr(model_config, "LLAMAPARSE_POLL_INTERVAL", 5)
+
+        extractor = PDFExtractor(llamaparse_api_key="lp-key")
+        raw = RawContent(
+            content=b"%PDF-1.4 fake",
+            mime_type="application/pdf",
+            source_uri="upload://t.pdf",
+            metadata={"extraction_model": "llamaparse"},
+        )
+        upload_resp = MagicMock()
+        upload_resp.status_code = 200
+        upload_resp.json.return_value = {"id": "file-1"}
+        parse_resp = MagicMock()
+        parse_resp.status_code = 200
+        parse_resp.json.return_value = {"id": "job-1", "status": "PENDING"}
+        pending = MagicMock()
+        pending.status_code = 200
+        pending.json.return_value = {"job": {"status": "PENDING"}}
+
+        with patch("requests.post", side_effect=[upload_resp, parse_resp]), \
+             patch("requests.get", return_value=pending), \
+             patch("asyncio.sleep", new=AsyncMock()):
+            with pytest.raises(ExtractionError, match="did not complete within"):
+                await extractor._extract_llamaparse(raw)
+
+    @pytest.mark.asyncio
+    async def test_llamaparse_transient_5xx_does_not_resubmit_job(self):
+        """A sticky 5xx during polling exhausts the internal GET retry and fails
+        WITHOUT re-uploading or starting a new (billable) parse job."""
+        extractor = PDFExtractor(llamaparse_api_key="lp-key")
+        raw = RawContent(
+            content=b"%PDF-1.4 fake",
+            mime_type="application/pdf",
+            source_uri="upload://t.pdf",
+            metadata={"extraction_model": "llamaparse"},
+        )
+        upload_resp = MagicMock()
+        upload_resp.status_code = 200
+        upload_resp.json.return_value = {"id": "file-1"}
+        parse_resp = MagicMock()
+        parse_resp.status_code = 200
+        parse_resp.json.return_value = {"id": "job-1", "status": "PENDING"}
+        five_xx = MagicMock()
+        five_xx.status_code = 503
+        five_xx.text = "upstream unavailable"
+
+        with patch("requests.post", side_effect=[upload_resp, parse_resp]) as mock_post, \
+             patch("requests.get", return_value=five_xx), \
+             patch("asyncio.sleep", new=AsyncMock()):
+            with pytest.raises(ExtractionError, match="after retries"):
+                await extractor._extract_llamaparse(raw)
+        # Upload + parse-start happened exactly once each — the transient poll
+        # error did NOT spawn a second billable parse job.
+        assert mock_post.call_count == 2
+
+
+class TestImageExtractorLlamaParse:
+    """Image uploads must honour an explicit LlamaParse selection (not just PDFs)."""
+
+    @pytest.mark.asyncio
+    async def test_image_uses_llamaparse_when_selected(self):
+        extractor = ImageExtractor(mistral_api_key="m-key", llamaparse_api_key="lp-key")
+        raw = RawContent(
+            content=b"\x89PNG fake",
+            mime_type="image/png",
+            source_uri="upload://pic.png",
+            filename="pic.png",
+            metadata={"extraction_model": "llamaparse"},
+        )
+
+        upload_resp = MagicMock()
+        upload_resp.status_code = 200
+        upload_resp.json.return_value = {"id": "file-1"}
+        parse_resp = MagicMock()
+        parse_resp.status_code = 200
+        parse_resp.json.return_value = {"id": "job-1", "status": "PENDING"}
+        status_resp = MagicMock()
+        status_resp.status_code = 200
+        status_resp.json.return_value = {"job": {"status": "COMPLETED"}}
+        result_resp = MagicMock()
+        result_resp.status_code = 200
+        result_resp.json.return_value = {
+            "markdown": {"pages": [{"page_number": 1, "markdown": "# OCR text"}]}
+        }
+
+        with patch("requests.post", side_effect=[upload_resp, parse_resp]), \
+             patch("requests.get", side_effect=[status_resp, result_resp]):
+            result = await extractor.extract(raw)
+
+        assert result.extraction_method == "llamaparse_ocr"
+        md = [d for d in result.derivatives if d.type == "markdown"]
+        assert md and "OCR text" in md[0].content
+        # The original image is preserved for image-mode retrieval.
+        assert any(d.type == "image" for d in result.derivatives)
+
+    @pytest.mark.asyncio
+    async def test_image_falls_back_to_mistral_when_llamaparse_fails(self):
+        extractor = ImageExtractor(mistral_api_key="m-key", llamaparse_api_key="lp-key")
+        raw = RawContent(
+            content=b"\x89PNG fake",
+            mime_type="image/png",
+            source_uri="upload://pic.png",
+            metadata={"extraction_model": "llamaparse"},
+        )
+        sentinel = ExtractionResult(
+            source_uri="upload://pic.png",
+            mime_type="image/png",
+            derivatives=[],
+            extraction_method="mistral_ocr",
+        )
+        with patch.object(
+            extractor, "_extract_llamaparse",
+            side_effect=ExtractionError("boom", extractor_name="image", source_uri="upload://pic.png"),
+        ), patch.object(extractor, "_extract_mistral", AsyncMock(return_value=sentinel)) as mock_m:
+            result = await extractor.extract(raw)
+
+        mock_m.assert_awaited_once()
+        assert result.extraction_method == "mistral_ocr"
+        # Fallback must be observable so the worker flips to attention_required.
+        assert result.auto_metadata["requested_method"] == "llamaparse"
+        assert "boom" in result.auto_metadata["fallback_reason"]
+
+
 class TestPDFExtractorOpenDataLoader:
     """Tests for PDFExtractor OpenDataLoader method."""
 
@@ -939,6 +1197,37 @@ class TestDocxExtractor:
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
 
+    # The original bug dropped ANY non-default method (not just llamaparse), so
+    # parameterize across cloud-OCR methods to guard the whole class.
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method", ["llamaparse", "mistral", "lighton", "paddleocr"])
+    async def test_docx_extract_forwards_extraction_model_to_pdf(self, method):
+        """DocxExtractor must propagate extraction_model to the PDF stage, else
+        the chosen method is silently ignored for DOCX."""
+        mock_pdf_extractor = MagicMock()
+        mock_pdf_extractor.extract = AsyncMock(
+            return_value=ExtractionResult(
+                source_uri="upload://doc.docx",
+                mime_type="application/pdf",
+                derivatives=[Derivative(type="text", content="Doc content")],
+                extraction_method=f"{method}_ocr",
+            )
+        )
+        extractor = DocxExtractor(pdf_extractor=mock_pdf_extractor)
+
+        with patch.object(extractor, "_convert_to_pdf", return_value=b"fake pdf bytes"):
+            raw = RawContent(
+                content=b"fake docx bytes",
+                mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                source_uri="upload://doc.docx",
+                filename="doc.docx",
+                metadata={"extraction_model": method},
+            )
+            await extractor.extract(raw)
+
+        pdf_raw = mock_pdf_extractor.extract.call_args[0][0]
+        assert pdf_raw.metadata.get("extraction_model") == method
+
 
 class TestXlsxExtractor:
     """Tests for XlsxExtractor."""
@@ -1031,6 +1320,7 @@ class TestPptxExtractor:
                 mime_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                 source_uri="upload://slides.pptx",
                 filename="slides.pptx",
+                metadata={"extraction_model": "llamaparse"},
             )
             result = await extractor.extract(raw)
 
@@ -1040,11 +1330,42 @@ class TestPptxExtractor:
         assert pdf_raw.mime_type == "application/pdf"
         assert pdf_raw.content == b"fake pdf bytes"
         assert pdf_raw.filename == "slides.pdf"
+        # The chosen extraction_model must reach the PDF stage (else selecting
+        # llamaparse/mistral/etc. on a PPTX is silently ignored).
+        assert pdf_raw.metadata.get("extraction_model") == "llamaparse"
 
         # Verify result is tagged correctly
         assert result.extraction_method == "pptx-via-pdf"
         assert result.mime_type == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
         assert result.auto_metadata["pdf_extraction_method"] == "pdf-lighton-ocr"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method", ["llamaparse", "mistral", "lighton", "paddleocr"])
+    async def test_pptx_forwards_extraction_model_to_pdf(self, method):
+        """The chosen method must reach the PDF stage for any non-default value."""
+        mock_pdf_extractor = MagicMock()
+        mock_pdf_extractor.extract = AsyncMock(
+            return_value=ExtractionResult(
+                source_uri="upload://slides.pptx",
+                mime_type="application/pdf",
+                derivatives=[Derivative(type="text", content="Slide content")],
+                extraction_method=f"{method}_ocr",
+            )
+        )
+        extractor = PptxExtractor(pdf_extractor=mock_pdf_extractor)
+
+        with patch.object(extractor, "_convert_to_pdf", return_value=b"fake pdf bytes"):
+            raw = RawContent(
+                content=b"fake pptx bytes",
+                mime_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                source_uri="upload://slides.pptx",
+                filename="slides.pptx",
+                metadata={"extraction_model": method},
+            )
+            await extractor.extract(raw)
+
+        pdf_raw = mock_pdf_extractor.extract.call_args[0][0]
+        assert pdf_raw.metadata.get("extraction_model") == method
 
     @pytest.mark.asyncio
     async def test_pptx_convert_to_pdf_libreoffice_not_found(self):

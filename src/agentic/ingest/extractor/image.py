@@ -56,18 +56,98 @@ class ImageExtractor(Extractor):
         "image/tiff",
     ]
 
-    def __init__(self, mistral_api_key: str | None = None):
+    def __init__(
+        self,
+        mistral_api_key: str | None = None,
+        llamaparse_api_key: str | None = None,
+        llamaparse_base_url: str | None = None,
+    ):
         self.mistral_api_key = mistral_api_key
+        self.llamaparse_api_key = llamaparse_api_key
+        self.llamaparse_base_url = llamaparse_base_url
 
     async def extract(self, raw: RawContent) -> ExtractionResult:
+        preference = (raw.metadata or {}).get("extraction_model", "auto")
+
+        # Honour an explicit LlamaParse choice for images too (it supports image
+        # input). On failure, fall back to Mistral OCR when available.
+        if preference == "llamaparse" and self.llamaparse_api_key:
+            try:
+                return await self._extract_llamaparse(raw)
+            except ExtractionError as e:
+                if not self.mistral_api_key:
+                    raise
+                logger.warning(
+                    "LlamaParse image extraction failed (%s); falling back to Mistral OCR", e
+                )
+                # Make the fallback observable (mirror PDFExtractor): the worker
+                # flips status to attention_required when requested_method is set,
+                # so the user is told their LlamaParse choice didn't run.
+                result = await self._extract_mistral(raw)
+                result.auto_metadata["requested_method"] = "llamaparse"
+                result.auto_metadata["fallback_reason"] = str(e)
+                return result
+
         if self.mistral_api_key:
             return await self._extract_mistral(raw)
 
         raise ExtractionError(
             "No OCR method configured for image extraction. "
-            "Set MISTRAL_API_KEY.",
+            "Set MISTRAL_API_KEY or LLAMAPARSE_API_KEY.",
             extractor_name=self.name,
             source_uri=raw.source_uri,
+        )
+
+    async def _extract_llamaparse(self, raw: RawContent) -> ExtractionResult:
+        """Extract text from an image using LlamaParse v2 (Agentic Plus)."""
+        from agentic.ingest.extractor.llamaparse import parse_pages
+
+        pages = await parse_pages(
+            raw.content,
+            api_key=self.llamaparse_api_key,
+            base_url=self.llamaparse_base_url,
+            source_uri=raw.source_uri,
+            extractor_name=self.name,
+            mime_type=raw.mime_type,
+        )
+        page_markdowns = [p["markdown"] for p in pages]
+        ocr_text = "\n\n".join(page_markdowns)
+
+        fmt = raw.mime_type.split("/")[-1]
+        if fmt == "jpeg":
+            fmt = "jpg"
+
+        derivatives = [
+            Derivative(type="markdown", content=ocr_text, format="markdown"),
+            # Original image as derivative for image-mode retrieval.
+            Derivative(
+                type="image",
+                content=raw.content,
+                format=fmt,
+                page=1,
+                metadata={"width": None, "height": None, "original": True},
+            ),
+        ]
+        for p in pages:
+            derivatives.append(
+                Derivative(
+                    type="page_text",
+                    content=p["markdown"],
+                    format="plain",
+                    page=p["page_number"],
+                )
+            )
+
+        return ExtractionResult(
+            source_uri=raw.source_uri,
+            mime_type=raw.mime_type,
+            derivatives=derivatives,
+            auto_metadata={
+                "page_count": len(pages) or 1,
+                "char_count": len(ocr_text),
+            },
+            extraction_method="llamaparse_ocr",
+            stats={"pages_processed": len(pages) or 1},
         )
 
     async def _extract_mistral(self, raw: RawContent) -> ExtractionResult:

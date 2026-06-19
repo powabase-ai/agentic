@@ -172,6 +172,8 @@ class ExtractorRegistry:
         paddleocr_base_url = _keys.get("paddleocr_base_url") or os.getenv("PADDLEOCR_BASE_URL")
         lighton_api_key = _keys.get("lighton") or os.getenv("LIGHTON_API_KEY")
         lighton_base_url = _keys.get("lighton_base_url") or os.getenv("LIGHTON_BASE_URL")
+        llamaparse_api_key = _keys.get("llamaparse") or os.getenv("LLAMAPARSE_API_KEY")
+        llamaparse_base_url = _keys.get("llamaparse_base_url") or os.getenv("LLAMAPARSE_BASE_URL")
 
         registry = cls()
 
@@ -204,6 +206,8 @@ class ExtractorRegistry:
                 paddleocr_base_url=paddleocr_base_url,
                 lighton_api_key=lighton_api_key,
                 lighton_base_url=lighton_base_url,
+                llamaparse_api_key=llamaparse_api_key,
+                llamaparse_base_url=llamaparse_base_url,
                 max_pages=max_pages,
             )
             registry.register(pdf_ext)
@@ -241,7 +245,13 @@ class ExtractorRegistry:
         try:
             from agentic.ingest.extractor.image import ImageExtractor
 
-            registry.register(ImageExtractor(mistral_api_key=mistral_api_key))
+            registry.register(
+                ImageExtractor(
+                    mistral_api_key=mistral_api_key,
+                    llamaparse_api_key=llamaparse_api_key,
+                    llamaparse_base_url=llamaparse_base_url,
+                )
+            )
         except ImportError:
             pass
 

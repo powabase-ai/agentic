@@ -62,6 +62,9 @@ class DocxExtractor(Extractor):
             mime_type="application/pdf",
             source_uri=raw.source_uri,
             filename=pdf_filename,
+            # Carry metadata (notably extraction_model) into the PDF stage so a
+            # user's method choice (llamaparse/mistral/...) isn't silently dropped.
+            metadata=raw.metadata,
         )
 
         # 3. Delegate to PDF extractor
