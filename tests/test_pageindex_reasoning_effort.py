@@ -39,9 +39,10 @@ async def test_no_reasoning_effort_omits_kwargs():
 
 
 @pytest.mark.asyncio
-async def test_reasoning_effort_for_anthropic_passes_top_level():
-    """For non-OpenAI providers, the param goes through as top-level
-    reasoning_effort (LiteLLM normalizes to provider-native shape)."""
+async def test_reasoning_effort_for_anthropic_requests_summarized():
+    """opus 4.7/4.8 etc. (adaptive display defaults to "omitted") get an
+    explicit adaptive+summarized thinking config + output_config effort so
+    reasoning is surfaced; no top-level reasoning_effort; no extra_body."""
     init_reasoning_effort("low")
     with patch(
         "agentic.knowledge.indexing._pageindex_lib.utils.litellm.acompletion",
@@ -49,7 +50,9 @@ async def test_reasoning_effort_for_anthropic_passes_top_level():
     ) as mock_acompletion:
         await _llm_completion(model="anthropic/claude-opus-4-7", prompt="hi")
     kwargs = mock_acompletion.await_args.kwargs
-    assert kwargs.get("reasoning_effort") == "low"
+    assert kwargs.get("thinking") == {"type": "adaptive", "display": "summarized"}
+    assert kwargs.get("output_config") == {"effort": "low"}
+    assert "reasoning_effort" not in kwargs
     assert "extra_body" not in kwargs
 
 

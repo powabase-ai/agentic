@@ -125,11 +125,51 @@ def test_call_kwargs_when_effort_none_on_responses_model():
     assert reasoning_call_kwargs(None, "openai/responses/gpt-5.4") == {}
 
 
-def test_call_kwargs_for_anthropic_uses_top_level_effort():
-    """Non-Responses paths use the standard reasoning_effort kwarg."""
-    assert reasoning_call_kwargs("medium", "anthropic/claude-opus-4-7") == {
-        "reasoning_effort": "medium"
-    }
+def test_call_kwargs_for_anthropic_adaptive_model_requests_summarized():
+    """Anthropic models whose thinking `display` defaults to "omitted"
+    (opus 4.7/4.8, sonnet 5, fable 5, mythos) get an explicit
+    adaptive+summarized thinking config so the reasoning summary + token
+    count are surfaced (for eval debugging / reasoning-display UI). Effort
+    rides in output_config. litellm forwards both to the Anthropic wire
+    (verified offline via get_optional_params on 1.90.1)."""
+    for model in (
+        "anthropic/claude-opus-4-8",
+        "claude-opus-4-8",
+        "anthropic/claude-opus-4-7",
+        "claude-sonnet-5",
+        "claude-fable-5",
+        "claude-mythos-preview",
+    ):
+        assert reasoning_call_kwargs("high", model) == {
+            "thinking": {"type": "adaptive", "display": "summarized"},
+            "output_config": {"effort": "high"},
+        }, model
+
+
+def test_call_kwargs_anthropic_summarized_passes_xhigh_effort_through():
+    """xhigh / max are Anthropic-only effort levels that bare reasoning_effort
+    can't express; they flow straight into output_config.effort."""
+    for effort in ("xhigh", "max"):
+        assert reasoning_call_kwargs(effort, "claude-opus-4-8") == {
+            "thinking": {"type": "adaptive", "display": "summarized"},
+            "output_config": {"effort": effort},
+        }, effort
+
+
+def test_call_kwargs_for_older_anthropic_uses_top_level_effort():
+    """opus-4-6 / sonnet-4-6 already default display to "summarized", and
+    pre-adaptive models (opus-4-5, sonnet-4-5, claude-3) would 400 on
+    thinking.adaptive — all keep the plain reasoning_effort path so litellm
+    maps effort per-model."""
+    for model in (
+        "anthropic/claude-opus-4-6",
+        "anthropic/claude-sonnet-4-6",
+        "anthropic/claude-opus-4-5",
+        "anthropic/claude-3-7-sonnet-20250219",
+    ):
+        assert reasoning_call_kwargs("medium", model) == {
+            "reasoning_effort": "medium"
+        }, model
 
 
 def test_call_kwargs_for_gemini_uses_top_level_effort():

@@ -6,9 +6,11 @@ model prefix — verified at litellm/main.py (responses_api_bridge_check).
 Models matching `(openai|azure)/responses/<model>` are stripped of the prefix
 and routed via the Responses bridge.
 
-We transform the model at Agent call time. Other providers (Anthropic, Gemini)
-return reasoning_content natively on Chat Completions when reasoning_effort
-is passed; no transformation needed.
+We transform the model at Agent call time. Gemini returns reasoning_content
+natively on Chat Completions when reasoning_effort is passed; no transformation
+needed. Anthropic also stays on Chat Completions, but newer models hide the
+reasoning summary by default, so reasoning_call_kwargs opts them into
+`display: "summarized"` (see _ANTHROPIC_OMITTED_DISPLAY_FAMILIES below).
 
 A0 verification (Task 1) revealed a LiteLLM 1.83.14 quirk: when going through
 the Responses bridge, passing `reasoning_effort` at the top level is silently
@@ -80,6 +82,36 @@ def maybe_route_through_responses(model: str, reasoning_effort: str | None) -> s
     return f"{provider}/responses/{model}"
 
 
+# Anthropic models whose adaptive-thinking `display` defaults to "omitted":
+# opus 4.7/4.8, sonnet 5, fable 5, mythos 5/preview. On these, thinking fires
+# but the reasoning summary text AND the reasoning token count are suppressed
+# unless we ask for `display: "summarized"` explicitly (a silent change from
+# opus 4.6, where "summarized" was the default). We opt in so reasoning is
+# visible for eval debugging and the reasoning-display UI.
+#
+# Deliberately NOT matched: opus-4-6 / sonnet-4-6 (already default to
+# "summarized", so litellm's reasoning_effort path surfaces reasoning fine) and
+# pre-adaptive models (opus-4-5, sonnet-4-5, claude-3-*), which reject
+# `thinking.type: "adaptive"` with a 400 and must keep the reasoning_effort
+# path (litellm maps effort to the right per-model shape). Matching by family
+# fails safe: an unknown/new model just falls back to reasoning_effort.
+_ANTHROPIC_OMITTED_DISPLAY_FAMILIES = (
+    "opus-4-7",
+    "opus-4-8",
+    "sonnet-5",
+    "fable-5",
+    "mythos-5",
+    "mythos-preview",
+)
+
+
+def _anthropic_reasoning_needs_summarized(model: str) -> bool:
+    """True for Anthropic adaptive models that hide reasoning by default and
+    therefore need an explicit `display: "summarized"` request."""
+    m = model.lower()
+    return any(family in m for family in _ANTHROPIC_OMITTED_DISPLAY_FAMILIES)
+
+
 def _reasoning_summary_enabled() -> bool:
     """Whether to request an OpenAI Responses reasoning *summary*.
 
@@ -100,15 +132,25 @@ def reasoning_call_kwargs(reasoning_effort: str | None, model: str) -> dict:
     """Return the kwargs dict to merge into litellm.completion(...) for
     requesting reasoning from this model.
 
-    For non-Responses paths: {"reasoning_effort": effort}
-    For Responses paths:     {"extra_body": {"reasoning": {"effort": effort}}}
-                             (plus "summary": "detailed" iff opt-in — see
-                             _reasoning_summary_enabled)
+    For Responses paths:          {"extra_body": {"reasoning": {"effort": effort}}}
+                                  (plus "summary": "detailed" iff opt-in — see
+                                  _reasoning_summary_enabled)
+    For Anthropic omitted-display: {"thinking": {"type": "adaptive",
+                                    "display": "summarized"},
+                                    "output_config": {"effort": effort}}
+    For other non-Responses paths: {"reasoning_effort": effort}
 
     The Responses-path packing is required because litellm 1.83.14 silently
     drops top-level `reasoning_effort` when the call routes through the
     Responses bridge. Verified empirically in A0.1. The summary is omitted by
     default to avoid the unverified-org 400 (see module docstring).
+
+    The Anthropic branch requests `display: "summarized"` for models that
+    otherwise hide reasoning (see _ANTHROPIC_OMITTED_DISPLAY_FAMILIES). Unlike
+    OpenAI's reasoning summaries, Anthropic imposes no org-verification gate on
+    summarized thinking, so this is always on (no opt-in flag). litellm
+    forwards `thinking`/`output_config` to the Anthropic wire unchanged
+    (verified offline via get_optional_params on 1.90.1).
     """
     if reasoning_effort is None:
         return {}
@@ -117,4 +159,9 @@ def reasoning_call_kwargs(reasoning_effort: str | None, model: str) -> dict:
         if _reasoning_summary_enabled():
             reasoning["summary"] = "detailed"
         return {"extra_body": {"reasoning": reasoning}}
+    if _anthropic_reasoning_needs_summarized(model):
+        return {
+            "thinking": {"type": "adaptive", "display": "summarized"},
+            "output_config": {"effort": reasoning_effort},
+        }
     return {"reasoning_effort": reasoning_effort}

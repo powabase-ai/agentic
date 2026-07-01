@@ -28,8 +28,11 @@ def _make_response(content="ok", finish_reason="stop"):
     return response
 
 
-def test_anthropic_passes_reasoning_effort_at_top_level():
-    """Anthropic gets reasoning_effort directly; no model transformation;
+def test_anthropic_adaptive_model_sends_summarized_thinking():
+    """Anthropic adaptive models whose display defaults to "omitted"
+    (opus 4.7/4.8, sonnet 5, fable/mythos) get an explicit
+    adaptive+summarized thinking config + output_config effort so reasoning
+    is surfaced. No model transformation; no top-level reasoning_effort;
     no extra_body."""
     with (
         patch("litellm.supports_reasoning", return_value=True),
@@ -46,7 +49,9 @@ def test_anthropic_passes_reasoning_effort_at_top_level():
 
     call_kwargs = mock_completion.call_args.kwargs
     assert call_kwargs["model"] == "anthropic/claude-opus-4-7"
-    assert call_kwargs["reasoning_effort"] == "medium"
+    assert call_kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
+    assert call_kwargs["output_config"] == {"effort": "medium"}
+    assert "reasoning_effort" not in call_kwargs
     assert "extra_body" not in call_kwargs
 
 

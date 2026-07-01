@@ -47,4 +47,5 @@ async def test_metadata_present_with_reasoning_effort_set():
         await _llm_completion(model="anthropic/claude-opus-4-7", prompt="hi")
     kwargs = mock_acompletion.await_args.kwargs
     assert kwargs.get("metadata") == {"stage": "tree"}
-    assert kwargs.get("reasoning_effort") == "low"
+    assert kwargs.get("thinking") == {"type": "adaptive", "display": "summarized"}
+    assert kwargs.get("output_config") == {"effort": "low"}
