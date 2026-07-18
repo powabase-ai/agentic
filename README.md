@@ -1,6 +1,6 @@
 # agentic
 
-A minimal, well-documented framework for building LLM-powered agents.
+The agent/knowledge/orchestration/workflow engine that powers the Powabase stack — a well-documented Python library you can also import on its own.
 
 ## Features
 
@@ -8,10 +8,8 @@ A minimal, well-documented framework for building LLM-powered agents.
 - **Session Management**: Built-in conversation history tracking
 - **Multi-Model Support**: Uses [litellm](https://github.com/BerriAI/litellm) for 100+ LLM providers
 - **Type-Safe**: Full type hints and dataclass-based outputs
-
-**Coming Soon:**
 - **Orchestration**: Multi-agent coordination (sequential, supervisor, router, parallel)
-- **Workflow**: Complex pipelines with conditional logic and loops
+- **Workflow**: Multi-step pipelines with conditional logic, loops, and a sandboxed code-execution block
 
 ## Installation
 
@@ -147,8 +145,8 @@ agentic/src/agentic/
 │   ├── agent.py     # Agent class
 │   ├── output.py    # AgentOutput dataclass
 │   └── session.py   # AgentSession for history
-├── orchestration/   # Multi-agent coordination (placeholder)
-├── workflow/        # Pipeline execution (placeholder)
+├── orchestration/   # Multi-agent coordination (sequential, supervisor, router, parallel)
+├── workflow/        # Pipeline execution (blocks, conditions, sandboxed functions)
 └── execution/       # Shared infrastructure
     ├── context.py   # ExecutionContext
     ├── status.py    # ExecutionStatus enum

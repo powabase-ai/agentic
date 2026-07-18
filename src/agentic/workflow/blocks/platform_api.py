@@ -1,5 +1,12 @@
 """Platform API block — calls internal platform service endpoints."""
 
+# OSS Plan D1 note (2026-07-17): this block's ROUTE_MAP targets powabase-ai's
+# product-specific REST API (/api/agents, /api/knowledge-bases, …), not the
+# generic `agentic` framework surface. It is kept in `agentic` for D1 because it
+# has zero platform imports (pure httpx) and does not block standalone-ness.
+# Plan E should relocate it into `powabase-ai` when it draws the
+# agentic <-> powabase-ai repo boundary.
+
 from __future__ import annotations
 
 import json
