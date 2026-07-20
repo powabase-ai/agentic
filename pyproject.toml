@@ -1,5 +1,5 @@
 [project]
-name = "agentic"
+name = "powabase-agentic"
 version = "0.1.0"
 description = "The agent, knowledge, orchestration, and workflow engine behind the Powabase stack — a Python library you can also import on its own"
 readme = "README.md"
@@ -55,6 +55,13 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# Distribution is `powabase-agentic`; the import module stays `agentic`
+# (like scikit-learn → import sklearn). Without this explicit mapping,
+# hatchling would derive the package dir from the name and look for
+# `src/powabase_agentic` — building an empty wheel.
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentic"]
 
 [tool.ruff]
 line-length = 88
