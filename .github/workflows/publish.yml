@@ -1,0 +1,46 @@
+name: Publish
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "PEP 440 version, e.g. 0.1.0rc1 (pre-1.0 uses -rc)"
+        required: true
+        type: string
+      dry_run:
+        description: "Build only; publish nothing"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write        # PyPI Trusted Publishing (OIDC) — no token needed
+
+jobs:
+  publish:
+    name: powabase-agentic → PyPI
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Set version and build sdist+wheel
+        run: |
+          # version is static in pyproject (hatchling); set it deterministically.
+          sed -i -E "s/^version = \".*\"/version = \"${{ inputs.version }}\"/" pyproject.toml
+          grep -E "^version = " pyproject.toml
+          uv build --out-dir dist
+          ls -la dist
+          # Guard the packages=["src/agentic"] mapping: the wheel must ship the
+          # `agentic` import package (distribution powabase-agentic != import name).
+          python3 - <<'PY'
+          import glob, zipfile
+          whl = glob.glob("dist/*.whl")[0]
+          mods = [n for n in zipfile.ZipFile(whl).namelist()
+                  if n.startswith("agentic/") and n.endswith(".py")]
+          assert mods, "empty wheel — hatch packages mapping is wrong"
+          print(f"wheel packages {len(mods)} agentic modules")
+          PY
+      - name: Publish to PyPI (real run only)
+        if: ${{ inputs.dry_run == false }}
+        uses: pypa/gh-action-pypi-publish@release/v1
