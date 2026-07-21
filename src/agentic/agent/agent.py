@@ -815,7 +815,7 @@ class Agent:
                 # object, so concurrent submissions would race and crash
                 # with "cannot enter context: ... is already entered".
                 #
-                # This is the path consumers (e.g. agentic-platform's
+                # This is the path consumers (e.g. powabase-ai's
                 # billing_context) rely on to propagate the current run_id
                 # into wrapped tool handlers; without ctx.run, workers see
                 # ContextVar defaults and downstream billing falls back to

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Separability gate for the `agentic` package (OSS Plan D1).
+# Separability gate for the `agentic` package.
 #
 # Proves `agentic` installs + runs standalone from a built wheel, and that the
 # workflow/copilot code-execution sandbox contract (function.py IMPORT_REGISTRY)
 # is satisfied by the RUNTIME dependency closure ALONE (stage 2 uses no dev extras,
-# so a sandbox lib demoted to dev-deps fails here). Reused by Plan E as anti-rot CI.
+# so a sandbox lib demoted to dev-deps fails here). Suitable as an anti-rot CI check.
 set -euo pipefail
 
 AGENTIC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -47,16 +47,15 @@ PY
 echo "== Stage 3: offline test suite in the project's LOCKED dev env (no-regression check) =="
 # Stage 2 above is the wheel / standalone proof. Stage 3 runs agentic's suite in the
 # project's LOCKED dev toolchain (via `uv run`, honoring agentic/uv.lock) as a
-# no-regression check — D1 changes no agentic logic. An ad-hoc `pip install pytest…`
+# no-regression check. An ad-hoc `pip install pytest…`
 # instead pulls UNPINNED dev tools (e.g. pytest-asyncio 1.4.0 regresses the event
 # loop; ruff — needed by test_import_isolation — would be absent) and false-fails.
 #
-# DESELECTED: 2 tests that fail on the base commit 80a4b060e independent of D1
-# (pre-existing agentic-logic bugs; CI never ran the full agentic suite to catch them):
+# DESELECTED: 2 pre-existing test failures unrelated to packaging
+# (pre-existing agentic-logic bugs):
 #   - test_input_mapping … concatenate_strings
 #   - test_platform_api_block … route_mapping_database_query (ROUTE_MAP lacks database/query)
-# They are OUT of D1 scope (packaging only) and tracked for separate follow-up.
-# D1 must introduce NO new failures.
+# They are tracked separately. This gate must introduce no new failures.
 cd "$AGENTIC_DIR"
 uv run pytest tests/ -q \
   --deselect "tests/workflow/test_input_mapping.py::TestApplyInputMappings::test_multiple_mappings_concatenate_strings" \

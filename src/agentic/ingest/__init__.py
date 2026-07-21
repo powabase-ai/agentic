@@ -25,7 +25,7 @@ Example:
 
 See Also:
     - docs/CONCEPTS.md for detailed explanations
-    - agentic-platform for storage integration
+    - powabase-ai for storage integration
 """
 
 from agentic.ingest.connector import Connector, FileUploadConnector

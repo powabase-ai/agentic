@@ -40,7 +40,7 @@ Example:
 
 See Also:
     - docs/CONCEPTS.md for detailed explanations
-    - agentic-platform for KnowledgeStore implementations
+    - powabase-ai for KnowledgeStore implementations
 """
 
 # Base classes

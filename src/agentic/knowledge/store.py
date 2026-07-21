@@ -1,7 +1,7 @@
 """
 KnowledgeStore - abstract interface for knowledge storage operations.
 
-This interface is implemented by platforms (e.g., agentic-platform with pgvector).
+This interface is implemented by a host application (e.g., powabase-ai with pgvector).
 The agentic framework defines the contract; platforms provide the implementation.
 """
 
