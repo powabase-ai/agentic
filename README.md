@@ -1,6 +1,6 @@
 # agentic
 
-The agent/knowledge/orchestration/workflow engine that powers the Powabase stack — a well-documented Python library you can also import on its own.
+The agent/knowledge/orchestration/workflow engine that powers the [Powabase](https://github.com/powabase-ai/powabase) stack — a well-documented Python library you can also import on its own.
 
 ## Features
 
@@ -13,18 +13,24 @@ The agent/knowledge/orchestration/workflow engine that powers the Powabase stack
 
 ## Installation
 
+Published on PyPI as **`powabase-agentic`**; the import module is **`agentic`**
+(same split as `scikit-learn` → `import sklearn`).
+
 ```bash
 # Using pip
-pip install agentic
+pip install powabase-agentic
 
 # Using uv
-uv add agentic
+uv add powabase-agentic
 
 # From source
-git clone https://github.com/your-org/agentic.git
+git clone https://github.com/powabase-ai/agentic.git
 cd agentic
 pip install -e .
 ```
+
+Optional extras: `pip install "powabase-agentic[rerankers]"` adds local
+cross-encoder reranking models.
 
 ## Quick Start
 
