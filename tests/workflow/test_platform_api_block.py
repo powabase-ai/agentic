@@ -133,11 +133,20 @@ class TestRouteMapping:
         assert method == "POST"
         assert path == "/api/context-handlers"
 
-    def test_route_mapping_database_query(self):
+    def test_route_mapping_database_list_tables(self):
         block = PlatformAPIBlock(config={})
-        method, path = block._resolve_route("database", "query", None)
-        assert method == "POST"
-        assert path == "/api/database/query"
+        method, path = block._resolve_route("database", "list_tables", None)
+        assert method == "GET"
+        assert path == "/api/database/tables"
+
+    def test_route_mapping_database_query_unsupported(self):
+        # `database/query` (raw SQL) is NOT a block operation: there is no
+        # ROUTE_MAP entry and no backend /api/database/query endpoint (the DB
+        # block does PostgREST CRUD on tables, not raw SQL). An unknown
+        # (resource, operation) must raise, not silently resolve.
+        block = PlatformAPIBlock(config={})
+        with pytest.raises(ValueError, match="Unknown route"):
+            block._resolve_route("database", "query", None)
 
 
 # ---------------------------------------------------------------------------

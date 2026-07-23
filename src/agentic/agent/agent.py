@@ -22,6 +22,7 @@ from agentic.agent.compaction import (
     estimate_token_count,
     get_context_threshold,
     prune_messages,
+    truncate_messages,
 )
 from agentic.agent.errors import classify_error, classify_finish_reason
 from agentic.agent.loop_state import LoopState
@@ -65,6 +66,30 @@ def _usage_stub(usage: dict[str, int]):
         ),
         id=None,
     )
+
+
+def _emit_hook_executions(context, result) -> None:
+    """Emit one `hook_result` event per hook execution (observability)."""
+    if context is None or not getattr(result, "executions", None):
+        return
+    for ex in result.executions:
+        # NB: the hook's lifecycle event goes under `hook_event`, NOT `event` —
+        # the SSE drain builds frames as {"event": <type>, **event}, so an inner
+        # `event` key would clobber the envelope and mislabel `hook_result`
+        # frames on the wire.
+        context.emit_event(
+            {
+                "type": "hook_result",
+                "hook_id": ex.hook_id,
+                "position": ex.position,
+                "hook_event": ex.event,
+                "status": ex.status,
+                "modified": ex.modified,
+                "blocked": ex.blocked,
+                "latency_ms": ex.latency_ms,
+                "message": ex.message,
+            }
+        )
 
 
 def _build_tool_message(tc_id: str, result) -> tuple[dict, dict | None]:
@@ -216,6 +241,20 @@ class Agent:
             self._effort_cache[model] = self._resolve_effort_for_model(model)
         return self._effort_cache[model]
 
+    def _compaction_model_for(self, model: str) -> str:
+        """The model string to send a compaction call under.
+
+        Must match the routing the *real* call applies (see the
+        ``maybe_route_through_responses`` call in the ReAct loop), because the
+        prompt cache is keyed per API surface: on an OpenAI reasoning model the
+        real call goes out as ``openai/responses/<model>`` while a raw
+        ``<model>`` goes to chat/completions. Sending the compaction call under
+        the unrouted name puts it in a different cache pool, so it is fully
+        cache-cold — which would defeat the sole reason compaction is fed the
+        un-pruned (larger, costlier) history.
+        """
+        return maybe_route_through_responses(model, self._resolved_effort_for(model))
+
     def run(
         self,
         input: str | list[dict[str, Any]],
@@ -296,6 +335,18 @@ class Agent:
         reasoning_was_requested = self._resolved_effort_for(self.model) is not None
 
         try:
+            collected_events: list[dict] = []
+
+            # Wrap on_event to also collect into local list
+            original_on_event = context.on_event
+
+            def collecting_on_event(event: dict) -> None:
+                collected_events.append(event)
+                if original_on_event:
+                    original_on_event(event)
+
+            context.on_event = collecting_on_event
+
             # OnRunStart hook — fire before anything else
             if hooks:
                 from agentic.agent.hooks import run_hooks as _run_hooks
@@ -309,6 +360,7 @@ class Agent:
                     hooks,
                     context=context,
                 )
+                _emit_hook_executions(context, on_start)
                 if on_start.blocked:
                     return AgentOutput(
                         execution_id=context.execution_id,
@@ -316,6 +368,7 @@ class Agent:
                         started_at=started_at,
                         completed_at=datetime.now(),
                         error=on_start.message or "Blocked by OnRunStart hook",
+                        events=list(collected_events),
                         reasoning_artifact=last_artifact,
                         reasoning_requested=reasoning_was_requested,
                     )
@@ -336,7 +389,6 @@ class Agent:
 
             # Accumulator state (not part of LoopState since these only grow)
             all_tool_calls: list[ToolCallRecord] = []
-            collected_events: list[dict] = []
             # Track reasoning_tokens / cached_tokens too — reasoning models
             # report them and the platform observability layer aggregates the
             # full breakdown. Limiting this dict to the standard 3 keys
@@ -350,16 +402,6 @@ class Agent:
             }
             # For doom loop detection: list of (tool_name, arguments_str) tuples
             recent_calls: list[tuple[str, str]] = []
-
-            # Wrap on_event to also collect into local list
-            original_on_event = context.on_event
-
-            def collecting_on_event(event: dict) -> None:
-                collected_events.append(event)
-                if original_on_event:
-                    original_on_event(event)
-
-            context.on_event = collecting_on_event
 
             while True:
                 # The "step" as seen by events/output is turn_count + 1
@@ -385,6 +427,13 @@ class Agent:
 
                 is_last_step = step >= max_steps or state.budget_exhausted
 
+                # On last step, don't pass tools to force a text-only response.
+                # Resolved here (not just before the call) so the compaction
+                # sites below can send the same value: tool definitions sit at
+                # the front of the cached prefix, so compacting with tools the
+                # real call will not send breaks the match at the first block.
+                step_tools = None if is_last_step else tool_schemas
+
                 # Normalize messages before LLM call
                 normalized = normalize_messages(
                     list(state.messages), available_tool_names
@@ -392,21 +441,72 @@ class Agent:
 
                 # Proactive context management — prune/compact before LLM call if near threshold
                 token_estimate = estimate_token_count(normalized)
-                threshold = get_context_threshold(state.current_model)
+                threshold = get_context_threshold(state.current_model, self.max_tokens)
                 if token_estimate > threshold:
+                    # Pruning is free, so try it first and use it for the
+                    # threshold decision: if it alone gets us under, we never
+                    # pay for a compaction call.
+                    compact_succeeded = False
                     pruned = prune_messages(normalized)
                     if estimate_token_count(pruned) > threshold:
                         if state.compact_failure_count < 3:
+                            # Compact the UN-pruned list: compact_messages
+                            # replays the conversation's own prefix so the
+                            # provider prompt cache hits. Pruning rewrites old
+                            # tool bodies, which breaks that prefix and makes
+                            # the (full-context) call cache-cold.
                             try:
-                                pruned = compact_messages(pruned)
+                                compacted = compact_messages(
+                                    normalized,
+                                    model=self._compaction_model_for(
+                                        state.current_model
+                                    ),
+                                    api_key=self.api_key,
+                                    tools=step_tools,
+                                )
                             except Exception:
-                                logger.warning("Proactive compaction failed")
+                                logger.warning(
+                                    "Proactive compaction failed", exc_info=True
+                                )
+                                compacted = normalized
+                            # Judge progress by an actual token delta, not by
+                            # list identity. Identity is only a *sufficient*
+                            # no-progress signal: a compaction that returned a
+                            # new-but-not-smaller history also did no work, and
+                            # reading that as success both resets the breaker
+                            # and installs the larger history — so a compaction
+                            # that consistently grows the conversation buys an
+                            # extra full-context call every step, forever, with
+                            # the guard that exists to stop it never engaging.
+                            compact_succeeded = (
+                                estimate_token_count(compacted) < token_estimate
+                            )
+                            if not compact_succeeded:
+                                state = state.with_compact_failure()
+                            else:
+                                pruned = compacted
+                                # Persist the compacted history so the rest of
+                                # this step (and the Phase 5 compaction check,
+                                # which rebuilds from state.messages) works off
+                                # it instead of compacting the same history a
+                                # second time. Reset the breaker: it counts
+                                # CONSECUTIVE failures, so a success clears it.
+                                state = state.recover(
+                                    messages=compacted,
+                                    reason="proactive_compact",
+                                    compact_failure_count=0,
+                                )
                     normalized = pruned
+                    # `succeeded` distinguishes a real compaction from the
+                    # cases where this event fires anyway: breaker tripped,
+                    # compaction failed, or pruning alone got us under.
                     context.emit_event(
                         {
                             "type": "proactive_compact",
                             "step": step,
                             "tokens_before": token_estimate,
+                            "tokens_after": estimate_token_count(normalized),
+                            "succeeded": compact_succeeded,
                         }
                     )
 
@@ -416,9 +516,6 @@ class Agent:
                 )
 
                 # ===== PHASE 2: LLM CALL =====
-                # On last step, don't pass tools to force a text-only response
-                step_tools = None if is_last_step else tool_schemas
-
                 # Build call kwargs (model is set below after routing resolution)
                 call_kwargs: dict[str, Any] = {
                     "messages": normalized,
@@ -507,19 +604,105 @@ class Agent:
                         )
                         try:
                             pruned = prune_messages(list(state.messages))
-                            compacted = compact_messages(pruned)
+                            compacted = compact_messages(
+                                pruned,
+                                model=self._compaction_model_for(state.current_model),
+                                api_key=self.api_key,
+                                tools=step_tools,
+                            )
+                            # Measure work done, not list identity. Identity is
+                            # only a *sufficient* no-progress signal (see the
+                            # compact_messages docstring); a compaction that
+                            # returned a new-but-not-smaller history also did
+                            # nothing, and reading that as success clears both
+                            # guards on this branch — the latch below and the
+                            # failure counter — while `continue` skips the
+                            # turn_count increment, so `max_steps` is never
+                            # consulted. The result was a fixed point: a hung
+                            # worker burning one full-context call per
+                            # iteration, forever, on the user's own API key.
+                            # Requiring a strict decrease makes the branch
+                            # provably terminating: the installed history's
+                            # token count is a non-negative integer that
+                            # strictly decreases on every re-arm.
+                            pruned_tokens = estimate_token_count(pruned)
+                            made_progress = (
+                                estimate_token_count(compacted) < pruned_tokens
+                            )
+                            truncate_shrank = False
+                            if not made_progress:
+                                # Last resort: deterministic truncation. Makes
+                                # no LLM call, so unlike compaction (which
+                                # would re-send a prompt the provider just
+                                # rejected) it does not raise. Its two
+                                # postconditions — lands under `target`, never
+                                # collapses to the system message alone — are
+                                # enforced by explicit checks that fail safe:
+                                # on a violation it logs and hands back the
+                                # input unchanged rather than a broken history.
+                                # Both matter because we persist its result and
+                                # have no recovery left after this.
+                                target = int(
+                                    get_context_threshold(
+                                        state.current_model, self.max_tokens
+                                    )
+                                    * 0.5
+                                )
+                                truncated = truncate_messages(compacted, target)
+                                before_tokens = estimate_token_count(compacted)
+                                after_tokens = estimate_token_count(truncated)
+                                # Measure work done, not list identity:
+                                # truncate_messages rebuilds dicts through
+                                # normalize_messages, so a no-op hands back a
+                                # new-but-equal list and an identity check
+                                # reports success for a truncation that shed
+                                # nothing.
+                                truncate_shrank = after_tokens < before_tokens
+                                context.emit_event(
+                                    {
+                                        "type": "reactive_truncate",
+                                        "step": step,
+                                        "before_tokens": before_tokens,
+                                        "after_tokens": after_tokens,
+                                        "succeeded": truncate_shrank,
+                                    }
+                                )
+                                compacted = truncated
+                            # `has_attempted_compact` gates this whole branch, so
+                            # leaving it latched forever means a run that
+                            # recovered at step 3 has no recovery left at step
+                            # 40. Clear it whenever the history actually got
+                            # smaller — that is a genuine recovery, and the
+                            # next attempt works on different (smaller) input.
+                            # Keep it set when nothing shrank: re-arming on an
+                            # unshrinkable history would retry forever.
+                            shrank = made_progress or truncate_shrank
                             state = state.recover(
                                 messages=compacted,
-                                reason="reactive_compact",
-                                has_attempted_compact=True,
-                                compact_failure_count=0,
+                                reason="reactive_compact"
+                                if made_progress
+                                else "compact_failed",
+                                has_attempted_compact=not shrank,
+                                compact_failure_count=0
+                                if made_progress
+                                else state.compact_failure_count + 1,
                             )
                             continue
                         except Exception:
-                            state = state.recover(
-                                messages=state.messages,
-                                reason="compact_failed",
-                                compact_failure_count=state.compact_failure_count + 1,
+                            # No `continue` here, deliberately: the history is
+                            # unchanged, so retrying would re-send the prompt
+                            # the provider just rejected and fail identically.
+                            # Control falls through to the bare `raise` below,
+                            # which means any state we set here is discarded
+                            # when the frame unwinds — so log instead. Without
+                            # this an operator asking "why didn't compaction
+                            # rescue this run" gets no signal at all: the run
+                            # surfaces the original ContextWindowExceededError
+                            # and the real cause is never recorded anywhere.
+                            logger.warning(
+                                "Reactive compaction raised; no recovery left "
+                                "for this run",
+                                exc_info=True,
                             )
 
                     # Recovery: model fallback on server error
@@ -566,14 +749,15 @@ class Agent:
                             on_content_delta=lambda d: context.emit_delta_event(
                                 {"type": "content_delta", "delta": d}
                             ),
-                            on_reasoning_delta=lambda d,
-                            _step=step: context.emit_delta_event(
-                                {
-                                    "type": "reasoning_delta",
-                                    "step": _step,
-                                    "source": "thinking",
-                                    "delta": d,
-                                }
+                            on_reasoning_delta=lambda d, _step=step: (
+                                context.emit_delta_event(
+                                    {
+                                        "type": "reasoning_delta",
+                                        "step": _step,
+                                        "source": "thinking",
+                                        "delta": d,
+                                    }
+                                )
                             ),
                             abort_signal=context.abort_signal,
                             model=state.current_model,
@@ -893,9 +1077,10 @@ class Agent:
                     )
 
                 # Compaction check: summarize history if context is growing large
-                if estimate_token_count(working_messages) > get_context_threshold(
-                    state.current_model
-                ):
+                over_threshold = estimate_token_count(
+                    working_messages
+                ) > get_context_threshold(state.current_model, self.max_tokens)
+                if over_threshold and state.compact_failure_count < 3:
                     context.emit_event(
                         {
                             "type": "compaction",
@@ -903,7 +1088,35 @@ class Agent:
                             "message_count": len(working_messages),
                         }
                     )
-                    working_messages = compact_messages(working_messages)
+                    # `working_messages` here is assembled from model_dump() +
+                    # session history and is NOT pre-normalized, unlike the
+                    # proactive site — and compact_messages' own try covers
+                    # only the litellm call, so normalize_messages can raise
+                    # straight out of it (a `tool_calls` that is not a list
+                    # gives TypeError). This was the one compaction site
+                    # without a guard.
+                    try:
+                        compacted = compact_messages(
+                            working_messages,
+                            model=self._compaction_model_for(state.current_model),
+                            api_key=self.api_key,
+                            tools=step_tools,
+                        )
+                    except Exception:
+                        logger.warning("Phase 5 compaction failed", exc_info=True)
+                        compacted = working_messages
+                    # Size, not identity: a compaction that returned a
+                    # new-but-not-smaller history did no work, and calling that
+                    # success resets the breaker that is supposed to stop us
+                    # paying for a full-context call on every subsequent step.
+                    if estimate_token_count(compacted) < estimate_token_count(
+                        working_messages
+                    ):
+                        working_messages = compacted
+                        # Breaker counts CONSECUTIVE failures — clear on success.
+                        state = state.with_compact_success()
+                    else:
+                        state = state.with_compact_failure()
 
                 # Check for doom loop: last 3 calls identical
                 if len(recent_calls) >= 3:
@@ -937,12 +1150,13 @@ class Agent:
                 pre_response = run_hooks(
                     "PreResponse", "", {}, content, hooks, context=context
                 )
+                _emit_hook_executions(context, pre_response)
                 if pre_response.blocked:
                     content = (
                         f"[Response blocked: "
                         f"{pre_response.message or 'PreResponse hook denied'}]"
                     )
-                elif pre_response.modified_output:
+                elif pre_response.modified_output is not None:
                     content = pre_response.modified_output
 
             # OnRunComplete hook — fire-and-forget after successful run
@@ -952,7 +1166,7 @@ class Agent:
                 context.emit_event(
                     {"type": "on_run_complete", "status": "completed", "steps": step}
                 )
-                _run_hooks_complete(
+                on_complete = _run_hooks_complete(
                     "OnRunComplete",
                     "",
                     {"status": "completed", "content": content or "", "steps": step},
@@ -960,6 +1174,7 @@ class Agent:
                     hooks,
                     context=context,
                 )
+                _emit_hook_executions(context, on_complete)
 
             return AgentOutput(
                 execution_id=context.execution_id,
@@ -1359,6 +1574,7 @@ class Agent:
                 pre_result = run_hooks(
                     "PreToolUse", tool_name, arguments, None, hooks, context=context
                 )
+                _emit_hook_executions(context, pre_result)
                 if pre_result.blocked:
                     result = (
                         f"Error: Blocked by hook — "
@@ -1375,7 +1591,7 @@ class Agent:
                         tc,
                         tool_duration_ms,
                     )
-                if pre_result.modified_input:
+                if pre_result.modified_input is not None:
                     arguments = pre_result.modified_input
 
         # === OnDelegation hook for DelegateTool ===
@@ -1388,6 +1604,7 @@ class Agent:
                 delegation_result = _run_hooks_delegation(
                     "OnDelegation", tool_name, arguments, None, hooks, context=context
                 )
+                _emit_hook_executions(context, delegation_result)
                 if delegation_result.blocked:
                     result = f"Delegation blocked: {delegation_result.message}"
                     tool_duration_ms = int((time.monotonic() - tool_start) * 1000)
@@ -1419,7 +1636,8 @@ class Agent:
             post_result = run_hooks(
                 "PostToolUse", tool_name, arguments, result, hooks, context=context
             )
-            if post_result.modified_output:
+            _emit_hook_executions(context, post_result)
+            if post_result.modified_output is not None:
                 result = post_result.modified_output
 
         # Safety cap on result size (skip for multimodal list results)

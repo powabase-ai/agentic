@@ -23,6 +23,7 @@ class StrategyEngine:
         *,
         history: list[dict] | None = None,
         on_delegate_complete: Callable[[dict], None] | None = None,
+        hooks: list | None = None,
     ) -> OrchestrationOutput:
         raise NotImplementedError
 

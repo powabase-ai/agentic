@@ -101,6 +101,7 @@ class Orchestration:
         context: ExecutionContext | None = None,
         history: list[dict] | None = None,
         on_delegate_complete: Callable[[dict], None] | None = None,
+        hooks: list | None = None,
     ) -> OrchestrationOutput:
         """Execute the orchestration with the given input."""
         from agentic.orchestration.engine import get_strategy_engine
@@ -113,6 +114,7 @@ class Orchestration:
             context,
             history=history,
             on_delegate_complete=on_delegate_complete,
+            hooks=hooks,
         )
 
     async def arun(

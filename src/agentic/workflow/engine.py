@@ -158,6 +158,7 @@ class DAGEngine:
         input_mappings = resolved_config.pop("_inputMappings", [])
         if not isinstance(input_mappings, list):
             return
+        mapped_fields: set[str] = set()
         for mapping in input_mappings:
             source_id = mapping.get("sourceId")
             output_field = mapping.get("outputField", "output")
@@ -173,11 +174,20 @@ class DAGEngine:
                 value = _resolve_output_path(source_data, f"output.{output_field}")
             if value is None:
                 continue
-            # Skip if the user manually specified a value for this field
             existing = resolved_config.get(target_field)
-            if existing is not None and existing != "":
+            if target_field in mapped_fields:
+                # Multiple mappings target the same field → concatenate them
+                # (strings join with a newline; non-strings fall back to last-wins).
+                if isinstance(existing, str) and isinstance(value, str):
+                    resolved_config[target_field] = f"{existing}\n{value}"
+                else:
+                    resolved_config[target_field] = value
+            elif existing is not None and existing != "":
+                # A genuine user-specified value (no mapping wrote it) → keep it.
                 continue
-            resolved_config[target_field] = value
+            else:
+                resolved_config[target_field] = value
+            mapped_fields.add(target_field)
 
     async def execute(self) -> AsyncGenerator[ExecutionEvent]:
         """Execute all blocks, yielding events as they occur."""
