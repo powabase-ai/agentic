@@ -159,7 +159,7 @@ class KnowledgeSearchTool(ToolDefinition):
         if self.search_handler is None:
             raise NotImplementedError(
                 f"KnowledgeSearchTool '{self.name}' has no search_handler. "
-                "The project-service must inject one at execution time."
+                "The caller must inject one at execution time."
             )
 
         kb_configs = self.knowledge_base_configs
