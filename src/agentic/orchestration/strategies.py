@@ -91,6 +91,7 @@ class SupervisorEngine(StrategyEngine):
         *,
         history: list[dict] | None = None,
         on_delegate_complete: Callable[[dict], None] | None = None,
+        hooks: list | None = None,
     ) -> OrchestrationOutput:
         if context is None:
             context = ExecutionContext()
@@ -130,9 +131,8 @@ class SupervisorEngine(StrategyEngine):
             # Create the orchestrator agent. orchestrator_config is the
             # canonical source for orchestrator-specific settings (model,
             # api_key); settings.get("model") is preserved as a back-compat
-            # fallback. api_key is None unless the project-service injected
-            # one for this request via build_orchestration → litellm then
-            # falls back to env vars.
+            # fallback. api_key is None unless the host injected one for
+            # this request; litellm then falls back to env vars.
             orchestrator_model = orchestration.orchestrator_config.get(
                 "model"
             ) or orchestration.settings.get("model", "gpt-5.4")
@@ -160,24 +160,21 @@ class SupervisorEngine(StrategyEngine):
                 context=context,
                 tools=delegate_tools,
                 max_steps=orchestration.settings.get("max_steps", 25),
+                hooks=hooks,
             )
 
             # output.usage = ORCHESTRATOR LLM tokens ONLY. Children persist
             # their own usage via on_delegate_complete; the orchestration
-            # row stays leaf-only so the platform's "tokens by all sources"
-            # dashboard rollup can sum across orchestration_runs + agent_runs
-            # without double-counting Supervisor delegations. Per-run
-            # drill-down UI sums orch_run + child_runs explicitly.
+            # record stays leaf-only so a caller aggregating usage across
+            # orchestration runs and agent runs can sum them without
+            # double-counting Supervisor delegations.
             #
             # Engine contract divergence: SequentialEngine and ParallelEngine
             # set output.usage to the SUM of their children (no orchestrator
-            # LLM exists in those engines), so per-project charts that read
-            # both ai.orchestration_runs.usage AND ai.agent_runs.usage will
-            # DOUBLE-COUNT those engines. The control-plane org-stats rollup
-            # queries agent_runs only (see ai.observability_agent_run_buckets
-            # in migration 0019) and is unaffected. See
-            # docs/observability-token-tracking.md for the dashboard
-            # implications.
+            # LLM exists in those engines), so a caller that sums usage from
+            # both orchestration runs and agent runs will DOUBLE-COUNT those
+            # engines. Callers that need a single source of truth should sum
+            # from agent runs only, or track engine type when aggregating.
             output.content = agent_output.content
             output.status = agent_output.status
             output.steps = agent_output.steps
@@ -220,6 +217,7 @@ class SequentialEngine(StrategyEngine):
         *,
         history: list[dict] | None = None,
         on_delegate_complete: Callable[[dict], None] | None = None,
+        hooks: list | None = None,
     ) -> OrchestrationOutput:
         if context is None:
             context = ExecutionContext()
@@ -333,15 +331,12 @@ class SequentialEngine(StrategyEngine):
             # output.usage = sum of children — diverges from SupervisorEngine,
             # which sets output.usage to the orchestrator's own LLM tokens
             # only. Sequential has no orchestrator LLM, so the sum *is* the
-            # whole orchestration's spend. Caveat for the platform: each
-            # child also fires on_delegate_complete with its own usage, so
-            # the per-project token chart double-counts when it sums
-            # ai.orchestration_runs.usage AND ai.agent_runs.usage for a
-            # Sequential/Parallel run. The control-plane org rollup queries
-            # agent_runs only and is unaffected; the per-project chart
-            # surfaces both at the user's request via the source filter.
-            # See docs/observability-token-tracking.md "Engine token
-            # accounting" for the full contract.
+            # whole orchestration's spend. Caveat for callers: each child
+            # also fires on_delegate_complete with its own usage, so a
+            # caller that sums usage from both orchestration runs and agent
+            # runs will double-count on a Sequential/Parallel run. See the
+            # SupervisorEngine contract note above for the corresponding
+            # single-counted case.
             output.usage = total_usage
             output.steps = len(agent_entities)
         except Exception as e:
@@ -372,6 +367,7 @@ class ParallelEngine(StrategyEngine):
         *,
         history: list[dict] | None = None,
         on_delegate_complete: Callable[[dict], None] | None = None,
+        hooks: list | None = None,
     ) -> OrchestrationOutput:
         if context is None:
             context = ExecutionContext()
@@ -493,9 +489,9 @@ class ParallelEngine(StrategyEngine):
                 output.error = f"Agents failed: {', '.join(failed.keys())}"
                 # output.usage = sum of children. Same divergence from
                 # SupervisorEngine as SequentialEngine — see that engine's
-                # comment for the full contract. Per-project token charts
-                # that read both ai.orchestration_runs.usage and
-                # ai.agent_runs.usage will double-count Parallel runs.
+                # comment for the full contract. A caller that sums usage
+                # from both orchestration runs and agent runs will
+                # double-count Parallel runs.
                 output.usage = total_usage
                 output.completed_at = datetime.now(UTC)
                 context.emit_event(
@@ -548,10 +544,11 @@ class ParallelEngine(StrategyEngine):
             output.status = ExecutionStatus.COMPLETED
             # output.usage = sum of children + merge agent. Children also
             # fire on_delegate_complete with their own usage; the merge
-            # agent does NOT (it runs in the parent context). So per-project
-            # charts will double-count children but correctly count the
-            # merge step. See SequentialEngine comment + the docs for the
-            # full contract.
+            # agent does NOT (it runs in the parent context). So a caller
+            # that sums usage from both orchestration runs and agent runs
+            # will double-count children but correctly count the merge
+            # step. See the SupervisorEngine comment above for the full
+            # contract.
             output.usage = total_usage
             output.steps = len(agent_entities) + 1
         except Exception as e:

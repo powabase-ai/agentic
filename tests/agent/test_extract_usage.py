@@ -97,7 +97,7 @@ def test_chat_completions_pydantic_shape():
 
 def test_responses_api_falls_back_to_input_output_token_names():
     # Provider only sets input/output_tokens; the helper must remap them
-    # to prompt/completion_tokens because the rest of the platform reads
+    # to prompt/completion_tokens because the rest of the codebase reads
     # those keys.
     usage = {
         "input_tokens": 100,

@@ -1,4 +1,4 @@
-"""Verify that agentic/ source files cannot import billing-platform modules."""
+"""Verify that agentic/ source files cannot import billing-service modules."""
 
 import subprocess
 from pathlib import Path

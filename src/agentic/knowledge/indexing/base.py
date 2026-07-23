@@ -2,7 +2,7 @@
 IndexingAlgorithm - base class for indexing strategies.
 
 Indexing algorithms transform content into indexed artifacts (chunks, entities, etc.)
-without performing storage operations. The platform is responsible for storing
+without performing storage operations. The caller is responsible for storing
 the results.
 """
 
@@ -51,8 +51,8 @@ class IndexingAlgorithm(ABC):
         Index content and return the result.
 
         This method transforms raw content into indexed artifacts without
-        performing any storage operations. The caller (typically the platform)
-        is responsible for storing the results.
+        performing any storage operations. The caller (typically the host
+        application) is responsible for storing the results.
 
         Args:
             content: The text content to index
@@ -64,7 +64,7 @@ class IndexingAlgorithm(ABC):
 
         Example:
             >>> result = algorithm.index("Long document text...", config)
-            >>> # Platform stores: store.store_chunks(result.chunks)
+            >>> # Caller stores: store.store_chunks(result.chunks)
         """
         ...
 

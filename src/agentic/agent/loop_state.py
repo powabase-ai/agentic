@@ -62,6 +62,19 @@ class LoopState:
             transition={"reason": reason},
         )
 
+    def with_compact_success(self) -> LoopState:
+        """Clear the circuit breaker after a compaction that made progress.
+
+        The guard is meant to count *consecutive* failures. Without this reset
+        three interleaved transient failures (provider 529, rate limit) would
+        permanently disable compaction for the rest of the run.
+        """
+        return replace(self, compact_failure_count=0)
+
+    def with_compact_failure(self) -> LoopState:
+        """Record that a compaction attempt made no progress (circuit breaker)."""
+        return replace(self, compact_failure_count=self.compact_failure_count + 1)
+
     def with_fallback_model(self, fallback_model: str) -> LoopState:
         return replace(
             self, current_model=fallback_model, transition={"reason": "model_fallback"}

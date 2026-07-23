@@ -24,10 +24,10 @@ reasoning summaries (`reasoning.summary`) for org-verified accounts; an
 unverified org gets HTTP 400 "Your organization must be verified to generate
 reasoning summaries" — which fails the entire call for EVERY OpenAI reasoning
 model (o-series and the gpt-5 families) whenever reasoning_effort is set.
-Since this platform is multi-tenant BYOK and most orgs are unverified, we omit
-the summary request by default. Deployments whose OpenAI org is verified can
-opt back in (to surface reasoning summaries in the UI) by setting the env var
-``OPENAI_REASONING_SUMMARY=1``.
+Since callers may run multi-tenant BYOK deployments where most end-user OpenAI
+orgs are unverified, we omit the summary request by default. Deployments
+whose OpenAI org is verified can opt back in (to surface reasoning summaries
+in the UI) by setting the env var ``OPENAI_REASONING_SUMMARY=1``.
 """
 
 from __future__ import annotations

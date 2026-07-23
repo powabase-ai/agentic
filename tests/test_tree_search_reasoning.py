@@ -1,6 +1,6 @@
 """Behavioral tests for reasoning-effort routing in tree_search retrieval.
 
-The string-match guard in the project-service wiring test only proves the
+The string-match guard in the host's wiring test only proves the
 *tokens* are present; this proves the *behavior* — specifically the
 route-then-kwargs ORDERING that agentic.llm.routing exists to enforce:
 

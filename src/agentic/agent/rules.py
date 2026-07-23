@@ -6,6 +6,58 @@ import json
 import re
 from typing import Any
 
+# Parse: field (NOT)? OPERATOR value
+# Match longest operators first to avoid partial matches (NOT IN before IN, etc.)
+# Shared by _evaluate_condition and validate_condition so a condition accepted at
+# config time is always one the evaluator can actually parse.
+CONDITION_PATTERN = re.compile(
+    r"^(\w+)\s+(NOT\s+)?(CONTAINS|STARTS_WITH|MATCHES|IN)\s+(.+)$"
+)
+MAX_MATCHES_PATTERN_LEN = 500
+
+
+def validate_condition(condition: Any) -> str | None:
+    """Return an error message if `condition` can never be evaluated, else None.
+
+    An unparseable condition makes `_evaluate_condition` return False, which
+    `evaluate_rules` reads as "no match" = allow. A typo'd operator therefore
+    produces a gate that denies nothing while reporting a clean pass — byte
+    identical to a rule that genuinely allowed the input. Catching it at config
+    time is the only place the difference is still visible.
+    """
+    if not isinstance(condition, str) or not condition.strip():
+        return "condition must be a non-empty string"
+
+    m = CONDITION_PATTERN.match(condition.strip())
+    if not m:
+        return (
+            f"condition {condition!r} is not parseable; expected "
+            '"<field> [NOT] <CONTAINS|STARTS_WITH|MATCHES|IN> <value>" '
+            "(operators are case-sensitive)"
+        )
+
+    op = m.group(3)
+    raw_value = m.group(4).strip()
+    if op == "MATCHES":
+        value = raw_value.strip("'\"")
+        if len(value) > MAX_MATCHES_PATTERN_LEN:
+            return (
+                f"MATCHES pattern exceeds {MAX_MATCHES_PATTERN_LEN} characters "
+                "and is rejected at evaluation time"
+            )
+        try:
+            re.compile(value, re.DOTALL)
+        except re.error as e:
+            return f"MATCHES pattern is not a valid regex: {e}"
+    elif op == "IN":
+        try:
+            items = json.loads(raw_value.replace("'", '"'))
+        except (json.JSONDecodeError, TypeError) as e:
+            return f'IN value must be a JSON list, e.g. ["a", "b"]: {e}'
+        if not isinstance(items, list):
+            return "IN value must be a JSON list"
+    return None
+
 
 def evaluate_rules(
     arguments: dict[str, Any],
@@ -35,10 +87,7 @@ def _evaluate_condition(condition: str, arguments: dict[str, Any]) -> bool:
     """
     condition = condition.strip()
 
-    # Use regex to parse: field (NOT)? OPERATOR value
-    # Match longest operators first to avoid partial matches (NOT IN before IN, etc.)
-    pattern = re.compile(r"^(\w+)\s+(NOT\s+)?(CONTAINS|STARTS_WITH|MATCHES|IN)\s+(.+)$")
-    m = pattern.match(condition)
+    m = CONDITION_PATTERN.match(condition)
     if not m:
         return False  # Unparseable condition doesn't match
 
