@@ -131,9 +131,8 @@ class SupervisorEngine(StrategyEngine):
             # Create the orchestrator agent. orchestrator_config is the
             # canonical source for orchestrator-specific settings (model,
             # api_key); settings.get("model") is preserved as a back-compat
-            # fallback. api_key is None unless the project-service injected
-            # one for this request via build_orchestration → litellm then
-            # falls back to env vars.
+            # fallback. api_key is None unless the host injected one for
+            # this request; litellm then falls back to env vars.
             orchestrator_model = orchestration.orchestrator_config.get(
                 "model"
             ) or orchestration.settings.get("model", "gpt-5.4")

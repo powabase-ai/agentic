@@ -75,9 +75,9 @@ class AgentBlock(BaseBlock):
                 pass
 
         # Workflow agent blocks are user automations; if api_key was provided in
-        # the workflow's services dict (from the project-service caller), use it
-        # so the recoupable wrap at the workflow execution driver correctly
-        # signals "user paid" via the BillingLogger BYOK skip.
+        # the workflow's services dict (from the host caller), use it
+        # so the recoupable wrap at the host's workflow runner correctly
+        # signals "user paid" via the host's BYOK skip.
         return Agent(
             model=model,
             system_prompt=system_prompt,
@@ -93,7 +93,7 @@ class AgentBlock(BaseBlock):
 
         # IMP-NEW-2: fail-closed — resolver is required so a missing injection
         # causes a loud error rather than silently bypassing BYOK and billing
-        # the platform key without recoup.  Workflow runners MUST inject it via
+        # the host's key without recoup.  Workflow runners MUST inject it via
         # make_services().
         if "resolve_agent_api_key" not in block_input.services:
             raise RuntimeError(

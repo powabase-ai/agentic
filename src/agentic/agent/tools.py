@@ -63,7 +63,7 @@ class ToolDefinition:
 
 @dataclass
 class BuiltinTool(ToolDefinition):
-    """Platform-provided tool. Execution logic is in-process."""
+    """Host-provided tool. Execution logic is in-process."""
 
     handler: Callable[[dict[str, Any], ExecutionContext | None], str] = field(
         default=None, repr=False
@@ -108,9 +108,9 @@ class CustomTool(ToolDefinition):
 
 @dataclass
 class KnowledgeSearchTool(ToolDefinition):
-    """Tool that searches knowledge bases via the platform's retrieval pipeline.
+    """Tool that searches knowledge bases via the host's retrieval pipeline.
 
-    The search_handler is injected by the project-service at execution time
+    The search_handler is injected by the host at execution time
     (it wraps create_and_execute()). The core library doesn't depend on
     Flask/SQLAlchemy — the handler bridges that gap.
     """
@@ -231,7 +231,7 @@ class DelegateTool(ToolDefinition):
     Used by the orchestration supervisor to invoke specialist agents.
     The delegate creates a child ExecutionContext and calls agent.run().
     An optional on_run_complete hook is invoked after the sub-agent returns —
-    the platform layer uses this to persist the delegated run.
+    the host uses this to persist the delegated run.
     """
 
     # Override parent's input_schema with auto-generated default
@@ -248,10 +248,10 @@ class DelegateTool(ToolDefinition):
     on_run_complete: Callable[[dict[str, Any]], None] | None = field(
         default=None, repr=False
     )
-    # Opaque platform identifier for the delegated agent — propagated into
-    # the on_run_complete payload so the platform layer can persist
-    # delegated agent_runs with their right agent_id. None when the caller
-    # didn't register one (delegations from non-platform code).
+    # Opaque host identifier for the delegated agent — propagated into
+    # the on_run_complete payload so the host can persist
+    # delegated runs with their right agent_id. None when the caller
+    # didn't register one (delegations from non-host code).
     agent_id: str | None = None
 
     def __post_init__(self):

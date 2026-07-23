@@ -1,9 +1,9 @@
 """
-PageIndex indexing algorithm — Agentic platform wrapper.
+PageIndex indexing algorithm — agentic library wrapper.
 
 This module is the public entry point for the PageIndex indexing strategy.
-It wraps the internal _pageindex_lib pipeline and adapts its output into the
-Agentic platform's IndexResult format.
+It wraps the internal _pageindex_lib pipeline and adapts its output into
+this library's IndexResult format.
 
 The indexer accepts a markdown document and produces two complementary outputs
 designed for a two-phase retrieval system:
@@ -235,7 +235,7 @@ class PageIndexResult(IndexResult):
 class PageIndexAlgorithm(IndexingAlgorithm):
     """Indexing algorithm that builds a hierarchical tree from markdown.
 
-    This is the Agentic platform adapter that bridges the IndexingAlgorithm
+    This is the adapter that bridges the IndexingAlgorithm
     interface with the internal _pageindex_lib pipeline. It:
 
     1. Reads configuration from IndexingConfig.extra

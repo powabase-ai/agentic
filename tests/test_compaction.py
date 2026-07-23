@@ -1235,7 +1235,7 @@ class TestContentCharLenMeasuresRealPayload:
     """A `total += 1000` proxy under-measured a 6MB base64 data URL by ~2000x,
     so `truncate_messages`' postcondition passed on a megabyte history and the
     whole compaction subsystem was inoperative for image-mode knowledge bases.
-    The platform's context handler resolves image storage refs to inline
+    The host's context handler resolves image storage refs to inline
     base64 data URLs, so this is production-reachable."""
 
     def test_base64_image_block_measured_by_its_payload(self):

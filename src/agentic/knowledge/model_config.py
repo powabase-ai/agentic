@@ -4,10 +4,10 @@ Knowledge module model & pipeline configuration.
 Single source of truth for all AI defaults used across knowledge
 pipelines: indexing, retrieval, reranking, embedding, and chunking.
 To change any default, update the constants below — all Python code
-references these (including agentic_project_service/strategies/registry.py).
+references these (including the host's own strategy registry).
 
-Frontend defaults (knowledge-bases/page.tsx, [kb_id]/page.tsx,
-constants.ts) must be updated separately to match.
+Any frontend defaults the host maintains must be updated separately
+to match.
 """
 
 import os

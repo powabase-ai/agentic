@@ -390,9 +390,9 @@ class Agent:
             # Accumulator state (not part of LoopState since these only grow)
             all_tool_calls: list[ToolCallRecord] = []
             # Track reasoning_tokens / cached_tokens too — reasoning models
-            # report them and the platform observability layer aggregates the
-            # full breakdown. Limiting this dict to the standard 3 keys
-            # silently drops reasoning info from multi-step ReAct loops.
+            # report them and the host aggregates the full breakdown.
+            # Limiting this dict to the standard 3 keys silently drops
+            # reasoning info from multi-step ReAct loops.
             total_usage: dict[str, int] = {
                 "prompt_tokens": 0,
                 "completion_tokens": 0,

@@ -149,7 +149,7 @@ def test_agent_block_hook_exceptions_do_not_break_execute():
 
 def test_agent_block_execute_passes_status_and_error_from_output():
     """On a failed arun (status=FAILED), the hook payload must carry status+error
-    so the platform recorder can persist with AgentRunStatus.FAILED instead of
+    so the host's recorder can persist with AgentRunStatus.FAILED instead of
     silently labelling it COMPLETED."""
     called = {}
 
@@ -273,7 +273,8 @@ def test_agent_block_fails_closed_without_resolver():
     'resolve_agent_api_key' is absent from services.
 
     This prevents the silent BYOK bypass where a missing injection would
-    use api_key=None (platform key) and bypass billing recoup.
+    use api_key=None (an ambient host key) and bypass the host's cost
+    attribution for the call.
     """
     block = _make_block()
     with patch("agentic.workflow.blocks.agent.Agent") as FakeAgentCls:
@@ -316,10 +317,11 @@ def test_agent_block_execute_passes_api_key_to_agent():
     """IMP-NEW-6: resolver return value must be forwarded as api_key= to Agent().
 
     Counterfactual: if AgentBlock called Agent() without passing api_key, the
-    Agent would fall back to the platform's ambient OPENAI_API_KEY instead of
-    the user's BYOK key, silently bypassing billing recoup.  Removing the
-    `api_key=api_key` argument from the _build_agent call causes this test to
-    FAIL because FakeAgentCls would be called with api_key=None (or absent).
+    Agent would fall back to the host's ambient OPENAI_API_KEY instead of
+    the user's BYOK key, silently bypassing the host's cost attribution.
+    Removing the `api_key=api_key` argument from the _build_agent call causes
+    this test to FAIL because FakeAgentCls would be called with api_key=None
+    (or absent).
     """
     fake_output = MagicMock()
     fake_output.content = "result"

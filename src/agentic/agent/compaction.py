@@ -166,7 +166,7 @@ def _block_char_len(item: Any) -> int:
     ~1,500,000 — so ``truncate_messages``' "did we get under target"
     postcondition passed on a megabyte history and the whole compaction
     subsystem was inoperative for image-mode knowledge bases. This is
-    production-reachable: the platform's context handler resolves image storage
+    production-reachable: the host's context handler resolves image storage
     refs to inline base64 data URLs, which reach us as message content arrays.
 
     Unrecognized block types are measured rather than counted as 0 for the same

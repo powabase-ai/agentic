@@ -89,10 +89,10 @@ def test_delegate_tool_without_hook_works_as_before():
 
 
 def test_delegate_tool_propagates_agent_id_to_hook_payload():
-    """The platform layer threads its agent UUID through OrchestrationEntity
-    → DelegateTool.agent_id; the hook payload must echo it so the platform
-    can persist child agent_runs with the right agent_id (otherwise the
-    per-agent dashboard breakdown under-counts).
+    """The host threads its agent UUID through OrchestrationEntity
+    → DelegateTool.agent_id; the hook payload must echo it so the host
+    can persist child runs with the right agent_id (otherwise
+    per-agent usage breakdowns under-count).
     """
     fake_agent = MagicMock()
     fake_agent.name = "Specialist"
@@ -116,8 +116,9 @@ def test_delegate_tool_propagates_agent_id_to_hook_payload():
 
 
 def test_delegate_tool_agent_id_defaults_to_none():
-    """Callers that don't register an agent_id (non-platform delegations)
-    still get a payload — agent_id is None, not missing or KeyError."""
+    """Callers that don't register an agent_id (delegations without a
+    host-assigned id) still get a payload — agent_id is None, not missing
+    or KeyError."""
     fake_agent = MagicMock()
     fake_agent.name = "Specialist"
     fake_agent.run.return_value = _make_agent_output()
@@ -238,8 +239,8 @@ def test_parallel_engine_invokes_hook_per_agent():
 
 
 def test_sequential_engine_propagates_agent_id():
-    """Sequential's hook payload must echo entity.agent_id so the platform
-    layer can persist child agent_runs with the right agent_id."""
+    """Sequential's hook payload must echo entity.agent_id so the host
+    can persist child runs with the right agent_id."""
     from agentic.orchestration.strategies import SequentialEngine
 
     entity_a = _make_mock_entity("AgentA")

@@ -25,10 +25,10 @@ class OrchestrationEntity:
     config: dict[str, Any] = field(default_factory=dict)
     position: int | None = None
     agent_tools: dict[str, ToolDefinition] | None = None
-    # Opaque platform identifier for the registered agent. The core library
-    # has no opinion on what this is — the platform layer (project-service)
-    # passes its own ai.agents UUID so delegated agent_runs can be persisted
-    # with the right agent_id. None for callers that don't have one.
+    # Opaque host identifier for the registered agent. The core library
+    # has no opinion on what this is — the host passes its own agent-record
+    # ID so delegated runs can be persisted with the right agent_id.
+    # None for callers that don't have one.
     agent_id: str | None = None
 
 
