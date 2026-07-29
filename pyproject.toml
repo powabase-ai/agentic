@@ -82,7 +82,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
-"agentic_billing_service".msg = "agentic/ must stay billing-agnostic. Use contextvars/callbacks instead. See spec 2026-05-26-credit-system-v1.5-design.md."
+"agentic_billing_service".msg = "agentic/ must stay billing-agnostic. Use contextvars/callbacks instead."
 "agentic_project_service.billing".msg = "agentic/ must stay billing-agnostic."
 "agentic_control_plane".msg = "agentic/ must stay control-plane-agnostic."
 
