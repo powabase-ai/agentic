@@ -1375,7 +1375,15 @@ class Agent:
                 finally:
                     yield_queue.put(sentinel)
 
-            worker = threading.Thread(target=_worker, daemon=True)
+            # Start the worker from a COPY of this thread's context, the same
+            # way the concurrent-tool path above does. accumulate_stream — and
+            # so litellm's callbacks — run on this thread, and consumers carry
+            # the current run id in a ContextVar. A bare Thread starts with a
+            # fresh context, so those callbacks read ContextVar defaults and
+            # lose the caller's run id.
+            worker = threading.Thread(
+                target=contextvars.copy_context().run, args=(_worker,), daemon=True
+            )
             worker.start()
 
             try:
