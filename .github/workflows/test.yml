@@ -1,0 +1,51 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The whole suite runs here, not a subset. It is hermetic — no database, no
+  # network, no API keys — and finishes in about 20 seconds, so there is no
+  # reason to split it into tiers or to defer part of it to a later job.
+  test:
+    name: pytest (Python 3.13)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # python-version is set explicitly rather than left to .python-version.
+      # Both say 3.13 today; stating it here means a change to one of them
+      # shows up as a version mismatch in review instead of silently moving
+      # which interpreter CI uses.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      # `--group dev` is explicit rather than relying on `dev` being uv's
+      # default-installed group, so renaming or re-scoping the group fails
+      # here instead of silently producing a venv without pytest.
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      # --no-sync: the step above already resolved and materialised the venv.
+      # Without it uv re-resolves mid-run, which can install a different set
+      # than the one just verified.
+      - name: Run tests
+        run: uv run --no-sync pytest tests/ -q
+
+      # No lint step, deliberately. `ruff check` currently reports 152 findings,
+      # so adding it here would make this workflow red on its first run — and a
+      # workflow that is always red teaches people to ignore it, including when
+      # the tests break. Lint gets its own change once the backlog is cleared or
+      # a ratchet is in place.
