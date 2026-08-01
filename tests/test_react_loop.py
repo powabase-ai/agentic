@@ -309,7 +309,7 @@ class TestStreamingKillSwitch:
 class TestStreamingContentDeltaEmission:
     """Streaming on -> content_delta events fire; line ~563 reasoning emit is suppressed.
 
-    Q1 resolution (issue #106): when streaming is enabled, the LLM's intermediary
+    When streaming is enabled, the LLM's intermediary
     prose alongside tool calls is already streamed via content_delta to the chat
     bubble — re-emitting it as a terminal reasoning event would duplicate.
     """
@@ -317,7 +317,7 @@ class TestStreamingContentDeltaEmission:
     @patch("agentic.agent.agent.litellm")
     def test_streaming_emits_content_delta_events(self, mock_litellm, monkeypatch):
         """Streaming on -> content_delta events fire for each fragment, no
-        duplicate reasoning event from line ~563 (Q1 fix)."""
+        duplicate reasoning event from line ~563."""
         monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
 
         # Step 1: streaming response with content + tool call (triggers

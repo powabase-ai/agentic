@@ -401,8 +401,8 @@ def _make_streaming_chunks(
 
 
 class TestAgentStreamCallbacks:
-    """Issue #274 contract — callbacks fire per fragment + reasoning_artifact
-    surfaces on the returned AgentOutput."""
+    """Streaming callback contract — callbacks fire per fragment and
+    reasoning_artifact surfaces on the returned AgentOutput."""
 
     def test_stream_invokes_on_content_delta_callback(self, monkeypatch):
         monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
