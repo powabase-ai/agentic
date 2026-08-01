@@ -549,8 +549,8 @@ class Agent:
                     reasoning_call_kwargs(effective_effort, routed_model)
                 )
 
-                # Streaming flag (issue #106 — read per-call, not module-level,
-                # so monkeypatch.setenv works in tests)
+                # Streaming flag: read per-call, not module-level, so
+                # monkeypatch.setenv works in tests.
                 streaming_enabled = (
                     os.getenv("AGENT_LLM_STREAMING_ENABLED", "true").lower() == "true"
                 )
@@ -914,8 +914,7 @@ class Agent:
                 # thinking alongside tool calls.
                 # NOTE: gated off in streaming mode — the prose was already
                 # streamed via content_delta to the chat bubble; emitting it
-                # again here as a reasoning event would duplicate (issue #106
-                # Q1 resolution).
+                # again here as a reasoning event would duplicate.
                 if has_tool_calls and assistant_msg.content and not streaming_enabled:
                     context.emit_event(
                         {
@@ -1469,7 +1468,7 @@ class Agent:
         """Async stream the agent's response, yielding content chunks.
 
         Note: astream() does not surface AgentOutput. Use stream() if you need
-        the reasoning artifact; tracked as a follow-up to issue #274.
+        the reasoning artifact.
         """
         # Create execution context if not provided
         if context is None:

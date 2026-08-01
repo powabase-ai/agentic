@@ -384,12 +384,12 @@ def _int_env(name: str, default: int) -> int:
 # _pageindex_lib/utils.py::_llm_completion. The previous hardcoded 60s was too
 # low for reasoning models (gpt-5* / o-series) doing large ToC extraction on big
 # documents — they legitimately take 60-90s+, which tripped litellm.Timeout and,
-# with num_retries=0 (PR #445), failed the ENTIRE indexing job on a single slow
+# with num_retries=0, failed the ENTIRE indexing job on a single slow
 # response. Env-overridable: PAGEINDEX_LLM_TIMEOUT.
 PAGEINDEX_LLM_TIMEOUT = _int_env("PAGEINDEX_LLM_TIMEOUT", 300)
 
 # litellm retry count for those calls. Default 1 gives a single retry on a
-# transient timeout/5xx without the unbounded re-send of PR #445's original 3
+# transient timeout/5xx without the unbounded re-send of the original 3
 # (each retry re-sends a large prompt — the bounded-memory concern). Set to 0 to
-# fully restore #445's no-retry behavior. Env-overridable: PAGEINDEX_LLM_NUM_RETRIES.
+# fully restore the previous no-retry behavior. Env-overridable: PAGEINDEX_LLM_NUM_RETRIES.
 PAGEINDEX_LLM_NUM_RETRIES = _int_env("PAGEINDEX_LLM_NUM_RETRIES", 1)
