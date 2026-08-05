@@ -1,6 +1,6 @@
 [project]
 name = "powabase-agentic"
-version = "0.1.0"
+version = "0.2.0"
 description = "The agent, knowledge, orchestration, and workflow engine behind the Powabase stack — a Python library you can also import on its own"
 readme = "README.md"
 authors = [
