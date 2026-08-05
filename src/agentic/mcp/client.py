@@ -27,6 +27,36 @@ def _jsonrpc_request(method: str, params: dict | None = None) -> dict:
     }
 
 
+_MCP_ACCEPT = "application/json, text/event-stream"
+
+
+class McpError(RuntimeError):
+    """An MCP request failed at the transport or protocol level."""
+
+
+def _post_rpc(
+    server_url: str,
+    server_headers: dict[str, str] | None,
+    method: str,
+    params: dict | None = None,
+    timeout: int = 30,
+) -> dict:
+    """POST a JSON-RPC request to an MCP server and return the decoded envelope.
+
+    The Accept header is set last and deliberately overrides any caller value:
+    the Streamable HTTP transport requires both content types, so a caller
+    override could only break the request.
+    """
+    headers = {**(server_headers or {}), "Accept": _MCP_ACCEPT}
+    resp = requests.post(
+        server_url,
+        json=_jsonrpc_request(method, params),
+        headers=headers,
+        timeout=timeout,
+    )
+    return resp.json()
+
+
 def discover_mcp_tools(
     server_url: str,
     server_headers: dict[str, str] | None = None,
@@ -34,13 +64,7 @@ def discover_mcp_tools(
 ) -> list[McpToolInfo]:
     """Query an MCP server for available tools. Returns empty list on error."""
     try:
-        resp = requests.post(
-            server_url,
-            json=_jsonrpc_request("tools/list"),
-            headers=server_headers or {},
-            timeout=timeout,
-        )
-        data = resp.json()
+        data = _post_rpc(server_url, server_headers, "tools/list", timeout=timeout)
         if "error" in data:
             logger.warning("MCP tools/list error: %s", data["error"])
             return []
@@ -70,16 +94,13 @@ def call_mcp_tool(
 ) -> str:
     """Call an MCP tool and return the text result. Returns error string on failure."""
     try:
-        resp = requests.post(
+        data = _post_rpc(
             server_url,
-            json=_jsonrpc_request(
-                "tools/call",
-                {"name": tool_name, "arguments": arguments or {}},
-            ),
-            headers=server_headers or {},
-            timeout=timeout,
+            server_headers,
+            "tools/call",
+            {"name": tool_name, "arguments": arguments or {}},
+            timeout,
         )
-        data = resp.json()
         if "error" in data:
             return f"Error: {data['error'].get('message', 'Unknown MCP error')}"
         content_blocks = data.get("result", {}).get("content", [])

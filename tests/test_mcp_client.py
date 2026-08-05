@@ -158,3 +158,54 @@ class TestCallMcpTool:
             arguments={},
         )
         assert "error" in result.lower()
+
+
+class TestStreamableHttpHeaders:
+    ACCEPT = "application/json, text/event-stream"
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_discover_sends_accept_header(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            json=MagicMock(
+                return_value={"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}
+            ),
+        )
+        discover_mcp_tools(server_url="https://mcp.example.com")
+        assert mock_post.call_args.kwargs["headers"]["Accept"] == self.ACCEPT
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_call_sends_accept_header(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            json=MagicMock(
+                return_value={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"content": [{"type": "text", "text": "ok"}]},
+                }
+            ),
+        )
+        call_mcp_tool(
+            server_url="https://mcp.example.com", tool_name="t", arguments={}
+        )
+        assert mock_post.call_args.kwargs["headers"]["Accept"] == self.ACCEPT
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_caller_headers_preserved_but_accept_wins(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            json=MagicMock(
+                return_value={"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}
+            ),
+        )
+        discover_mcp_tools(
+            server_url="https://mcp.example.com",
+            server_headers={"Authorization": "Bearer token", "Accept": "text/plain"},
+        )
+        sent = mock_post.call_args.kwargs["headers"]
+        assert sent["Authorization"] == "Bearer token"
+        assert sent["Accept"] == self.ACCEPT
