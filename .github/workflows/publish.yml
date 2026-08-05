@@ -1,16 +1,16 @@
 name: Publish
 on:
+  # Fired when the release PR merges. Separate from the release job so a failed
+  # publish is independently re-runnable — PyPI versions are immutable, so a
+  # half-finished release must be resumable, not repeatable.
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
-      version:
-        description: "PEP 440 version, e.g. 0.1.0rc1 (pre-1.0 uses -rc)"
+      tag:
+        description: "Existing release tag to (re)publish, e.g. v0.2.0"
         required: true
         type: string
-      dry_run:
-        description: "Build only; publish nothing"
-        required: true
-        default: true
-        type: boolean
 
 permissions:
   contents: read
@@ -22,13 +22,23 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     steps:
+      # Build the released commit, not the branch tip. Without `ref:` a
+      # re-run after further merges would publish code the tag does not name.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
       - uses: astral-sh/setup-uv@v5
-      - name: Set version and build sdist+wheel
+      - name: Build sdist+wheel
         run: |
-          # version is static in pyproject (hatchling); set it deterministically.
-          sed -i -E "s/^version = \".*\"/version = \"${{ inputs.version }}\"/" pyproject.toml
-          grep -E "^version = " pyproject.toml
+          # The tag and pyproject must already agree — release-please wrote
+          # both. This workflow no longer writes the version itself: doing so
+          # would make the tag and the file two sources of truth for one value,
+          # free to disagree. Assert instead, and fail if they ever do.
+          REF="${{ github.event.release.tag_name || inputs.tag }}"
+          WANT="${REF#v}"
+          HAVE=$(grep -E '^version = ' pyproject.toml | cut -d'"' -f2)
+          test "$WANT" = "$HAVE" || { echo "::error::tag ${WANT} != pyproject ${HAVE}"; exit 1; }
+          echo "version-agrees=${HAVE}"
           uv build --out-dir dist
           ls -la dist
           # Guard the packages=["src/agentic"] mapping: the wheel must ship the
@@ -41,6 +51,8 @@ jobs:
           assert mods, "empty wheel — hatch packages mapping is wrong"
           print(f"wheel packages {len(mods)} agentic modules")
           PY
-      - name: Publish to PyPI (real run only)
-        if: ${{ inputs.dry_run == false }}
+      # No dry-run branch. Every `release: published` run is real, and a
+      # publish step that can be skipped by an input is a publish step that can
+      # silently not happen.
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
