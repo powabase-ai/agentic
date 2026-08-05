@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import itertools
 import json
+import logging
 from typing import Any
 
 import requests
 
 from agentic.mcp.types import McpToolInfo
+
+logger = logging.getLogger(__name__)
 
 _request_id_counter = itertools.count(1)
 
@@ -41,30 +44,86 @@ def _require_envelope_is_dict(data: Any) -> dict:
     return data
 
 
-def _parse_rpc_response(resp: requests.Response) -> dict:
-    """Return the JSON-RPC envelope from a JSON or SSE-framed response.
+def _iter_sse_data_payloads(body: str):
+    """Yield each SSE event's data payload, assembled per the SSE spec.
 
-    Streamable HTTP servers may answer a POST with either a JSON body or an
-    SSE stream. The envelope is carried in the stream's first `data:` frame.
+    An event's `data:` lines accumulate until a blank line dispatches the
+    event; multi-line data joins with newlines. Other fields (`event:`,
+    `id:`, `retry:`) and comment lines are ignored.
     """
+    data_lines: list[str] = []
+    for raw_line in body.split("\n"):
+        line = raw_line.rstrip("\r")
+        if line == "":
+            if data_lines:
+                yield "\n".join(data_lines)
+                data_lines = []
+            continue
+        if line.startswith("data:"):
+            value = line[len("data:") :]
+            if value.startswith(" "):
+                value = value[1:]
+            data_lines.append(value)
+    if data_lines:
+        yield "\n".join(data_lines)
+
+
+def _envelopes_from_response(resp: requests.Response) -> list[dict]:
+    """Decode every JSON-RPC envelope in a JSON or SSE-framed response body."""
     content_type = (resp.headers.get("content-type") or "").lower()
     if "text/event-stream" in content_type:
-        for line in resp.text.splitlines():
-            if line.startswith("data:"):
-                payload = line[len("data:") :].strip()
-                try:
-                    data = json.loads(payload)
-                except ValueError as e:
-                    raise McpError(
-                        f"MCP server sent an unparseable SSE data frame: {e}"
-                    ) from e
-                return _require_envelope_is_dict(data)
-        raise McpError("MCP server returned an SSE stream containing no data frame")
+        # The SSE spec mandates UTF-8. Decoding resp.content directly matters:
+        # a bare text/event-stream content type would make requests fall back
+        # to ISO-8859-1 and mojibake every non-ASCII character.
+        try:
+            body = resp.content.decode("utf-8")
+        except UnicodeDecodeError as e:
+            raise McpError(f"MCP server sent a non-UTF-8 SSE stream: {e}") from e
+        envelopes = []
+        for payload in _iter_sse_data_payloads(body):
+            try:
+                data = json.loads(payload)
+            except ValueError as e:
+                raise McpError(
+                    f"MCP server sent an unparseable SSE data frame: {e}"
+                ) from e
+            envelopes.append(_require_envelope_is_dict(data))
+        if not envelopes:
+            raise McpError("MCP server returned an SSE stream containing no data frame")
+        return envelopes
     try:
         data = resp.json()
     except ValueError as e:
         raise McpError(f"MCP server returned a non-JSON response: {e}") from e
-    return _require_envelope_is_dict(data)
+    return [_require_envelope_is_dict(data)]
+
+
+def _select_response_envelope(envelopes: list[dict], request_id: int) -> dict:
+    """Pick the envelope that answers `request_id`.
+
+    A stream may interleave notifications — and server-to-client requests —
+    before the response; both carry a `method` key and are skipped. The
+    response is the envelope whose id matches the request's, or an id-less
+    error envelope, which JSON-RPC permits when the server could not read
+    the request id.
+    """
+    for env in envelopes:
+        if "method" in env:
+            continue
+        env_id = env.get("id")
+        if env_id == request_id or str(env_id) == str(request_id):
+            if "result" not in env and "error" not in env:
+                raise McpError(
+                    "MCP server returned a response envelope with neither "
+                    "result nor error"
+                )
+            return env
+        if env_id is None and "error" in env:
+            return env
+    raise McpError(
+        f"MCP server response contained no envelope answering request id "
+        f"{request_id} ({len(envelopes)} envelope(s) received)"
+    )
 
 
 def _post_rpc(
@@ -80,11 +139,12 @@ def _post_rpc(
     the Streamable HTTP transport requires both content types, so a caller
     override could only break the request.
     """
+    request = _jsonrpc_request(method, params)
     try:
         headers = {**(server_headers or {}), "Accept": _MCP_ACCEPT}
         resp = requests.post(
             server_url,
-            json=_jsonrpc_request(method, params),
+            json=request,
             headers=headers,
             timeout=timeout,
         )
@@ -93,7 +153,7 @@ def _post_rpc(
     if resp.status_code >= 400:
         snippet = (resp.text or "")[:300]
         raise McpError(f"MCP server returned HTTP {resp.status_code}: {snippet}")
-    return _parse_rpc_response(resp)
+    return _select_response_envelope(_envelopes_from_response(resp), request["id"])
 
 
 def discover_mcp_tools(
@@ -149,14 +209,24 @@ def call_mcp_tool(
             server_headers,
             "tools/call",
             {"name": tool_name, "arguments": arguments or {}},
-            timeout,
+            timeout=timeout,
         )
         if "error" in data:
-            return f"Error: {data['error'].get('message', 'Unknown MCP error')}"
+            try:
+                message = data["error"].get("message", "Unknown MCP error")
+            except (KeyError, AttributeError, TypeError):
+                message = f"malformed error member: {data['error']!r}"
+            logger.warning(
+                "MCP tools/call %r on %s failed: %s", tool_name, server_url, message
+            )
+            return f"Error: {message}"
         content_blocks = data.get("result", {}).get("content", [])
         text_parts = [
-            b.get("text", "") for b in content_blocks if b.get("type") == "text"
+            b.get("text", "")
+            for b in content_blocks
+            if isinstance(b, dict) and b.get("type") == "text"
         ]
         return "".join(text_parts) or "(empty response)"
     except Exception as e:
+        logger.warning("MCP tools/call %r on %s failed: %s", tool_name, server_url, e)
         return f"Error calling MCP tool: {e}"

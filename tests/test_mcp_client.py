@@ -1,8 +1,17 @@
+import itertools
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
+import agentic.mcp.client
 from agentic.mcp.client import McpError, call_mcp_tool, discover_mcp_tools
+
+
+@pytest.fixture(autouse=True)
+def _reset_request_ids(monkeypatch):
+    """Restart the JSON-RPC id counter so fixture bodies can hardcode id 1."""
+    monkeypatch.setattr(agentic.mcp.client, "_request_id_counter", itertools.count(1))
 
 
 class TestDiscoverMcpTools:
@@ -235,11 +244,7 @@ SSE_CALL_BODY = (
 class TestSseFramedResponses:
     @patch("agentic.mcp.client.requests.post")
     def test_discover_parses_sse_body(self, mock_post):
-        mock_post.return_value = MagicMock(
-            status_code=200,
-            headers={"content-type": "text/event-stream"},
-            text=SSE_TOOLS_BODY,
-        )
+        mock_post.return_value = _sse_response(SSE_TOOLS_BODY)
         tools = discover_mcp_tools(server_url="https://mcp.example.com")
         assert len(tools) == 1
         assert tools[0].name == "search"
@@ -247,11 +252,7 @@ class TestSseFramedResponses:
 
     @patch("agentic.mcp.client.requests.post")
     def test_call_parses_sse_body(self, mock_post):
-        mock_post.return_value = MagicMock(
-            status_code=200,
-            headers={"content-type": "text/event-stream"},
-            text=SSE_CALL_BODY,
-        )
+        mock_post.return_value = _sse_response(SSE_CALL_BODY)
         result = call_mcp_tool(
             server_url="https://mcp.example.com", tool_name="t", arguments={}
         )
@@ -317,22 +318,14 @@ class TestErrorSurfacing:
 class TestUnparseableResponses:
     @patch("agentic.mcp.client.requests.post")
     def test_discover_raises_on_sse_stream_without_data_frame(self, mock_post):
-        mock_post.return_value = MagicMock(
-            status_code=200,
-            headers={"content-type": "text/event-stream"},
-            text="event: message\n\n",
-        )
+        mock_post.return_value = _sse_response("event: message\n\n")
         with pytest.raises(McpError) as exc:
             discover_mcp_tools(server_url="https://mcp.example.com")
         assert "no data frame" in str(exc.value)
 
     @patch("agentic.mcp.client.requests.post")
     def test_discover_raises_on_unparseable_sse_data_frame(self, mock_post):
-        mock_post.return_value = MagicMock(
-            status_code=200,
-            headers={"content-type": "text/event-stream"},
-            text="event: message\ndata: not-json\n\n",
-        )
+        mock_post.return_value = _sse_response("event: message\ndata: not-json\n\n")
         with pytest.raises(McpError) as exc:
             discover_mcp_tools(server_url="https://mcp.example.com")
         assert "unparseable SSE data frame" in str(exc.value)
@@ -472,13 +465,268 @@ class TestNonDictEnvelopes:
     def test_discover_raises_on_null_sse_body(self, mock_post):
         # json.loads("null") returns None, so the SSE branch needs the same
         # non-dict guard as the resp.json() branch.
-        mock_post.return_value = MagicMock(
-            status_code=200,
-            headers={"content-type": "text/event-stream"},
-            text="event: message\ndata: null\n\n",
-        )
+        mock_post.return_value = _sse_response("event: message\ndata: null\n\n")
         with pytest.raises(McpError):
             discover_mcp_tools(server_url="https://mcp.example.com")
+
+
+def _sse_response(body: str, charset: str | None = None) -> requests.Response:
+    """A real requests.Response carrying an SSE body, as a server would send it."""
+    resp = requests.Response()
+    resp.status_code = 200
+    content_type = "text/event-stream"
+    if charset:
+        content_type += f"; charset={charset}"
+    resp.headers["content-type"] = content_type
+    resp._content = body.encode("utf-8")
+    return resp
+
+
+SSE_NOTIFICATIONS_THEN_CALL_RESPONSE = (
+    "event: message\n"
+    'data: {"jsonrpc": "2.0", "method": "notifications/message", '
+    '"params": {"level": "info", "data": "working on it"}}\n'
+    "\n"
+    "event: message\n"
+    'data: {"jsonrpc": "2.0", "method": "notifications/progress", '
+    '"params": {"progressToken": "t", "progress": 1}}\n'
+    "\n"
+    "event: message\n"
+    'data: {"jsonrpc": "2.0", "id": 1, "result": {"content": '
+    '[{"type": "text", "text": "final answer"}]}}\n'
+    "\n"
+)
+
+
+class TestSseResponseSelection:
+    """The response is the envelope answering our request id — never just the
+    first frame. Compliant servers (FastMCP among them) interleave
+    notifications on the POST stream before the response."""
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_call_skips_notifications_before_the_response(self, mock_post):
+        mock_post.return_value = _sse_response(SSE_NOTIFICATIONS_THEN_CALL_RESPONSE)
+        result = call_mcp_tool(
+            server_url="https://mcp.example.com", tool_name="t", arguments={}
+        )
+        assert result == "final answer"
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_discover_skips_notifications_before_the_response(self, mock_post):
+        body = (
+            "event: message\n"
+            'data: {"jsonrpc": "2.0", "method": "notifications/message", '
+            '"params": {"level": "info", "data": "listing"}}\n'
+            "\n"
+            "event: message\n"
+            'data: {"jsonrpc": "2.0", "id": 1, "result": {"tools": '
+            '[{"name": "search", "inputSchema": {"type": "object"}}]}}\n'
+            "\n"
+        )
+        mock_post.return_value = _sse_response(body)
+        tools = discover_mcp_tools(server_url="https://mcp.example.com")
+        assert [t.name for t in tools] == ["search"]
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_stream_of_only_notifications_raises(self, mock_post):
+        body = (
+            "event: message\n"
+            'data: {"jsonrpc": "2.0", "method": "notifications/message", '
+            '"params": {"level": "info", "data": "nothing else"}}\n'
+            "\n"
+        )
+        mock_post.return_value = _sse_response(body)
+        with pytest.raises(McpError) as exc:
+            discover_mcp_tools(server_url="https://mcp.example.com")
+        assert "no envelope answering request id" in str(exc.value)
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_matching_envelope_with_neither_result_nor_error_raises(self, mock_post):
+        mock_post.return_value = _sse_response(
+            'event: message\ndata: {"jsonrpc": "2.0", "id": 1}\n\n'
+        )
+        with pytest.raises(McpError) as exc:
+            discover_mcp_tools(server_url="https://mcp.example.com")
+        assert "neither result nor error" in str(exc.value)
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_json_body_with_neither_result_nor_error_raises(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            json=MagicMock(return_value={"jsonrpc": "2.0", "id": 1}),
+        )
+        with pytest.raises(McpError) as exc:
+            discover_mcp_tools(server_url="https://mcp.example.com")
+        assert "neither result nor error" in str(exc.value)
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_request_id_less_error_envelope_is_accepted(self, mock_post):
+        # JSON-RPC permits id:null on an error when the server could not
+        # read the request id.
+        mock_post.return_value = _sse_response(
+            "event: message\n"
+            'data: {"jsonrpc": "2.0", "id": null, "error": '
+            '{"code": -32700, "message": "Parse error"}}\n'
+            "\n"
+        )
+        with pytest.raises(McpError) as exc:
+            discover_mcp_tools(server_url="https://mcp.example.com")
+        assert "Parse error" in str(exc.value)
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_multi_line_data_frame_joins_with_newlines(self, mock_post):
+        # The SSE spec joins an event's data: lines with \n before dispatch.
+        mock_post.return_value = _sse_response(
+            "event: message\n"
+            'data: {"jsonrpc": "2.0", "id": 1,\n'
+            'data:  "result": {"tools": []}}\n'
+            "\n"
+        )
+        tools = discover_mcp_tools(server_url="https://mcp.example.com")
+        assert tools == []
+
+
+class TestSseCharset:
+    @patch("agentic.mcp.client.requests.post")
+    def test_bare_event_stream_content_type_decodes_as_utf8(self, mock_post):
+        # The SSE spec mandates UTF-8. Without this a bare text/event-stream
+        # content type makes requests fall back to ISO-8859-1 and mojibake
+        # every non-ASCII character.
+        body = (
+            "event: message\n"
+            'data: {"jsonrpc": "2.0", "id": 1, "result": {"tools": '
+            '[{"name": "café", "description": "über ✓", '
+            '"inputSchema": {"type": "object"}}]}}\n'
+            "\n"
+        )
+        mock_post.return_value = _sse_response(body)  # no charset in header
+        tools = discover_mcp_tools(server_url="https://mcp.example.com")
+        assert tools[0].name == "café"
+        assert tools[0].description == "über ✓"
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_non_utf8_sse_stream_raises(self, mock_post):
+        resp = requests.Response()
+        resp.status_code = 200
+        resp.headers["content-type"] = "text/event-stream"
+        resp._content = b"event: message\ndata: \xff\xfe\n\n"
+        mock_post.return_value = resp
+        with pytest.raises(McpError) as exc:
+            discover_mcp_tools(server_url="https://mcp.example.com")
+        assert "non-UTF-8" in str(exc.value)
+
+
+class TestRequestShape:
+    @patch("agentic.mcp.client.requests.post")
+    def test_discover_sends_tools_list_method(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            json=MagicMock(
+                return_value={"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}
+            ),
+        )
+        discover_mcp_tools(server_url="https://mcp.example.com")
+        assert mock_post.call_args.kwargs["json"]["method"] == "tools/list"
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_timeout_reaches_requests_as_a_keyword(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            json=MagicMock(
+                return_value={"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}
+            ),
+        )
+        discover_mcp_tools(server_url="https://mcp.example.com", timeout=7)
+        assert mock_post.call_args.kwargs["timeout"] == 7
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_call_timeout_reaches_requests_as_a_keyword(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            json=MagicMock(
+                return_value={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"content": [{"type": "text", "text": "ok"}]},
+                }
+            ),
+        )
+        call_mcp_tool(
+            server_url="https://mcp.example.com",
+            tool_name="t",
+            arguments={},
+            timeout=9,
+        )
+        assert mock_post.call_args.kwargs["timeout"] == 9
+
+
+class TestCallErrorPathRobustness:
+    @patch("agentic.mcp.client.requests.post")
+    def test_call_survives_error_member_that_is_a_string(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            json=MagicMock(return_value={"jsonrpc": "2.0", "id": 1, "error": "boom"}),
+        )
+        result = call_mcp_tool(
+            server_url="https://mcp.example.com", tool_name="t", arguments={}
+        )
+        assert result.startswith("Error")
+        assert "has no attribute" not in result
+        assert "boom" in result
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_call_ignores_non_dict_content_blocks(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            json=MagicMock(
+                return_value={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "content": ["rogue string", {"type": "text", "text": "kept"}]
+                    },
+                }
+            ),
+        )
+        result = call_mcp_tool(
+            server_url="https://mcp.example.com", tool_name="t", arguments={}
+        )
+        assert result == "kept"
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_call_error_return_is_logged(self, mock_post, caplog):
+        mock_post.side_effect = Exception("Connection refused")
+        with caplog.at_level("WARNING", logger="agentic.mcp.client"):
+            result = call_mcp_tool(
+                server_url="https://bad.example.com", tool_name="t", arguments={}
+            )
+        assert result.startswith("Error")
+        assert any("Connection refused" in r.message for r in caplog.records)
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_call_jsonrpc_error_is_logged(self, mock_post, caplog):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            json=MagicMock(
+                return_value={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": -32600, "message": "Invalid request"},
+                }
+            ),
+        )
+        with caplog.at_level("WARNING", logger="agentic.mcp.client"):
+            call_mcp_tool(
+                server_url="https://mcp.example.com", tool_name="t", arguments={}
+            )
+        assert any("Invalid request" in r.message for r in caplog.records)
 
 
 class TestNonMappingServerHeaders:
