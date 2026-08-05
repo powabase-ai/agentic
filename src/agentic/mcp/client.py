@@ -12,6 +12,12 @@ from agentic.mcp.types import McpToolInfo
 
 _request_id_counter = itertools.count(1)
 
+_MCP_ACCEPT = "application/json, text/event-stream"
+
+
+class McpError(RuntimeError):
+    """An MCP request failed at the transport or protocol level."""
+
 
 def _next_id() -> int:
     return next(_request_id_counter)
@@ -26,14 +32,16 @@ def _jsonrpc_request(method: str, params: dict | None = None) -> dict:
     }
 
 
-_MCP_ACCEPT = "application/json, text/event-stream"
+def _require_envelope_is_dict(data: Any) -> dict:
+    if not isinstance(data, dict):
+        raise McpError(
+            "MCP server returned a JSON-RPC envelope that is not an object: "
+            f"{type(data).__name__}"
+        )
+    return data
 
 
-class McpError(RuntimeError):
-    """An MCP request failed at the transport or protocol level."""
-
-
-def _parse_rpc_response(resp) -> dict:
+def _parse_rpc_response(resp: requests.Response) -> dict:
     """Return the JSON-RPC envelope from a JSON or SSE-framed response.
 
     Streamable HTTP servers may answer a POST with either a JSON body or an
@@ -45,16 +53,18 @@ def _parse_rpc_response(resp) -> dict:
             if line.startswith("data:"):
                 payload = line[len("data:") :].strip()
                 try:
-                    return json.loads(payload)
+                    data = json.loads(payload)
                 except ValueError as e:
                     raise McpError(
                         f"MCP server sent an unparseable SSE data frame: {e}"
                     ) from e
+                return _require_envelope_is_dict(data)
         raise McpError("MCP server returned an SSE stream containing no data frame")
     try:
-        return resp.json()
+        data = resp.json()
     except ValueError as e:
         raise McpError(f"MCP server returned a non-JSON response: {e}") from e
+    return _require_envelope_is_dict(data)
 
 
 def _post_rpc(
@@ -70,8 +80,8 @@ def _post_rpc(
     the Streamable HTTP transport requires both content types, so a caller
     override could only break the request.
     """
-    headers = {**(server_headers or {}), "Accept": _MCP_ACCEPT}
     try:
+        headers = {**(server_headers or {}), "Accept": _MCP_ACCEPT}
         resp = requests.post(
             server_url,
             json=_jsonrpc_request(method, params),
@@ -106,8 +116,8 @@ def discover_mcp_tools(
                 f"MCP tools/list returned a malformed error member: {data['error']!r}"
             ) from e
         raise McpError(f"MCP tools/list failed: {message}")
-    tools_data = data.get("result", {}).get("tools", [])
     try:
+        tools_data = data.get("result", {}).get("tools", [])
         return [
             McpToolInfo(
                 name=t["name"],
@@ -120,7 +130,9 @@ def discover_mcp_tools(
             for t in tools_data
         ]
     except (KeyError, AttributeError, TypeError) as e:
-        raise McpError(f"MCP tools/list returned a malformed tool entry: {e}") from e
+        raise McpError(
+            f"MCP tools/list returned a malformed tools/list result: {e}"
+        ) from e
 
 
 def call_mcp_tool(

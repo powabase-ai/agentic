@@ -196,9 +196,7 @@ class TestStreamableHttpHeaders:
                 }
             ),
         )
-        call_mcp_tool(
-            server_url="https://mcp.example.com", tool_name="t", arguments={}
-        )
+        call_mcp_tool(server_url="https://mcp.example.com", tool_name="t", arguments={})
         assert mock_post.call_args.kwargs["headers"]["Accept"] == self.ACCEPT
 
     @patch("agentic.mcp.client.requests.post")
@@ -373,9 +371,7 @@ class TestMalformedSuccessPayloads:
         mock_post.return_value = MagicMock(
             status_code=200,
             headers={"content-type": "application/json"},
-            json=MagicMock(
-                return_value={"jsonrpc": "2.0", "id": 1, "error": "boom"}
-            ),
+            json=MagicMock(return_value={"jsonrpc": "2.0", "id": 1, "error": "boom"}),
         )
         with pytest.raises(McpError):
             discover_mcp_tools(server_url="https://mcp.example.com")
@@ -395,3 +391,104 @@ class TestMalformedSuccessPayloads:
         )
         with pytest.raises(McpError):
             discover_mcp_tools(server_url="https://mcp.example.com")
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_discover_raises_on_result_that_is_a_string(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            json=MagicMock(return_value={"jsonrpc": "2.0", "id": 1, "result": "oops"}),
+        )
+        with pytest.raises(McpError):
+            discover_mcp_tools(server_url="https://mcp.example.com")
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_discover_raises_on_result_that_is_a_list(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            json=MagicMock(return_value={"jsonrpc": "2.0", "id": 1, "result": ["x"]}),
+        )
+        with pytest.raises(McpError):
+            discover_mcp_tools(server_url="https://mcp.example.com")
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_discover_raises_on_result_that_is_null(self, mock_post):
+        # `.get("result", {})` returns None here because the key IS present
+        # with a null value — the {} default never applies.
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            json=MagicMock(return_value={"jsonrpc": "2.0", "id": 1, "result": None}),
+        )
+        with pytest.raises(McpError):
+            discover_mcp_tools(server_url="https://mcp.example.com")
+
+
+class TestNonDictEnvelopes:
+    """A 2xx body that decodes to valid JSON that isn't a JSON object at all."""
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_discover_raises_on_null_body(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            json=MagicMock(return_value=None),
+        )
+        with pytest.raises(McpError):
+            discover_mcp_tools(server_url="https://mcp.example.com")
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_discover_raises_on_integer_body(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            json=MagicMock(return_value=5),
+        )
+        with pytest.raises(McpError):
+            discover_mcp_tools(server_url="https://mcp.example.com")
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_discover_raises_on_list_body(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            json=MagicMock(return_value=[1, 2, 3]),
+        )
+        with pytest.raises(McpError):
+            discover_mcp_tools(server_url="https://mcp.example.com")
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_discover_raises_on_string_body(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            json=MagicMock(return_value="hello"),
+        )
+        with pytest.raises(McpError):
+            discover_mcp_tools(server_url="https://mcp.example.com")
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_discover_raises_on_null_sse_body(self, mock_post):
+        # json.loads("null") returns None, so the SSE branch needs the same
+        # non-dict guard as the resp.json() branch.
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "text/event-stream"},
+            text="event: message\ndata: null\n\n",
+        )
+        with pytest.raises(McpError):
+            discover_mcp_tools(server_url="https://mcp.example.com")
+
+
+class TestNonMappingServerHeaders:
+    """`server_headers` that isn't a mapping — reachable from an unvalidated API field."""
+
+    @pytest.mark.parametrize("bad_headers", [["a", "b"], "abc", 7])
+    @patch("agentic.mcp.client.requests.post")
+    def test_discover_raises_on_non_mapping_headers(self, mock_post, bad_headers):
+        with pytest.raises(McpError):
+            discover_mcp_tools(
+                server_url="https://mcp.example.com", server_headers=bad_headers
+            )
+        mock_post.assert_not_called()

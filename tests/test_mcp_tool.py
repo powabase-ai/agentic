@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import requests
+
 from agentic.agent.tools import McpTool
 
 
@@ -60,7 +62,9 @@ class TestMcpTool:
     @patch("agentic.mcp.client.requests.post")
     def test_execute_calls_mcp_server(self, mock_post):
         mock_post.return_value = MagicMock(
+            spec=requests.Response,
             status_code=200,
+            headers={"content-type": "application/json"},
             json=MagicMock(
                 return_value={
                     "jsonrpc": "2.0",
