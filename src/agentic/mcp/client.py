@@ -99,20 +99,28 @@ def discover_mcp_tools(
     """
     data = _post_rpc(server_url, server_headers, "tools/list", timeout=timeout)
     if "error" in data:
-        message = data["error"].get("message", "unknown error")
+        try:
+            message = data["error"].get("message", "unknown error")
+        except (KeyError, AttributeError, TypeError) as e:
+            raise McpError(
+                f"MCP tools/list returned a malformed error member: {data['error']!r}"
+            ) from e
         raise McpError(f"MCP tools/list failed: {message}")
     tools_data = data.get("result", {}).get("tools", [])
-    return [
-        McpToolInfo(
-            name=t["name"],
-            description=t.get("description", ""),
-            input_schema=t.get("inputSchema", {"type": "object"}),
-            read_only_hint=t.get("annotations", {}).get("readOnlyHint", False),
-            destructive_hint=t.get("annotations", {}).get("destructiveHint", False),
-            open_world_hint=t.get("annotations", {}).get("openWorldHint", False),
-        )
-        for t in tools_data
-    ]
+    try:
+        return [
+            McpToolInfo(
+                name=t["name"],
+                description=t.get("description", ""),
+                input_schema=t.get("inputSchema", {"type": "object"}),
+                read_only_hint=t.get("annotations", {}).get("readOnlyHint", False),
+                destructive_hint=t.get("annotations", {}).get("destructiveHint", False),
+                open_world_hint=t.get("annotations", {}).get("openWorldHint", False),
+            )
+            for t in tools_data
+        ]
+    except (KeyError, AttributeError, TypeError) as e:
+        raise McpError(f"MCP tools/list returned a malformed tool entry: {e}") from e
 
 
 def call_mcp_tool(

@@ -349,3 +349,49 @@ class TestUnparseableResponses:
         with pytest.raises(McpError) as exc:
             discover_mcp_tools(server_url="https://mcp.example.com")
         assert "non-JSON response" in str(exc.value)
+
+
+class TestMalformedSuccessPayloads:
+    @patch("agentic.mcp.client.requests.post")
+    def test_discover_raises_on_tool_entry_missing_name(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            json=MagicMock(
+                return_value={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"tools": [{"description": "no name field"}]},
+                }
+            ),
+        )
+        with pytest.raises(McpError):
+            discover_mcp_tools(server_url="https://mcp.example.com")
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_discover_raises_on_error_member_not_a_dict(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            json=MagicMock(
+                return_value={"jsonrpc": "2.0", "id": 1, "error": "boom"}
+            ),
+        )
+        with pytest.raises(McpError):
+            discover_mcp_tools(server_url="https://mcp.example.com")
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_discover_raises_on_tools_entry_not_a_dict(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            json=MagicMock(
+                return_value={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"tools": ["nope"]},
+                }
+            ),
+        )
+        with pytest.raises(McpError):
+            discover_mcp_tools(server_url="https://mcp.example.com")
