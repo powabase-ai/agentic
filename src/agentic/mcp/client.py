@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import json
 import logging
 from typing import Any
 
@@ -34,6 +35,30 @@ class McpError(RuntimeError):
     """An MCP request failed at the transport or protocol level."""
 
 
+def _parse_rpc_response(resp) -> dict:
+    """Return the JSON-RPC envelope from a JSON or SSE-framed response.
+
+    Streamable HTTP servers may answer a POST with either a JSON body or an
+    SSE stream. The envelope is carried in the stream's first `data:` frame.
+    """
+    content_type = (resp.headers.get("content-type") or "").lower()
+    if "text/event-stream" in content_type:
+        for line in resp.text.splitlines():
+            if line.startswith("data:"):
+                payload = line[len("data:") :].strip()
+                try:
+                    return json.loads(payload)
+                except ValueError as e:
+                    raise McpError(
+                        f"MCP server sent an unparseable SSE data frame: {e}"
+                    ) from e
+        raise McpError("MCP server returned an SSE stream containing no data frame")
+    try:
+        return resp.json()
+    except ValueError as e:
+        raise McpError(f"MCP server returned a non-JSON response: {e}") from e
+
+
 def _post_rpc(
     server_url: str,
     server_headers: dict[str, str] | None,
@@ -54,7 +79,7 @@ def _post_rpc(
         headers=headers,
         timeout=timeout,
     )
-    return resp.json()
+    return _parse_rpc_response(resp)
 
 
 def discover_mcp_tools(

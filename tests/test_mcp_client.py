@@ -8,6 +8,7 @@ class TestDiscoverMcpTools:
     def test_discover_returns_tools(self, mock_post):
         mock_post.return_value = MagicMock(
             status_code=200,
+            headers={"content-type": "application/json"},
             json=MagicMock(
                 return_value={
                     "jsonrpc": "2.0",
@@ -56,6 +57,7 @@ class TestDiscoverMcpTools:
     def test_discover_empty_server(self, mock_post):
         mock_post.return_value = MagicMock(
             status_code=200,
+            headers={"content-type": "application/json"},
             json=MagicMock(
                 return_value={
                     "jsonrpc": "2.0",
@@ -79,6 +81,7 @@ class TestCallMcpTool:
     def test_call_returns_text_result(self, mock_post):
         mock_post.return_value = MagicMock(
             status_code=200,
+            headers={"content-type": "application/json"},
             json=MagicMock(
                 return_value={
                     "jsonrpc": "2.0",
@@ -107,6 +110,7 @@ class TestCallMcpTool:
     def test_call_handles_multiple_content_blocks(self, mock_post):
         mock_post.return_value = MagicMock(
             status_code=200,
+            headers={"content-type": "application/json"},
             json=MagicMock(
                 return_value={
                     "jsonrpc": "2.0",
@@ -132,6 +136,7 @@ class TestCallMcpTool:
     def test_call_handles_error_response(self, mock_post):
         mock_post.return_value = MagicMock(
             status_code=200,
+            headers={"content-type": "application/json"},
             json=MagicMock(
                 return_value={
                     "jsonrpc": "2.0",
@@ -209,3 +214,44 @@ class TestStreamableHttpHeaders:
         sent = mock_post.call_args.kwargs["headers"]
         assert sent["Authorization"] == "Bearer token"
         assert sent["Accept"] == self.ACCEPT
+
+
+SSE_TOOLS_BODY = (
+    "event: message\n"
+    'data: {"jsonrpc": "2.0", "id": 1, "result": {"tools": [{"name": "search", '
+    '"description": "Search things", "inputSchema": {"type": "object"}}]}}\n'
+    "\n"
+)
+
+SSE_CALL_BODY = (
+    "event: message\n"
+    'data: {"jsonrpc": "2.0", "id": 1, "result": {"content": '
+    '[{"type": "text", "text": "hello from sse"}]}}\n'
+    "\n"
+)
+
+
+class TestSseFramedResponses:
+    @patch("agentic.mcp.client.requests.post")
+    def test_discover_parses_sse_body(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "text/event-stream"},
+            text=SSE_TOOLS_BODY,
+        )
+        tools = discover_mcp_tools(server_url="https://mcp.example.com")
+        assert len(tools) == 1
+        assert tools[0].name == "search"
+        assert tools[0].input_schema == {"type": "object"}
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_call_parses_sse_body(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "text/event-stream"},
+            text=SSE_CALL_BODY,
+        )
+        result = call_mcp_tool(
+            server_url="https://mcp.example.com", tool_name="t", arguments={}
+        )
+        assert result == "hello from sse"
