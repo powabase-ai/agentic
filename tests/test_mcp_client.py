@@ -1,6 +1,8 @@
 from unittest.mock import MagicMock, patch
 
-from agentic.mcp.client import call_mcp_tool, discover_mcp_tools
+import pytest
+
+from agentic.mcp.client import McpError, call_mcp_tool, discover_mcp_tools
 
 
 class TestDiscoverMcpTools:
@@ -70,10 +72,11 @@ class TestDiscoverMcpTools:
         assert tools == []
 
     @patch("agentic.mcp.client.requests.post")
-    def test_discover_handles_error(self, mock_post):
+    def test_discover_raises_on_transport_error(self, mock_post):
         mock_post.side_effect = Exception("Connection refused")
-        tools = discover_mcp_tools(server_url="https://bad.example.com")
-        assert tools == []
+        with pytest.raises(McpError) as exc:
+            discover_mcp_tools(server_url="https://bad.example.com")
+        assert "Connection refused" in str(exc.value)
 
 
 class TestCallMcpTool:
@@ -255,3 +258,94 @@ class TestSseFramedResponses:
             server_url="https://mcp.example.com", tool_name="t", arguments={}
         )
         assert result == "hello from sse"
+
+
+HTTP_406_BODY = (
+    '{"jsonrpc": "2.0", "id": "server-error", "error": {"code": -32600, '
+    '"message": "Not Acceptable: Client must accept both application/json '
+    'and text/event-stream"}}'
+)
+
+
+class TestErrorSurfacing:
+    @patch("agentic.mcp.client.requests.post")
+    def test_discover_raises_on_http_error(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=406,
+            headers={"content-type": "application/json"},
+            text=HTTP_406_BODY,
+        )
+        with pytest.raises(McpError) as exc:
+            discover_mcp_tools(server_url="https://mcp.example.com")
+        assert "406" in str(exc.value)
+        assert "Not Acceptable" in str(exc.value)
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_discover_raises_on_jsonrpc_error(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            json=MagicMock(
+                return_value={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": -32601, "message": "Method not found"},
+                }
+            ),
+        )
+        with pytest.raises(McpError) as exc:
+            discover_mcp_tools(server_url="https://mcp.example.com")
+        assert "Method not found" in str(exc.value)
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_call_returns_error_string_on_http_error(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=406,
+            headers={"content-type": "application/json"},
+            text=HTTP_406_BODY,
+        )
+        result = call_mcp_tool(
+            server_url="https://mcp.example.com", tool_name="t", arguments={}
+        )
+        assert "Error calling MCP tool" in result
+        assert "Not Acceptable" in result
+
+    def test_mcp_error_is_exported_from_package(self):
+        from agentic.mcp import McpError as Exported
+
+        assert Exported is McpError
+
+
+class TestUnparseableResponses:
+    @patch("agentic.mcp.client.requests.post")
+    def test_discover_raises_on_sse_stream_without_data_frame(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "text/event-stream"},
+            text="event: message\n\n",
+        )
+        with pytest.raises(McpError) as exc:
+            discover_mcp_tools(server_url="https://mcp.example.com")
+        assert "no data frame" in str(exc.value)
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_discover_raises_on_unparseable_sse_data_frame(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "text/event-stream"},
+            text="event: message\ndata: not-json\n\n",
+        )
+        with pytest.raises(McpError) as exc:
+            discover_mcp_tools(server_url="https://mcp.example.com")
+        assert "unparseable SSE data frame" in str(exc.value)
+
+    @patch("agentic.mcp.client.requests.post")
+    def test_discover_raises_on_non_json_body(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            json=MagicMock(side_effect=ValueError("Expecting value")),
+        )
+        with pytest.raises(McpError) as exc:
+            discover_mcp_tools(server_url="https://mcp.example.com")
+        assert "non-JSON response" in str(exc.value)

@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import itertools
 import json
-import logging
 from typing import Any
 
 import requests
 
 from agentic.mcp.types import McpToolInfo
 
-logger = logging.getLogger(__name__)
 _request_id_counter = itertools.count(1)
 
 
@@ -73,12 +71,18 @@ def _post_rpc(
     override could only break the request.
     """
     headers = {**(server_headers or {}), "Accept": _MCP_ACCEPT}
-    resp = requests.post(
-        server_url,
-        json=_jsonrpc_request(method, params),
-        headers=headers,
-        timeout=timeout,
-    )
+    try:
+        resp = requests.post(
+            server_url,
+            json=_jsonrpc_request(method, params),
+            headers=headers,
+            timeout=timeout,
+        )
+    except Exception as e:
+        raise McpError(f"MCP request to {server_url} failed: {e}") from e
+    if resp.status_code >= 400:
+        snippet = (resp.text or "")[:300]
+        raise McpError(f"MCP server returned HTTP {resp.status_code}: {snippet}")
     return _parse_rpc_response(resp)
 
 
@@ -87,27 +91,28 @@ def discover_mcp_tools(
     server_headers: dict[str, str] | None = None,
     timeout: int = 30,
 ) -> list[McpToolInfo]:
-    """Query an MCP server for available tools. Returns empty list on error."""
-    try:
-        data = _post_rpc(server_url, server_headers, "tools/list", timeout=timeout)
-        if "error" in data:
-            logger.warning("MCP tools/list error: %s", data["error"])
-            return []
-        tools_data = data.get("result", {}).get("tools", [])
-        return [
-            McpToolInfo(
-                name=t["name"],
-                description=t.get("description", ""),
-                input_schema=t.get("inputSchema", {"type": "object"}),
-                read_only_hint=t.get("annotations", {}).get("readOnlyHint", False),
-                destructive_hint=t.get("annotations", {}).get("destructiveHint", False),
-                open_world_hint=t.get("annotations", {}).get("openWorldHint", False),
-            )
-            for t in tools_data
-        ]
-    except Exception as e:
-        logger.warning("MCP discover failed for %s: %s", server_url, e)
-        return []
+    """Query an MCP server for the tools it advertises.
+
+    Raises:
+        McpError: on transport failure, an HTTP error status, an unparseable
+            body, or a JSON-RPC error member in the response.
+    """
+    data = _post_rpc(server_url, server_headers, "tools/list", timeout=timeout)
+    if "error" in data:
+        message = data["error"].get("message", "unknown error")
+        raise McpError(f"MCP tools/list failed: {message}")
+    tools_data = data.get("result", {}).get("tools", [])
+    return [
+        McpToolInfo(
+            name=t["name"],
+            description=t.get("description", ""),
+            input_schema=t.get("inputSchema", {"type": "object"}),
+            read_only_hint=t.get("annotations", {}).get("readOnlyHint", False),
+            destructive_hint=t.get("annotations", {}).get("destructiveHint", False),
+            open_world_hint=t.get("annotations", {}).get("openWorldHint", False),
+        )
+        for t in tools_data
+    ]
 
 
 def call_mcp_tool(
