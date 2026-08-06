@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.0](https://github.com/powabase-ai/agentic/compare/v0.2.0...v0.3.0) (2026-08-06)
+
+
+### ⚠ BREAKING CHANGES
+
+* **mcp:** make the MCP client Streamable HTTP compliant ([#16](https://github.com/powabase-ai/agentic/issues/16))
+
+### Bug Fixes
+
+* **ci:** re-run the title check when the head moves ([#19](https://github.com/powabase-ai/agentic/issues/19)) ([2e14948](https://github.com/powabase-ai/agentic/commit/2e14948f78617c06df3a2c7c4473a96ce9304a6b))
+* **mcp:** make the MCP client Streamable HTTP compliant ([#16](https://github.com/powabase-ai/agentic/issues/16)) ([4b74f79](https://github.com/powabase-ai/agentic/commit/4b74f79a333da4796bddede6486919a84f9afd45))
+
+
+### Documentation
+
+* add a contributing guide ([#17](https://github.com/powabase-ai/agentic/issues/17)) ([c9dec22](https://github.com/powabase-ai/agentic/commit/c9dec223b626c23cfcfee76e53e3827452ca0c33))
+
 ## [0.2.0](https://github.com/powabase-ai/agentic/compare/v0.1.0...v0.2.0) (2026-08-05)
 
 
