@@ -148,6 +148,21 @@ def sample_agent():
 
 
 @pytest.fixture(autouse=True)
+def reset_mcp_request_ids(monkeypatch):
+    """Restart the MCP JSON-RPC id counter so fixture bodies can hardcode id 1.
+
+    Lives in conftest (not test_mcp_client.py) because any MCP-touching test
+    file may hardcode ids — test_mcp_tool.py does — and the counter is global,
+    so isolation must be too.
+    """
+    import itertools
+
+    import agentic.mcp.client
+
+    monkeypatch.setattr(agentic.mcp.client, "_request_id_counter", itertools.count(1))
+
+
+@pytest.fixture(autouse=True)
 def disable_streaming_by_default(monkeypatch):
     """Pin AGENT_LLM_STREAMING_ENABLED=false for the autouse default.
 
