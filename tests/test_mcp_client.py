@@ -847,9 +847,9 @@ class TestLazyFrameDecoding:
         resp = requests.Response()
         resp.status_code = 200
         resp.headers["content-type"] = "text/event-stream"
-        resp._content = "﻿".encode("utf-8") + (
-            'event: message\ndata: {"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}\n\n'
-        ).encode("utf-8")
+        resp._content = "﻿".encode() + (
+            b'event: message\ndata: {"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}\n\n'
+        )
         mock_post.return_value = resp
         assert discover_mcp_tools(server_url="https://mcp.example.com") == []
 
