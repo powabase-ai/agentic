@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/powabase-ai/agentic/compare/v0.3.0...v0.3.1) (2026-08-12)
+
+
+### Bug Fixes
+
+* **ingest:** add mistral behind lighton in the auto extraction chain ([#26](https://github.com/powabase-ai/agentic/issues/26)) ([83da141](https://github.com/powabase-ai/agentic/commit/83da141706ae7d0924d136d5f8932410751dc53b))
+
 ## [0.3.0](https://github.com/powabase-ai/agentic/compare/v0.2.0...v0.3.0) (2026-08-06)
 
 
