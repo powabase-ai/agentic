@@ -1090,19 +1090,24 @@ class TestPDFExtractorOCRLocalFallback:
 
 
 class TestPDFExtractorAutoMode:
-    """Test the auto-mode fallback chain: lighton-first, paddleocr/mistral excluded."""
+    """Test the auto-mode fallback chain: lighton-first, mistral second, paddleocr excluded."""
 
     @pytest.mark.asyncio
-    async def test_auto_mode_tries_lighton_first_then_skips_paddleocr_and_mistral(self):
-        """Auto mode must try lighton FIRST (the default OCR head this PR ships),
-        walk the local chain in order, and never reach paddleocr/mistral.
+    async def test_auto_mode_tries_lighton_then_mistral_then_locals(self):
+        """Auto mode must try lighton FIRST, fall to mistral SECOND, then walk the
+        local chain in order, and never reach paddleocr.
 
-        Asserting only the negatives (paddle/mistral not called) is not enough:
-        with every chain method patched-to-fail, a regression that dropped lighton
+        mistral sits between the cloud OCR head and the local methods so that a
+        lighton outage still yields OCR output. Without it, a failed lighton drops
+        straight to opendataloader/fitz/pdfplumber — none of which OCR — so a
+        scanned PDF silently produces empty text rather than an error.
+
+        Asserting only the negatives (paddle not called) is not enough: with every
+        chain method patched-to-fail, a regression that dropped lighton or mistral
         from the chain entirely would still raise "All extraction methods failed"
-        and still skip paddle/mistral — so the negative-only test would pass while
-        the headline change silently regressed. We therefore record call order and
-        assert lighton actually ran, and ran first.
+        and still skip paddle — so the negative-only test would pass while the
+        headline change silently regressed. We therefore record call order and
+        assert both cloud methods actually ran, in order.
         """
         extractor = PDFExtractor(
             paddleocr_api_key="key",
@@ -1129,20 +1134,20 @@ class TestPDFExtractorAutoMode:
             return _fail
 
         with patch.object(extractor, "_extract_lighton", side_effect=_record("lighton")) as mock_lighton, \
+             patch.object(extractor, "_extract_mistral", side_effect=_record("mistral")) as mock_mistral, \
              patch.object(extractor, "_extract_opendataloader", side_effect=_record("opendataloader")), \
              patch.object(extractor, "_extract_fitz", side_effect=_record("fitz")), \
              patch.object(extractor, "_extract_pdfplumber", side_effect=_record("pdfplumber")), \
-             patch.object(extractor, "_extract_paddleocr") as mock_paddle, \
-             patch.object(extractor, "_extract_mistral") as mock_mistral:
+             patch.object(extractor, "_extract_paddleocr") as mock_paddle:
             with pytest.raises(ExtractionError, match="All extraction methods failed"):
                 await extractor.extract(raw)
 
-        # The change this PR ships: lighton is the head and is tried first.
+        # lighton stays the head; mistral is the OCR-preserving second hop.
         mock_lighton.assert_called_once()
-        assert call_order == ["lighton", "opendataloader", "fitz", "pdfplumber"]
-        # paddleocr/mistral are explicit-only — never reached in auto mode.
+        mock_mistral.assert_called_once()
+        assert call_order == ["lighton", "mistral", "opendataloader", "fitz", "pdfplumber"]
+        # paddleocr is explicit-only — never reached in auto mode.
         mock_paddle.assert_not_called()
-        mock_mistral.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_auto_mode_strips_lighton_when_no_key(self, caplog):
@@ -1185,6 +1190,57 @@ class TestPDFExtractorAutoMode:
         )
         # ...and is NOT escalated to a warning/error (it is an expected config).
         assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_auto_mode_strips_mistral_when_no_key(self, caplog):
+        """Without MISTRAL_API_KEY, auto mode drops mistral from the chain rather
+        than attempting it and letting it fail.
+
+        Mirrors the lighton skip above. agentic ships as a public wheel that
+        self-hosters install directly, and most configure no MISTRAL_API_KEY —
+        attempting it anyway would put a spurious failure in every one of their
+        extraction logs. An absent optional key is expected configuration, so the
+        skip is INFO, not a warning.
+
+        lighton IS keyed here and fails, so the chain genuinely reaches mistral's
+        position: without the strip, mistral would be attempted and raise.
+        """
+        extractor = PDFExtractor(lighton_api_key="key")  # no mistral_api_key
+        raw = RawContent(
+            content=b"%PDF-1.4 fake",
+            mime_type="application/pdf",
+            source_uri="upload://test.pdf",
+            metadata={"extraction_model": "auto"},
+        )
+
+        mock_result = ExtractionResult(
+            source_uri="upload://test.pdf",
+            mime_type="application/pdf",
+            derivatives=[Derivative(type="markdown", content="odl text")],
+            extraction_method="opendataloader",
+        )
+
+        with caplog.at_level(logging.INFO):
+            with patch.object(
+                extractor,
+                "_extract_lighton",
+                side_effect=ExtractionError(
+                    "lighton down", extractor_name="pdf", source_uri="upload://test.pdf"
+                ),
+            ), \
+                 patch.object(extractor, "_extract_mistral") as mock_mistral, \
+                 patch.object(extractor, "_extract_opendataloader", return_value=mock_result):
+                result = await extractor.extract(raw)
+
+        # mistral is dropped from the chain — never invoked — so the failed
+        # lighton hands straight to opendataloader.
+        mock_mistral.assert_not_called()
+        assert result.extraction_method == "opendataloader"
+        # The skip is logged at INFO and names the key that would enable it.
+        assert any(
+            r.levelno == logging.INFO and "mistral" in r.message.lower()
+            for r in caplog.records
+        )
 
 
 class TestDocxExtractor:

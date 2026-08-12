@@ -76,16 +76,19 @@ class PDFExtractor(Extractor):
 
     Extraction methods (in order of preference):
     1. LightOnOCR - Default OCR head for scanned PDFs (auto mode; requires API key)
-    2. OpenDataLoader - High-accuracy structural extraction (local, needs Java)
-    3. PyMuPDF (fitz) - Fast, good for text-based PDFs
-    4. pdfplumber - Fallback for edge cases
+    2. Mistral OCR - OCR fallback behind LightOnOCR (auto mode; requires API key)
+    3. OpenDataLoader - High-accuracy structural extraction (local, needs Java)
+    4. PyMuPDF (fitz) - Fast, good for text-based PDFs
+    5. pdfplumber - Fallback for edge cases
 
-    In auto mode LightOnOCR runs first as the default head (it is skipped when
-    no API key is configured), then falls back to the local chain
-    (opendataloader → fitz → pdfplumber). Mistral and PaddleOCR are available
-    only when explicitly requested. When an explicitly requested cloud OCR
-    method (mistral, paddleocr, lighton) fails, extraction falls back to those
-    same local methods.
+    In auto mode LightOnOCR runs first as the default head, then Mistral OCR,
+    then the local chain (opendataloader → fitz → pdfplumber). Either OCR entry
+    is skipped when its API key is not configured. Mistral sits ahead of the
+    local methods because those read the text layer only — dropping a scanned
+    PDF straight to them yields empty output instead of an error. PaddleOCR and
+    LlamaParse are available only when explicitly requested. When an explicitly
+    requested cloud OCR method (mistral, paddleocr, lighton, llamaparse) fails,
+    extraction falls back to those same local methods.
 
     Example:
         >>> extractor = PDFExtractor()
@@ -343,10 +346,20 @@ class PDFExtractor(Extractor):
         if not self.lighton_api_key and "lighton" in chain:
             logger.info(
                 "LIGHTON_API_KEY not configured; skipping lighton (the default OCR "
-                "head) and using the local fallback chain (opendataloader → fitz → "
-                "pdfplumber) instead"
+                "head) and falling back to the rest of the chain instead"
             )
             chain = [m for m in chain if m != "lighton"]
+
+        # Same for mistral, the OCR-preserving second hop. Attempting it unkeyed
+        # would raise and log a failure on every extraction — noise for the many
+        # deployments that configure no MISTRAL_API_KEY. An absent optional key is
+        # expected configuration, so this is INFO, matching the lighton skip.
+        if not self.mistral_api_key and "mistral" in chain:
+            logger.info(
+                "MISTRAL_API_KEY not configured; skipping mistral (the OCR fallback "
+                "behind lighton) and falling back to the rest of the chain instead"
+            )
+            chain = [m for m in chain if m != "mistral"]
 
         last_error: Exception | None = None
         for i, method in enumerate(chain):
