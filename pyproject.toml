@@ -11,7 +11,7 @@ requires-python = ">=3.13"
 dependencies = [
     "PyMuPDF>=1.24.0",
     "pdfplumber>=0.11.0",
-    "litellm>=1.90.1",  # >=1.90.1 maps reasoning_effort->adaptive thinking for Opus 4.7/4.8; 1.83.14 sent the deprecated thinking.enabled (400s) and lacked opus-4-8 in its cost map (silently dropped reasoning -> thinking off -> reasoning leaked into content)
+    "litellm>=1.90.1,!=1.92.0,!=1.92.1",  # 1.92.0/1.92.1 eager-import litellm.proxy->fastapi inside completion() whenever `tools=` is passed, and fastapi is not a dependency: every tool-calling completion raises ModuleNotFoundError. Fixed from 1.93.0 (measured across 1.91.3-1.95.0). >=1.90.1 maps reasoning_effort->adaptive thinking for Opus 4.7/4.8; 1.83.14 sent the deprecated thinking.enabled (400s) and lacked opus-4-8 in its cost map (silently dropped reasoning -> thinking off -> reasoning leaked into content)
     "mistralai>=1.0.0",  # Still needed by PDF extractor
     "tiktoken>=0.7.0",
     "httpx>=0.27.0",
