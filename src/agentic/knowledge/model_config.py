@@ -305,6 +305,15 @@ LIGHTON_MAX_TOKENS = 4096
 LIGHTON_TEMPERATURE = 0.2
 LIGHTON_TOP_P = 0.9
 LIGHTON_TIMEOUT = 60  # seconds per page
+# Pages in flight per document. The model takes one page image per request,
+# so a document costs one round trip per page and every second of it is spent
+# waiting — a 252-page filing measured 19 minutes issued serially, at 0.15%
+# CPU. There is no batch endpoint to use instead: the OpenAI-compatible
+# deployment answers 404 for /v1/batches, and several page images in one chat
+# request would return one blob with no page boundaries, which is what
+# page_text derivatives are. Concurrency is the only lever, and this bounds
+# it — set for a shared endpoint that rate-limits, not for a private one.
+LIGHTON_MAX_CONCURRENCY = 8
 
 # --- LlamaParse (LlamaCloud) configuration ---
 # Uses the v2 Parse API with the most-advanced "Agentic Plus" tier (the standard

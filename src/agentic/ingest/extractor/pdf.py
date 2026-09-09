@@ -7,6 +7,7 @@ Uses fallback strategy: LightOnOCR → OpenDataLoader → PyMuPDF (fitz) → pdf
 
 import asyncio
 import base64
+import functools
 import glob as glob_mod
 import io
 import logging
@@ -877,6 +878,7 @@ class PDFExtractor(Extractor):
         from agentic.knowledge.model_config import (
             LIGHTON_DEFAULT_BASE_URL,
             LIGHTON_DEFAULT_MODEL,
+            LIGHTON_MAX_CONCURRENCY,
             LIGHTON_MAX_TOKENS,
             LIGHTON_TEMPERATURE,
             LIGHTON_TIMEOUT,
@@ -901,9 +903,9 @@ class PDFExtractor(Extractor):
 
         logger.info("LightOnOCR: processing %d pages via %s", len(image_derivs), url)
 
-        page_markdowns = []
-        page_text_derivs = []
-        for img_deriv in image_derivs:
+        semaphore = asyncio.Semaphore(LIGHTON_MAX_CONCURRENCY)
+
+        async def _ocr_page(img_deriv: Derivative) -> str:
             b64_img = base64.b64encode(img_deriv.content).decode("utf-8")
             payload = {
                 "model": LIGHTON_DEFAULT_MODEL,
@@ -925,20 +927,48 @@ class PDFExtractor(Extractor):
                 "top_p": LIGHTON_TOP_P,
             }
 
-            resp = requests.post(url, json=payload, headers=headers, timeout=LIGHTON_TIMEOUT)
-            resp.raise_for_status()
-            data = resp.json()
-
-            page_md = data["choices"][0]["message"]["content"]
-            page_markdowns.append(page_md)
-            page_text_derivs.append(
-                Derivative(
-                    type="page_text",
-                    content=page_md,
-                    format="plain",
-                    page=img_deriv.page,
+            async with semaphore:
+                # to_thread because `requests` is synchronous: called directly
+                # it blocks the event loop for the whole round trip, which
+                # both serialises these calls and stalls everything else the
+                # worker is running.
+                resp = await asyncio.to_thread(
+                    functools.partial(
+                        requests.post,
+                        url,
+                        json=payload,
+                        headers=headers,
+                        timeout=LIGHTON_TIMEOUT,
+                    )
                 )
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"]
+
+        tasks = [asyncio.create_task(_ocr_page(d)) for d in image_derivs]
+        try:
+            # gather, not TaskGroup: the caller's retry chain distinguishes
+            # ExtractionError from everything else, so the first failure has
+            # to surface as itself rather than inside an ExceptionGroup.
+            page_markdowns = list(await asyncio.gather(*tasks))
+        except BaseException:
+            # Whatever failed, the caller re-runs the whole document — so the
+            # pages still queued are work about to be thrown away, against an
+            # endpoint that may be failing us for load in the first place.
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+        # Page order comes from the document, never from completion order.
+        page_text_derivs = [
+            Derivative(
+                type="page_text",
+                content=page_md,
+                format="plain",
+                page=img_deriv.page,
             )
+            for img_deriv, page_md in zip(image_derivs, page_markdowns, strict=True)
+        ]
 
         fulltext = "\n\n".join(page_markdowns)
 

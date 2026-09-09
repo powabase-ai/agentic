@@ -2,6 +2,7 @@
 Tests for the Content Ingestion module.
 """
 
+import base64
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -673,6 +674,138 @@ class TestPDFExtractorLightOnOCR:
         with patch.object(extractor, "_render_page_images", return_value=[]):
             with pytest.raises(ExtractionError, match="PyMuPDF"):
                 await extractor.extract(raw)
+
+
+class TestPDFExtractorLightOnConcurrency:
+    """One request per page is the model's requirement; one *at a time* was not.
+
+    LightOnOCR takes a single page image per call, so a document costs one
+    round trip per page. Issued serially, a 252-page filing measured 19
+    minutes end to end — ~4.6s per page, with the worker at 0.15% CPU the
+    whole time, because every one of those seconds is spent waiting.
+
+    The endpoint offers no batch API (``/v1/batches`` is 404 on the IONOS
+    deployment), and putting several page images in one chat request would
+    lose the page boundaries that ``page_text`` derivatives carry. So the
+    only lever is issuing the same per-page requests concurrently.
+    """
+
+    @staticmethod
+    def _raw():
+        return RawContent(
+            content=b"%PDF-1.4 fake",
+            mime_type="application/pdf",
+            source_uri="upload://test.pdf",
+            metadata={"extraction_model": "lighton"},
+        )
+
+    @staticmethod
+    def _images(count):
+        return [
+            Derivative(type="image", content=f"png-{i}".encode(), format="png", page=i)
+            for i in range(1, count + 1)
+        ]
+
+    @staticmethod
+    def _response(text):
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"choices": [{"message": {"content": text}}]}
+        response.raise_for_status = MagicMock()
+        return response
+
+    @pytest.mark.asyncio
+    async def test_pages_are_requested_concurrently(self):
+        """The property that makes a long document finish: more than one
+        request in flight, bounded by the configured ceiling."""
+        import threading
+        import time
+
+        from agentic.knowledge.model_config import LIGHTON_MAX_CONCURRENCY
+
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        lock = threading.Lock()
+        in_flight = 0
+        peak = 0
+
+        def _post(*args, **kwargs):
+            nonlocal in_flight, peak
+            with lock:
+                in_flight += 1
+                peak = max(peak, in_flight)
+            time.sleep(0.05)
+            with lock:
+                in_flight -= 1
+            return self._response("page")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(12)),
+            patch("requests.post", side_effect=_post),
+        ):
+            await extractor.extract(self._raw())
+
+        assert peak > 1, "pages were still issued one at a time"
+        assert peak <= LIGHTON_MAX_CONCURRENCY
+
+    @pytest.mark.asyncio
+    async def test_page_order_follows_the_document_not_the_responses(self):
+        """Concurrency reorders completions. Page attribution is what the
+        image-retrieval path and every chunk's page metadata are built from,
+        so it has to come from the page, not from whoever answered first."""
+        import time
+
+        extractor = PDFExtractor(lighton_api_key="test-key")
+
+        def _post(*args, **kwargs):
+            payload = kwargs.get("json") or args[1]
+            url = payload["messages"][0]["content"][0]["image_url"]["url"]
+            page = 1 if url.endswith(base64.b64encode(b"png-1").decode()) else 2
+            # Page 1 answers last.
+            time.sleep(0.15 if page == 1 else 0.01)
+            return self._response(f"# Page {page}")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(2)),
+            patch("requests.post", side_effect=_post),
+        ):
+            result = await extractor.extract(self._raw())
+
+        page_derivs = [d for d in result.derivatives if d.type == "page_text"]
+        assert [d.page for d in page_derivs] == [1, 2]
+        assert page_derivs[0].content == "# Page 1"
+        assert page_derivs[1].content == "# Page 2"
+        markdown = [d for d in result.derivatives if d.type == "markdown"][0].content
+        assert markdown.index("# Page 1") < markdown.index("# Page 2")
+
+    @pytest.mark.asyncio
+    async def test_a_failed_page_stops_the_remaining_requests(self):
+        """The caller retries the whole document on failure, so continuing to
+        OCR 200 more pages after the first error pays for work that is about
+        to be thrown away — and hammers an endpoint that may be rate-limiting
+        us for exactly that reason."""
+        import threading
+
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        lock = threading.Lock()
+        calls = 0
+
+        def _post(*args, **kwargs):
+            nonlocal calls
+            with lock:
+                calls += 1
+                mine = calls
+            if mine == 1:
+                raise RuntimeError("lighton is down")
+            return self._response("page")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(60)),
+            patch("requests.post", side_effect=_post),
+        ):
+            with pytest.raises(RuntimeError, match="lighton is down"):
+                await extractor._extract_lighton(self._raw())
+
+        assert calls < 60, f"kept going after the failure: {calls} of 60 pages requested"
 
 
 class TestPDFExtractorLlamaParse:
