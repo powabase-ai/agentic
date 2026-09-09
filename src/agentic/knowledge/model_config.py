@@ -305,8 +305,6 @@ LIGHTON_MAX_TOKENS = 4096
 LIGHTON_TEMPERATURE = 0.2
 LIGHTON_TOP_P = 0.9
 LIGHTON_TIMEOUT = 60  # seconds per page
-# Pages in flight per document — see LIGHTON_MAX_CONCURRENCY below, which is
-# env-overridable and so lives with the other _int_env constants.
 
 # --- LlamaParse (LlamaCloud) configuration ---
 # Uses the v2 Parse API with the most-advanced "Agentic Plus" tier (the standard
@@ -433,11 +431,12 @@ LIGHTON_MAX_CONCURRENCY = max(1, _int_env("LIGHTON_MAX_CONCURRENCY", 8))
 # to send less, and a sleeping slot is one fewer request in flight.
 LIGHTON_PAGE_MAX_ATTEMPTS = max(1, _int_env("LIGHTON_PAGE_MAX_ATTEMPTS", 3))
 
-# First backoff, doubled per attempt: 1s, then 2s.
+# First backoff; doubled per attempt, so the wait before attempt N is
+# BACKOFF * 2**(N-2). Not env-overridable, unlike the attempt count above.
 LIGHTON_PAGE_RETRY_BACKOFF = 1.0
 
 # Ceiling on a server-supplied Retry-After. Honouring the header is the point
 # — the endpoint knows its own limits — but an unbounded one from a
 # misconfigured proxy would park a document for hours with nothing logged
-# between start and finish.
+# between start and finish. Not env-overridable.
 LIGHTON_RETRY_AFTER_MAX = 30.0

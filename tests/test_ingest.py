@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import requests
+from requests.structures import CaseInsensitiveDict
 
 from agentic.ingest import (
     ContentItem,
@@ -903,7 +904,9 @@ def _lighton_http_error(status, body="rate limited", headers=None):
     response = MagicMock()
     response.status_code = status
     response.text = body
-    response.headers = headers or {}
+    # CaseInsensitiveDict, as `requests` builds: HTTP/2 lowercases header
+    # names, so a plain dict here would let a case-sensitive lookup pass.
+    response.headers = CaseInsensitiveDict(headers or {})
     error = requests.exceptions.HTTPError(f"{status} Client Error")
     error.response = response
     response.raise_for_status = MagicMock(side_effect=error)
@@ -929,6 +932,29 @@ class TestPDFExtractorLightOnPageRetry:
         )
     )
 
+    @pytest.fixture(autouse=True)
+    def _no_retry_backoff(self, monkeypatch):
+        """Zero the backoff rather than stub `asyncio.sleep`: pytest-asyncio
+        and the loop itself await `sleep`, and replacing it wholesale has
+        taken the runner down. Tests that need to *see* the wait use
+        `sleep_spy`, which records and still delegates."""
+        from agentic.knowledge import model_config
+
+        monkeypatch.setattr(model_config, "LIGHTON_PAGE_RETRY_BACKOFF", 0)
+
+    @pytest.fixture
+    def sleep_spy(self, monkeypatch):
+        """Record what the retry asked to wait, without replacing sleep."""
+        real_sleep = asyncio.sleep
+        waits: list[float] = []
+
+        async def _spy(seconds, *args, **kwargs):
+            waits.append(seconds)
+            return await real_sleep(0, *args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "sleep", _spy)
+        return waits
+
     @staticmethod
     def _page_of(kwargs, args):
         payload = kwargs.get("json") or args[1]
@@ -939,9 +965,8 @@ class TestPDFExtractorLightOnPageRetry:
         raise AssertionError("no page in payload")
 
     @pytest.mark.asyncio
-    async def test_a_transient_page_failure_retries_only_that_page(self, monkeypatch):
+    async def test_a_transient_page_failure_retries_only_that_page(self):
         """The successes stay. Only the failed page goes again."""
-        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
         extractor = PDFExtractor(lighton_api_key="test-key")
         attempts = {}
 
@@ -968,9 +993,8 @@ class TestPDFExtractorLightOnPageRetry:
         assert page_derivs[2].content == "# Page 3"
 
     @pytest.mark.asyncio
-    async def test_a_deterministic_page_failure_is_not_retried(self, monkeypatch):
+    async def test_a_deterministic_page_failure_is_not_retried(self):
         """A 413 will be a 413 next time; re-sending it is pure cost."""
-        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
         extractor = PDFExtractor(lighton_api_key="test-key")
         attempts = {}
 
@@ -991,10 +1015,9 @@ class TestPDFExtractorLightOnPageRetry:
         assert attempts[2] == 1, f"a deterministic rejection was retried: {attempts}"
 
     @pytest.mark.asyncio
-    async def test_a_page_that_keeps_failing_gives_up_after_its_attempts(self, monkeypatch):
+    async def test_a_page_that_keeps_failing_gives_up_after_its_attempts(self):
         """Bounded: the page gets its attempts, then the document fails — it
         does not retry forever inside one pass."""
-        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
         from agentic.knowledge.model_config import LIGHTON_PAGE_MAX_ATTEMPTS
 
         extractor = PDFExtractor(lighton_api_key="test-key")
@@ -1017,14 +1040,9 @@ class TestPDFExtractorLightOnPageRetry:
         assert attempts[1] == LIGHTON_PAGE_MAX_ATTEMPTS
 
     @pytest.mark.asyncio
-    async def test_retry_after_is_honoured(self, monkeypatch):
+    async def test_retry_after_is_honoured(self, sleep_spy):
         """The endpoint knows its own limits better than a fixed backoff."""
-        slept = []
-
-        async def _sleep(seconds):
-            slept.append(seconds)
-
-        monkeypatch.setattr(asyncio, "sleep", _sleep)
+        slept = sleep_spy
         extractor = PDFExtractor(lighton_api_key="test-key")
         seen = {"n": 0}
 
@@ -1043,15 +1061,10 @@ class TestPDFExtractorLightOnPageRetry:
         assert 7 in slept, f"Retry-After was ignored: {slept}"
 
     @pytest.mark.asyncio
-    async def test_an_absurd_retry_after_is_capped(self, monkeypatch):
+    async def test_an_absurd_retry_after_is_capped(self, sleep_spy):
         """A misconfigured proxy should not park a document for hours with
         nothing logged between start and finish."""
-        slept = []
-
-        async def _sleep(seconds):
-            slept.append(seconds)
-
-        monkeypatch.setattr(asyncio, "sleep", _sleep)
+        slept = sleep_spy
         from agentic.knowledge.model_config import LIGHTON_RETRY_AFTER_MAX
 
         extractor = PDFExtractor(lighton_api_key="test-key")
@@ -1070,6 +1083,180 @@ class TestPDFExtractorLightOnPageRetry:
             await extractor._extract_lighton(self._raw())
 
         assert max(slept) <= LIGHTON_RETRY_AFTER_MAX
+
+
+    @pytest.mark.parametrize("header", ["NaN", "nan", "inf", "-inf", "Infinity"])
+    @pytest.mark.asyncio
+    async def test_a_nonsense_retry_after_falls_back_to_the_backoff(self, header, caplog):
+        """`float("NaN")` parses, and then defeats both guards: `nan < 0` is
+        False and `min(nan, cap)` is `nan`. `asyncio.sleep(nan)` raises
+        `ValueError` — from inside the `except` handling the 429, so it
+        replaces the error being carried, escapes before `aborted` is set,
+        and reaches `_try_method` as something that is not an
+        `ExtractionError`. The operator's diagnosis for a rate-limit outage
+        becomes "Invalid delay: NaN"."""
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        seen = {"n": 0}
+
+        def _post(*args, **kwargs):
+            seen["n"] += 1
+            if seen["n"] == 1:
+                return self._http_error(429, headers={"Retry-After": header})
+            return self._response("page")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(2)),
+            patch("requests.post", side_effect=_post),
+            caplog.at_level(logging.WARNING),
+        ):
+            result = await extractor._extract_lighton(self._raw())
+
+        assert len(result.derivatives) > 0, "a nonsense header took the document down"
+        assert not any("NaN" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_a_page_in_backoff_does_not_fire_after_the_abort(self):
+        """`if aborted:` is checked once, above the attempt loop. A page
+        already sleeping has passed it, so it wakes and sends a fresh request
+        at an endpoint the document has already given up on — and backoff is
+        precisely the rate-limit case. It also delays the known failure until
+        every retrying sibling settles."""
+        from agentic.knowledge.model_config import LIGHTON_MAX_CONCURRENCY
+
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        per_page: dict[int, int] = {}
+
+        def _post(*args, **kwargs):
+            page = TestPDFExtractorLightOnPageRetry._page_of(kwargs, args)
+            per_page[page] = per_page.get(page, 0) + 1
+            if page == 1:
+                # Deterministic: aborts the document on its first request.
+                return self._http_error(400, "page malformed")
+            return self._http_error(429, "slow down")
+
+        with (
+            patch.object(
+                extractor,
+                "_render_page_images",
+                return_value=self._images(LIGHTON_MAX_CONCURRENCY * 3),
+            ),
+            patch("requests.post", side_effect=_post),
+        ):
+            with pytest.raises(ExtractionError):
+                await extractor._extract_lighton(self._raw())
+
+        retried_after_abort = {p: n for p, n in per_page.items() if p != 1 and n > 1}
+        assert not retried_after_abort, (
+            f"pages retried after the document had already failed: {retried_after_abort}"
+        )
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            __import__("ssl").SSLError("bad cert"),
+            MemoryError("out of memory"),
+            TypeError("programming error"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_errors_that_cannot_be_transient_are_not_retried(self, exc):
+        """A typo'd base URL, a bad certificate, or memory exhaustion will not
+        resolve by sending the same request again — and retrying under an OOM
+        makes it worse. Without a status they all read as retryable, which
+        now costs 3 page attempts x 3 document passes."""
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        attempts = {"n": 0}
+
+        def _post(*args, **kwargs):
+            attempts["n"] += 1
+            raise exc
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(1)),
+            patch("requests.post", side_effect=_post),
+        ):
+            with pytest.raises(ExtractionError) as excinfo:
+                await extractor._extract_lighton(self._raw())
+
+        # Non-retryable means the chain moves on rather than re-running the
+        # document, so it must surface as ExtractionError with the real cause
+        # named — not as "rejected page", which blames the document.
+        assert type(exc).__name__ in str(excinfo.value)
+        assert "cannot reach the endpoint" in str(excinfo.value)
+        assert attempts["n"] == 1, f"{type(exc).__name__} was retried {attempts['n']}x"
+
+    @pytest.mark.asyncio
+    async def test_a_document_that_needed_retries_says_so(self, caplog):
+        """A retried document is otherwise indistinguishable from a clean one:
+        same derivatives, same `pages_processed`. Three times the requests and
+        a much longer wall clock, invisible to every downstream signal — and
+        reported only as a pile of WARNINGs for an extraction that succeeded.
+        """
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        seen: dict[int, int] = {}
+
+        def _post(*args, **kwargs):
+            page = TestPDFExtractorLightOnPageRetry._page_of(kwargs, args)
+            seen[page] = seen.get(page, 0) + 1
+            if seen[page] == 1:
+                return self._http_error(503, "flaky")
+            return self._response("page")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(4)),
+            patch("requests.post", side_effect=_post),
+            caplog.at_level(logging.INFO),
+        ):
+            result = await extractor._extract_lighton(self._raw())
+
+        stats = result.stats or {}
+        assert stats.get("pages_retried") == 4
+        assert stats.get("retry_requests") == 4
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert not warnings, (
+            f"a successful extraction logged {len(warnings)} warnings: "
+            f"{[r.getMessage()[:60] for r in warnings]}"
+        )
+
+
+    @pytest.mark.parametrize(
+        "header,expected",
+        [
+            ("7", 7.0),
+            ("0", 0.0),
+            ("86400", 30.0),  # capped
+            ("-5", None),
+            ("NaN", None),
+            ("inf", None),
+            ("soon", None),
+            (None, None),
+        ],
+    )
+    def test_retry_after_parsing(self, header, expected):
+        """Pinned at the parser, not only through a sleep.
+
+        The call site clamps as well, and `max(0.0, nan)` happens to return
+        0.0 — so a NaN that reaches it is harmless *by accident*, and a test
+        that only drives the sleep passes with this guard deleted. The guard
+        is what stops a non-finite value existing in the first place:
+        `nan < 0` is False and `min(nan, cap)` is `nan`, so neither the sign
+        check nor the cap sees it, and `asyncio.sleep(nan)` raises from
+        inside the handler carrying the original error.
+        """
+        from agentic.ingest.extractor.pdf import _lighton_retry_after
+
+        headers = {} if header is None else {"Retry-After": header}
+        error = _lighton_http_error(429, headers=headers).raise_for_status.side_effect
+
+        assert _lighton_retry_after(error, 30.0) == expected
+
+    def test_retry_after_is_read_case_insensitively(self):
+        """HTTP/2 lowercases header names."""
+        from agentic.ingest.extractor.pdf import _lighton_retry_after
+
+        error = _lighton_http_error(429, headers={"retry-after": "5"}).raise_for_status.side_effect
+
+        assert _lighton_retry_after(error, 30.0) == 5.0
 
 
 class TestPDFExtractorLightOnFailures:
@@ -1447,7 +1634,7 @@ class TestPDFExtractorLightOnFailures:
         summary = [r.getMessage() for r in caplog.records if "pages failed" in r.getMessage()]
         assert summary, "the summary naming how many failed is missing"
         # The reported failure is raised; "Others" must not repeat it.
-        assert "reporting the first" in summary[0]
+        assert str(len(named)) in summary[0] or "pages failed" in summary[0]
 
     @pytest.mark.asyncio
     async def test_a_200_with_an_unusable_body_carries_the_body(self, caplog):

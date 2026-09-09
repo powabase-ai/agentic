@@ -10,10 +10,14 @@ import base64
 import glob as glob_mod
 import io
 import logging
+import math
 import os
 import re
+import ssl
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
+
+from requests import exceptions as requests_exceptions
 
 from agentic.ingest.extractor.base import (
     ExtractionError,
@@ -105,9 +109,30 @@ def _lighton_retry_after(exc: Exception, cap: float) -> float | None:
         seconds = float(raw)
     except (TypeError, ValueError):
         return None
-    if seconds < 0:
+    # isfinite, not `seconds < 0`: NaN compares False against everything, so a
+    # `Retry-After: NaN` passes a negative check and survives min() unchanged
+    # — and asyncio.sleep(nan) raises, from inside the handler carrying the
+    # 429. inf is rejected here too; a header that says "wait forever" is not
+    # a wait, it is a broken header.
+    if not math.isfinite(seconds) or seconds < 0:
         return None
     return min(seconds, cap)
+
+
+# Failures that re-sending the same request cannot fix. `requests` raises
+# these for a bad URL or a bad certificate — configuration, not weather — and
+# retrying a MemoryError on a base64 workload makes the shortage worse.
+_LIGHTON_FATAL_ERRORS: tuple[type[BaseException], ...] = (
+    MemoryError,
+    TypeError,
+    AttributeError,
+    NameError,
+    ssl.SSLError,
+    requests_exceptions.InvalidURL,
+    requests_exceptions.MissingSchema,
+    requests_exceptions.InvalidSchema,
+    requests_exceptions.URLRequired,
+)
 
 
 def _lighton_is_retryable(exc: Exception) -> bool:
@@ -120,6 +145,8 @@ def _lighton_is_retryable(exc: Exception) -> bool:
     times. Raised as ExtractionError instead, which the chain already routes
     straight to the next extraction method.
     """
+    if isinstance(exc, _LIGHTON_FATAL_ERRORS):
+        return False
     response = getattr(exc, "response", None)
     status = getattr(response, "status_code", None)
     if not isinstance(status, int) or not 400 <= status < 500:
@@ -999,6 +1026,10 @@ class PDFExtractor(Extractor):
         # already on the wire are *not* abandoned — their outcomes are what
         # decide whether this document is retried at all (see below).
         aborted = False
+        # What the retry cost, so a document that needed it is distinguishable
+        # from a clean one: same derivatives and same page count either way.
+        retried_pages: set = set()
+        retry_requests = [0]
 
         async def _ocr_page(executor, img_deriv: Derivative) -> str:
             nonlocal aborted
@@ -1009,8 +1040,8 @@ class PDFExtractor(Extractor):
                 # to its first suspension the moment it is scheduled, so a
                 # payload constructed above this line exists once per page
                 # rather than once per slot: 252 pages of base64 (~0.5 MB
-                # each, twice over while the f-string holds a second copy)
-                # instead of eight.
+                # each, held twice while the concatenation builds the data:
+                # URI) instead of eight.
                 payload = {
                     "model": LIGHTON_DEFAULT_MODEL,
                     "messages": [
@@ -1067,7 +1098,17 @@ class PDFExtractor(Extractor):
                             wait = _lighton_retry_after(e, LIGHTON_RETRY_AFTER_MAX)
                             if wait is None:
                                 wait = LIGHTON_PAGE_RETRY_BACKOFF * 2 ** (attempt - 1)
-                            logger.warning(
+                            # Clamped again at the point of use: nothing that
+                            # reaches a sleep inside an exception handler may
+                            # be able to raise there, whatever a future
+                            # caller computes.
+                            wait = max(0.0, min(float(wait), LIGHTON_RETRY_AFTER_MAX))
+                            # INFO, not WARNING: a page that recovers is not
+                            # something an operator needs to act on, and at
+                            # 252 pages the warning level turns a successful
+                            # extraction into hundreds of them. The final
+                            # failure below stays at WARNING.
+                            logger.info(
                                 "LightOnOCR page %s of %s attempt %d/%d failed: "
                                 "%s%s — retrying in %.1fs",
                                 img_deriv.page,
@@ -1078,7 +1119,18 @@ class PDFExtractor(Extractor):
                                 _lighton_error_detail(e),
                                 wait,
                             )
+                            retried_pages.add(img_deriv.page)
+                            retry_requests[0] += 1
                             await asyncio.sleep(wait)
+                            # Re-checked after the wait, not only above the
+                            # loop: a page that was already sleeping when
+                            # another page failed the document would otherwise
+                            # wake and send a fresh request at an endpoint we
+                            # have given up on — and backoff is exactly the
+                            # rate-limit case. It also holds the known failure
+                            # back until every retrying sibling settles.
+                            if aborted:
+                                raise _PageAborted(img_deriv.page) from None
                             continue
 
                         # Out of attempts, or an error re-sending cannot fix.
@@ -1097,16 +1149,31 @@ class PDFExtractor(Extractor):
                         )
                         if _lighton_is_retryable(e):
                             raise
+                        # "rejected" only when the endpoint did the rejecting.
+                        # A bad certificate or an unparseable URL is ours, and
+                        # calling it a rejected page sends the reader looking
+                        # at the document.
+                        refused = _lighton_error_detail(e)
+                        reason = (
+                            f"rejected page {img_deriv.page}"
+                            if refused
+                            else f"cannot reach the endpoint for page {img_deriv.page}"
+                        )
                         raise ExtractionError(
-                            f"LightOnOCR rejected page {img_deriv.page}: {e}"
-                            f"{_lighton_error_detail(e)}",
+                            f"LightOnOCR {reason}: {type(e).__name__}: {e}{refused}",
                             extractor_name=self.name,
                             source_uri=raw.source_uri,
                         ) from e
 
                 try:
                     return resp.json()["choices"][0]["message"]["content"]
-                except (ValueError, KeyError, IndexError, TypeError) as e:
+                except Exception as e:
+                    # Broad on purpose. JSONDecodeError is a ValueError and a
+                    # bad envelope is a KeyError, but a connection dropping
+                    # mid-read raises ChunkedEncodingError — which used to
+                    # leave without setting the flag, so the queued pages kept
+                    # going. The classification below still distinguishes the
+                    # two kinds.
                     # A 2xx the client cannot read is deterministic: the same
                     # request will be unreadable next time, so retrying the
                     # document three times only asks three times. The body is
@@ -1115,6 +1182,19 @@ class PDFExtractor(Extractor):
                     # otherwise the operator's entire diagnosis.
                     aborted = True
                     excerpt = _response_excerpt(resp)
+                    if not isinstance(e, (ValueError, KeyError, IndexError, TypeError)):
+                        # The response never fully arrived — transient, and
+                        # for the caller to retry rather than a body we can
+                        # describe.
+                        logger.warning(
+                            "LightOnOCR page %s of %s failed while reading the "
+                            "response: %s: %s",
+                            img_deriv.page,
+                            raw.source_uri,
+                            type(e).__name__,
+                            e,
+                        )
+                        raise
                     logger.warning(
                         "LightOnOCR page %s of %s returned an unusable body: %s: %s%s",
                         img_deriv.page,
@@ -1150,12 +1230,23 @@ class PDFExtractor(Extractor):
             # A cancellation from the caller still propagates out of this
             # await, which is what a graceful drain or asyncio.timeout wants:
             # gather's return_exceptions only covers the children.
+            #
+            # The property that keeps it that way: no `except BaseException`,
+            # no `contextlib.suppress`, no re-arming. Two earlier versions of
+            # this function lost the caller's error to an await inside an
+            # exception handler; the retry loop below still has one, which is
+            # why the value it sleeps on is clamped where it is computed *and*
+            # where it is used.
             outcomes = await asyncio.gather(*(
                 _ocr_page(executor, d) for d in image_derivs
             ), return_exceptions=True)
         finally:
-            # Nothing is left running here — every task has settled — so this
-            # is bookkeeping, not a way to stop work in progress.
+            # Every *task* has settled by here, but on an external
+            # cancellation the threads those tasks were waiting on are still
+            # inside requests.post — a thread cannot be interrupted. So this
+            # releases the pool; it does not stop work in progress, and
+            # wait=False is what keeps a cancelled extraction from blocking
+            # on requests it can no longer use.
             executor.shutdown(wait=False)
 
         failures = [
@@ -1163,6 +1254,17 @@ class PDFExtractor(Extractor):
             for o in outcomes
             if isinstance(o, BaseException) and not isinstance(o, _PageAborted)
         ]
+        # A _PageAborted can only exist alongside the failure that caused it:
+        # both `aborted = True` sites raise in the same breath. Asserting it
+        # rather than reasoning about it across eighty lines — the failure
+        # mode otherwise is a page slot holding an exception where a string
+        # belongs, which surfaces as a TypeError from the join below.
+        if not failures and any(isinstance(o, _PageAborted) for o in outcomes):
+            raise ExtractionError(
+                "LightOnOCR aborted pages without recording why",
+                extractor_name=self.name,
+                source_uri=raw.source_uri,
+            )
         if failures:
             # Deterministic first, whatever the wall clock said. ExtractionError
             # tells `_try_method` not to retry and to fall through to the next
@@ -1215,7 +1317,14 @@ class PDFExtractor(Extractor):
                 "char_count": len(fulltext),
             },
             extraction_method="lighton_ocr",
-            stats={"pages_processed": len(page_markdowns)},
+            stats={
+                "pages_processed": len(page_markdowns),
+                # A document that needed retries produces the same derivatives
+                # and the same page count as one that did not; without these
+                # a 3x request cost is invisible to every downstream signal.
+                "pages_retried": len(retried_pages),
+                "retry_requests": retry_requests[0],
+            },
         )
 
     async def _extract_llamaparse(self, raw: RawContent) -> ExtractionResult:
