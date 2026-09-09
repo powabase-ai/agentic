@@ -880,11 +880,14 @@ class TestPDFExtractorLightOnConcurrency:
         # The contract is "no page beyond the in-flight window is issued", not
         # "fewer than all of them": `< 60` would pass a regression that kept
         # going until page 55.
-        # At most one page beyond the opening window: the failing page frees
-        # its own semaphore slot on the way out, and a queued page can claim
-        # it before the cancellation propagates. That one is a genuine race;
-        # anything past it is a regression.
-        assert LIGHTON_MAX_CONCURRENCY <= calls <= LIGHTON_MAX_CONCURRENCY + 1, (
+        # Upper bound only. How many of the opening window get sent before the
+        # first failure sets the flag depends on how the loop interleaves the
+        # tasks with the failing page's resumption: on a busy 2-core runner it
+        # can be as few as one, which is the *better* outcome and not
+        # something to assert against. What must hold is that nothing beyond
+        # the window is issued — the failing page frees its own slot, so one
+        # queued page can still claim it.
+        assert calls <= LIGHTON_MAX_CONCURRENCY + 1, (
             f"issued {calls} pages after the failure; the window is "
             f"{LIGHTON_MAX_CONCURRENCY}"
         )
@@ -1095,12 +1098,17 @@ class TestPDFExtractorLightOnFailures:
 
         from agentic.knowledge import model_config
 
-        with patch.dict(os.environ, {"LIGHTON_MAX_CONCURRENCY": value}):
-            reloaded = importlib.reload(model_config)
-            try:
+        # The restoring reload happens *outside* the patched environment:
+        # inside it, the module would be rebuilt from the same bad value and
+        # every later test in the session would see that bound.
+        try:
+            with patch.dict(os.environ, {"LIGHTON_MAX_CONCURRENCY": value}):
+                reloaded = importlib.reload(model_config)
                 assert reloaded.LIGHTON_MAX_CONCURRENCY == expected
-            finally:
-                importlib.reload(model_config)
+        finally:
+            importlib.reload(model_config)
+
+        assert model_config.LIGHTON_MAX_CONCURRENCY == 8, "the module was left poisoned"
 
     def test_a_long_error_body_is_truncated(self):
         """The excerpt reaches an error message and a log line; an endpoint
@@ -1202,14 +1210,19 @@ class TestPDFExtractorLightOnFailures:
         def _post(*args, **kwargs):
             payload = kwargs.get("json") or args[1]
             url = payload["messages"][0]["content"][0]["image_url"]["url"]
+            # Every page dwells before answering, so all 8 are on the wire
+            # before any of them fails: whether a page beyond the window is
+            # ever sent depends on scheduling, but pages *inside* it are
+            # already in flight, and those are the ones being ranked.
             if base64.b64encode(b"png-3").decode() in url:
+                time.sleep(0.1)
                 return self._http_error(503, "service unavailable")
             if base64.b64encode(b"png-6").decode() in url:
                 # Later in the document *and* slower to answer, so neither
                 # submission order nor the wall clock favours it.
-                time.sleep(0.25)
+                time.sleep(0.3)
                 return self._http_error(400, "page malformed")
-            time.sleep(0.4)
+            time.sleep(0.5)
             return self._response("page")
 
         with (
@@ -1224,11 +1237,19 @@ class TestPDFExtractorLightOnFailures:
         """Which page `gather` reported used to depend on the clock, so log
         coverage of a multi-page failure swung between one page and all of
         them on timing alone."""
+        import time
+
         extractor = PDFExtractor(lighton_api_key="test-key")
+
+        def _post(*args, **kwargs):
+            # Dwell first: all four pages are inside the window, so they are
+            # in flight before the first failure sets the abort flag.
+            time.sleep(0.1)
+            return self._http_error(500, "boom")
 
         with (
             patch.object(extractor, "_render_page_images", return_value=self._images(4)),
-            patch("requests.post", side_effect=lambda *a, **k: self._http_error(500, "boom")),
+            patch("requests.post", side_effect=_post),
             caplog.at_level(logging.WARNING),
         ):
             with pytest.raises(requests.exceptions.HTTPError):
