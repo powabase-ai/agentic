@@ -7,7 +7,6 @@ Uses fallback strategy: LightOnOCR → OpenDataLoader → PyMuPDF (fitz) → pdf
 
 import asyncio
 import base64
-import contextlib
 import glob as glob_mod
 import io
 import logging
@@ -45,6 +44,35 @@ def _count_pages(data: bytes) -> int:
     return len(rxcountpages.findall(data))
 
 
+class _PageAborted(Exception):
+    """A page that was never sent because an earlier page had already failed.
+
+    Not a failure of its own: it carries no diagnosis and must never be the
+    error the document reports.
+    """
+
+
+def _response_excerpt(response, limit: int = 200) -> str:
+    """``(status N; body: '...')`` for a response, or a note that it is unread.
+
+    ``.text`` is read inside exception handlers, and on a streamed or
+    already-closed response reading it can itself raise — which would replace
+    the error being reported with one about reporting. An unread body says so
+    rather than rendering as ``body: ''``, which is indistinguishable from a
+    response that genuinely had none.
+    """
+    status = getattr(response, "status_code", "?")
+    try:
+        body = (getattr(response, "text", "") or "").strip().replace("\n", " ")
+    except Exception as read_error:  # pragma: no cover - see docstring
+        return f" (status {status}; body unreadable: {type(read_error).__name__})"
+    if limit > 3 and len(body) > limit:
+        body = body[: limit - 3] + "..."
+    elif len(body) > limit:
+        body = body[:limit]
+    return f" (status {status}; body: {body!r})"
+
+
 def _lighton_error_detail(exc: Exception, limit: int = 200) -> str:
     """Status and body excerpt for an OCR failure, when the error carries one.
 
@@ -55,10 +83,7 @@ def _lighton_error_detail(exc: Exception, limit: int = 200) -> str:
     response = getattr(exc, "response", None)
     if response is None:
         return ""
-    body = (getattr(response, "text", "") or "").strip().replace("\n", " ")
-    if len(body) > limit:
-        body = body[: limit - 3] + "..."
-    return f" (status {getattr(response, 'status_code', '?')}; body: {body!r})"
+    return _response_excerpt(response, limit)
 
 
 def _lighton_is_retryable(exc: Exception) -> bool:
@@ -73,7 +98,7 @@ def _lighton_is_retryable(exc: Exception) -> bool:
     """
     response = getattr(exc, "response", None)
     status = getattr(response, "status_code", None)
-    if status is None or not 400 <= status < 500:
+    if not isinstance(status, int) or not 400 <= status < 500:
         return True
     return status in (408, 429)
 
@@ -940,8 +965,19 @@ class PDFExtractor(Extractor):
         semaphore = asyncio.Semaphore(LIGHTON_MAX_CONCURRENCY)
         loop = asyncio.get_running_loop()
 
+        # Set by the first page that fails. Pages still queued behind the
+        # semaphore check it and never send a request: the caller re-runs the
+        # whole document, so they are work about to be thrown away, against an
+        # endpoint that may be failing us for load in the first place. Pages
+        # already on the wire are *not* abandoned — their outcomes are what
+        # decide whether this document is retried at all (see below).
+        aborted = False
+
         async def _ocr_page(executor, img_deriv: Derivative) -> str:
+            nonlocal aborted
             async with semaphore:
+                if aborted:
+                    raise _PageAborted(img_deriv.page)
                 # Built inside the semaphore, not before it. Every task runs
                 # to its first suspension the moment it is scheduled, so a
                 # payload constructed above this line exists once per page
@@ -986,14 +1022,13 @@ class PDFExtractor(Extractor):
                         ),
                     )
                     resp.raise_for_status()
-                    return resp.json()["choices"][0]["message"]["content"]
                 except Exception as e:
                     # Serially, the failing page was wherever the loop stopped;
                     # concurrently it is whichever page loses the race, and a
                     # re-run names a different one. Without this the caller
                     # reports "attempt 1/3 failed: 404 Client Error" with no
-                    # page, no document, and no body — and every failure after
-                    # the first is discarded by the cleanup gather below.
+                    # page, no document, and no body.
+                    aborted = True
                     logger.warning(
                         "LightOnOCR page %s of %s failed: %s%s",
                         img_deriv.page,
@@ -1010,40 +1045,84 @@ class PDFExtractor(Extractor):
                         source_uri=raw.source_uri,
                     ) from e
 
-        # Sized to the semaphore: the concurrency bound is what the endpoint
-        # sees, and a wider pool would only queue work the semaphore has not
-        # admitted. cancel_futures so a failure does not leave the untouched
-        # pages queued behind requests that are already on the wire.
+                try:
+                    return resp.json()["choices"][0]["message"]["content"]
+                except (ValueError, KeyError, IndexError, TypeError) as e:
+                    # A 2xx the client cannot read is deterministic: the same
+                    # request will be unreadable next time, so retrying the
+                    # document three times only asks three times. The body is
+                    # attached because it holds the answer the exception does
+                    # not — a KeyError carries no response, so `'choices'` is
+                    # otherwise the operator's entire diagnosis.
+                    aborted = True
+                    excerpt = _response_excerpt(resp)
+                    logger.warning(
+                        "LightOnOCR page %s of %s returned an unusable body: %s: %s%s",
+                        img_deriv.page,
+                        raw.source_uri,
+                        type(e).__name__,
+                        e,
+                        excerpt,
+                    )
+                    raise ExtractionError(
+                        f"LightOnOCR returned an unusable body for page "
+                        f"{img_deriv.page}: {type(e).__name__}: {e}{excerpt}",
+                        extractor_name=self.name,
+                        source_uri=raw.source_uri,
+                    ) from e
+
+        # Sized to the semaphore, which is what the endpoint sees; a wider
+        # pool would only hold work the semaphore has not admitted.
         executor = ThreadPoolExecutor(
             max_workers=LIGHTON_MAX_CONCURRENCY, thread_name_prefix="lighton-ocr"
         )
         try:
-            tasks = [asyncio.create_task(_ocr_page(executor, d)) for d in image_derivs]
-            try:
-                # gather, not TaskGroup: the caller's retry chain distinguishes
-                # ExtractionError from everything else, so the first failure has
-                # to surface as itself rather than inside an ExceptionGroup.
-                page_markdowns = list(await asyncio.gather(*tasks))
-            except BaseException:
-                # Whatever failed, the caller re-runs the whole document — so the
-                # pages still queued are work about to be thrown away, against an
-                # endpoint that may be failing us for load in the first place.
-                for task in tasks:
-                    task.cancel()
-                # suppress: this await is inside an exception handler, so a
-                # cancellation arriving here would replace the error being
-                # propagated — and CancelledError is not an Exception, so it
-                # would escape _try_method's retry, extract()'s fallback chain
-                # and every log line on the way out. On a pure cancellation the
-                # bare `raise` below still re-raises it.
-                with contextlib.suppress(asyncio.CancelledError):
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                raise
+            # `return_exceptions=True`, and no cancellation of siblings: the
+            # abort flag has already stopped the queue, so what is left in
+            # flight is at most one window of requests that are going to
+            # finish regardless — a thread inside requests.post cannot be
+            # interrupted. Collecting them costs a bounded wait and buys the
+            # two things abandoning them loses: every failure gets logged
+            # rather than only whichever lost the race, and the *kind* of
+            # failure is known before the document is retried. Reporting a
+            # transient 503 while a deterministic 400 was still on the wire
+            # costs three full passes and never names the 400 at all.
+            #
+            # A cancellation from the caller still propagates out of this
+            # await, which is what a graceful drain or asyncio.timeout wants:
+            # gather's return_exceptions only covers the children.
+            outcomes = await asyncio.gather(*(
+                _ocr_page(executor, d) for d in image_derivs
+            ), return_exceptions=True)
         finally:
-            # wait=False: threads already inside requests.post cannot be
-            # interrupted, and waiting up to LIGHTON_TIMEOUT for them would
-            # hold up the fallback this failure is meant to reach.
-            executor.shutdown(wait=False, cancel_futures=True)
+            # Nothing is left running here — every task has settled — so this
+            # is bookkeeping, not a way to stop work in progress.
+            executor.shutdown(wait=False)
+
+        failures = [
+            o
+            for o in outcomes
+            if isinstance(o, BaseException) and not isinstance(o, _PageAborted)
+        ]
+        if failures:
+            # Deterministic first, whatever the wall clock said. ExtractionError
+            # tells `_try_method` not to retry and to fall through to the next
+            # extraction method; letting a slower 503 outrank it re-runs the
+            # whole document to be refused again.
+            deterministic = [f for f in failures if isinstance(f, ExtractionError)]
+            reported = (deterministic or failures)[0]
+            others = [f for f in failures if f is not reported]
+            if others:
+                logger.warning(
+                    "LightOnOCR: %d pages failed on %s; reporting %s. Others: %s",
+                    len(failures),
+                    raw.source_uri,
+                    "the deterministic rejection" if deterministic else "the first",
+                    "; ".join(f"{type(f).__name__}: {f}" for f in others),
+                )
+            raise reported
+
+        page_markdowns = list(outcomes)
 
         # Page order comes from the document, never from completion order.
         page_text_derivs = [

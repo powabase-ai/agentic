@@ -415,4 +415,7 @@ PAGEINDEX_LLM_NUM_RETRIES = _int_env("PAGEINDEX_LLM_NUM_RETRIES", 1)
 # because the operator pointing LIGHTON_BASE_URL at their own deployment
 # (registry.py reads that from the environment already) is exactly the one
 # for whom a different number is right: LIGHTON_MAX_CONCURRENCY.
-LIGHTON_MAX_CONCURRENCY = _int_env("LIGHTON_MAX_CONCURRENCY", 8)
+# max(1, ...) because 0 is a typo here, not the "disable" it means for
+# PAGEINDEX_LLM_NUM_RETRIES: a pool of 0 workers and a Semaphore of -1 both
+# raise, and _int_env exists so a bad operator value cannot do that.
+LIGHTON_MAX_CONCURRENCY = max(1, _int_env("LIGHTON_MAX_CONCURRENCY", 8))
