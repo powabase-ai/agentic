@@ -65,11 +65,15 @@ def _response_excerpt(response, limit: int = 200) -> str:
     rather than rendering as ``body: ''``, which is indistinguishable from a
     response that genuinely had none.
     """
-    status = getattr(response, "status_code", "?")
     try:
+        status = getattr(response, "status_code", "?")
         body = (getattr(response, "text", "") or "").strip().replace("\n", " ")
     except Exception as read_error:  # pragma: no cover - see docstring
-        return f" (status {status}; body unreadable: {type(read_error).__name__})"
+        # `getattr`'s default only swallows AttributeError, and `response`
+        # comes off an arbitrary exception — a property that raises anything
+        # else would replace the error being reported with one about
+        # reporting it.
+        return f" (status unreadable: {type(read_error).__name__})"
     if limit > 3 and len(body) > limit:
         body = body[: limit - 3] + "..."
     elif len(body) > limit:
@@ -119,20 +123,58 @@ def _lighton_retry_after(exc: Exception, cap: float) -> float | None:
     return min(seconds, cap)
 
 
-# Failures that re-sending the same request cannot fix. `requests` raises
-# these for a bad URL or a bad certificate — configuration, not weather — and
-# retrying a MemoryError on a base64 workload makes the shortage worse.
+# Failures that re-sending the same request cannot fix: a malformed URL, a
+# certificate that will not validate, a name error in our own code, or memory
+# exhaustion — where retrying a base64 workload makes the shortage worse.
+#
+# `requests_exceptions.SSLError`, not `ssl.SSLError`: the two are unrelated
+# classes. requests' inherits ConnectionError -> RequestException -> OSError,
+# so a tuple naming ssl.SSLError never matches anything requests raises,
+# while a test injecting ssl.SSLError passes.
+#
+# AttributeError is deliberately absent. urllib3 raises it for a pooled
+# connection closed underneath a read ("'NoneType' object has no attribute
+# 'read'"), which is weather. False-fatal is the worse direction here:
+# ExtractionError means no page retry *and* no document retry, so one dropped
+# socket sends a scanned PDF to the text-layer extractors and an empty result
+# that reads as success.
 _LIGHTON_FATAL_ERRORS: tuple[type[BaseException], ...] = (
     MemoryError,
     TypeError,
-    AttributeError,
     NameError,
-    ssl.SSLError,
+    requests_exceptions.SSLError,
     requests_exceptions.InvalidURL,
     requests_exceptions.MissingSchema,
     requests_exceptions.InvalidSchema,
     requests_exceptions.URLRequired,
 )
+
+# TLS failures that are drops rather than refusals: a load balancer recycling
+# a connection, a peer closing mid-handshake. `requests` wraps these in the
+# same SSLError it uses for a certificate failure, so the distinction has to
+# come from the cause chain.
+_LIGHTON_TRANSIENT_TLS: tuple[type[BaseException], ...] = (
+    ssl.SSLEOFError,
+    ssl.SSLZeroReturnError,
+)
+
+
+def _is_transient_tls(exc: BaseException) -> bool:
+    """Whether an SSL failure is a dropped connection rather than a refusal."""
+    seen: set[int] = set()
+    pending: list[BaseException] = [exc]
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, _LIGHTON_TRANSIENT_TLS):
+            return True
+        # requests carries the urllib3/ssl original in args as often as in
+        # __cause__, depending on which layer wrapped it.
+        pending.extend(a for a in getattr(current, "args", ()) if isinstance(a, BaseException))
+        pending.extend(e for e in (current.__cause__, current.__context__) if e is not None)
+    return False
 
 
 def _lighton_is_retryable(exc: Exception) -> bool:
@@ -145,6 +187,8 @@ def _lighton_is_retryable(exc: Exception) -> bool:
     times. Raised as ExtractionError instead, which the chain already routes
     straight to the next extraction method.
     """
+    if isinstance(exc, requests_exceptions.SSLError) and _is_transient_tls(exc):
+        return True
     if isinstance(exc, _LIGHTON_FATAL_ERRORS):
         return False
     response = getattr(exc, "response", None)
@@ -1097,11 +1141,21 @@ class PDFExtractor(Extractor):
                         if _lighton_is_retryable(e) and not last_attempt:
                             wait = _lighton_retry_after(e, LIGHTON_RETRY_AFTER_MAX)
                             if wait is None:
-                                wait = LIGHTON_PAGE_RETRY_BACKOFF * 2 ** (attempt - 1)
+                                # Exponent capped before the multiply:
+                                # float * 2**1024 raises OverflowError,
+                                # and it would raise *here*, one line
+                                # above the clamp meant to prevent it —
+                                # inside the handler carrying the 429.
+                                wait = LIGHTON_PAGE_RETRY_BACKOFF * 2 ** min(
+                                    attempt - 1, 16
+                                )
                             # Clamped again at the point of use: nothing that
                             # reaches a sleep inside an exception handler may
                             # be able to raise there, whatever a future
-                            # caller computes.
+                            # caller computes. Order matters — min() returns
+                            # nan unchanged and max() then rejects it, so
+                            # max(0, min(x, cap)) neutralises NaN and
+                            # min(max(...)) would not.
                             wait = max(0.0, min(float(wait), LIGHTON_RETRY_AFTER_MAX))
                             # INFO, not WARNING: a page that recovers is not
                             # something an operator needs to act on, and at
@@ -1130,7 +1184,7 @@ class PDFExtractor(Extractor):
                             # rate-limit case. It also holds the known failure
                             # back until every retrying sibling settles.
                             if aborted:
-                                raise _PageAborted(img_deriv.page) from None
+                                raise _PageAborted(img_deriv.page) from e
                             continue
 
                         # Out of attempts, or an error re-sending cannot fix.
@@ -1154,11 +1208,15 @@ class PDFExtractor(Extractor):
                         # calling it a rejected page sends the reader looking
                         # at the document.
                         refused = _lighton_error_detail(e)
-                        reason = (
-                            f"rejected page {img_deriv.page}"
-                            if refused
-                            else f"cannot reach the endpoint for page {img_deriv.page}"
-                        )
+                        if refused:
+                            reason = f"rejected page {img_deriv.page}"
+                        elif isinstance(e, requests_exceptions.RequestException):
+                            reason = f"cannot reach the endpoint for page {img_deriv.page}"
+                        else:
+                            # A MemoryError is not a networking problem, and
+                            # "cannot reach the endpoint" would send an
+                            # operator to look at DNS during an OOM.
+                            reason = f"failed locally on page {img_deriv.page}"
                         raise ExtractionError(
                             f"LightOnOCR {reason}: {type(e).__name__}: {e}{refused}",
                             extractor_name=self.name,
@@ -1168,12 +1226,15 @@ class PDFExtractor(Extractor):
                 try:
                     return resp.json()["choices"][0]["message"]["content"]
                 except Exception as e:
-                    # Broad on purpose. JSONDecodeError is a ValueError and a
-                    # bad envelope is a KeyError, but a connection dropping
-                    # mid-read raises ChunkedEncodingError — which used to
-                    # leave without setting the flag, so the queued pages kept
-                    # going. The classification below still distinguishes the
-                    # two kinds.
+                    # Broad on purpose, though not for the reason it looks
+                    # like: with stream=False `requests` buffers the body
+                    # inside post(), so an ordinary mid-read drop surfaces up
+                    # there and `resp.json()` raises JSONDecodeError, which is
+                    # a ValueError. What this catches is everything else a
+                    # response object can throw on access — and anything that
+                    # escapes here escapes without setting the abort flag,
+                    # which leaves the queue running. The isinstance check
+                    # below keeps the old classification exactly.
                     # A 2xx the client cannot read is deterministic: the same
                     # request will be unreadable next time, so retrying the
                     # document three times only asks three times. The body is

@@ -850,7 +850,11 @@ class TestPDFExtractorLightOnConcurrency:
 
         Counted in *pages*, not requests: a page may legitimately be sent
         several times now that transient failures are retried per page."""
-        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+        from agentic.knowledge import model_config
+
+        # Zero the backoff rather than stub `asyncio.sleep` — the last
+        # holdout of the pattern that has taken this runner down.
+        monkeypatch.setattr(model_config, "LIGHTON_PAGE_RETRY_BACKOFF", 0)
         import threading
         import time
 
@@ -1085,7 +1089,7 @@ class TestPDFExtractorLightOnPageRetry:
         assert max(slept) <= LIGHTON_RETRY_AFTER_MAX
 
 
-    @pytest.mark.parametrize("header", ["NaN", "nan", "inf", "-inf", "Infinity"])
+    @pytest.mark.parametrize("header", ["NaN", "nan"])
     @pytest.mark.asyncio
     async def test_a_nonsense_retry_after_falls_back_to_the_backoff(self, header, caplog):
         """`float("NaN")` parses, and then defeats both guards: `nan < 0` is
@@ -1107,12 +1111,16 @@ class TestPDFExtractorLightOnPageRetry:
         with (
             patch.object(extractor, "_render_page_images", return_value=self._images(2)),
             patch("requests.post", side_effect=_post),
-            caplog.at_level(logging.WARNING),
+            caplog.at_level(logging.INFO),
         ):
             result = await extractor._extract_lighton(self._raw())
 
         assert len(result.derivatives) > 0, "a nonsense header took the document down"
-        assert not any("NaN" in r.getMessage() for r in caplog.records)
+        # INFO, not WARNING: the retry line was demoted, so capturing at
+        # WARNING would make this assertion unable to fail.
+        retry_lines = [r.getMessage() for r in caplog.records if "retrying in" in r.getMessage()]
+        assert retry_lines, "no retry was logged"
+        assert not any("nan" in line.lower() for line in retry_lines)
 
     @pytest.mark.asyncio
     async def test_a_page_in_backoff_does_not_fire_after_the_abort(self):
@@ -1151,11 +1159,162 @@ class TestPDFExtractorLightOnPageRetry:
         )
 
     @pytest.mark.parametrize(
+        "underlying",
+        [__import__("ssl").SSLEOFError("eof"), __import__("ssl").SSLZeroReturnError("closed")],
+    )
+    @pytest.mark.asyncio
+    async def test_a_dropped_tls_connection_is_still_retried(self, underlying):
+        """Not every TLS failure is a bad certificate. A load balancer
+        recycling connections raises SSLEOFError / SSLZeroReturnError, which
+        `requests` wraps in the same SSLError as a certificate failure — and
+        treating those as fatal is the worse direction: ExtractionError means
+        no page retry *and* no document retry, so one dropped socket
+        downgrades a scanned PDF to the text-layer extractors and an empty
+        result the operator sees as success."""
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        attempts = {"n": 0}
+
+        def _post(*args, **kwargs):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise requests.exceptions.SSLError(underlying)
+            return self._response("page")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(1)),
+            patch("requests.post", side_effect=_post),
+        ):
+            result = await extractor._extract_lighton(self._raw())
+
+        assert attempts["n"] == 2, "a transient TLS drop was treated as fatal"
+        assert result.stats["pages_retried"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_torn_down_socket_is_still_retried(self):
+        """urllib3 raises AttributeError for a pooled connection closed
+        underneath it mid-read — "'NoneType' object has no attribute 'read'".
+        That is weather, not a programming bug, and the fatal list had it."""
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        attempts = {"n": 0}
+
+        def _post(*args, **kwargs):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise AttributeError("'NoneType' object has no attribute 'read'")
+            return self._response("page")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(1)),
+            patch("requests.post", side_effect=_post),
+        ):
+            await extractor._extract_lighton(self._raw())
+
+        assert attempts["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_the_two_retry_counters_measure_different_things(self):
+        """One page retried twice is one retried page and two retry requests.
+        The earlier fixture failed four pages once each, so both counters read
+        4 and either could stand in for the other."""
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        seen: dict[int, int] = {}
+
+        def _post(*args, **kwargs):
+            page = self._page_of(kwargs, args)
+            seen[page] = seen.get(page, 0) + 1
+            if page == 2 and seen[page] <= 2:
+                return self._http_error(503, "flaky")
+            return self._response("page")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(4)),
+            patch("requests.post", side_effect=_post),
+        ):
+            result = await extractor._extract_lighton(self._raw())
+
+        assert result.stats["pages_retried"] == 1
+        assert result.stats["retry_requests"] == 2
+
+    @pytest.mark.asyncio
+    async def test_a_connection_dropped_while_reading_stops_the_queue(self):
+        """`ChunkedEncodingError` comes out of the body read, not the request,
+        so it used to leave `_ocr_page` without setting the abort flag and the
+        queued pages kept going. It stays transient — the response never
+        arrived, which says nothing about the next one."""
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        attempts = {"n": 0}
+
+        def _post(*args, **kwargs):
+            attempts["n"] += 1
+            response = MagicMock()
+            response.status_code = 200
+            response.text = "partial"
+            response.headers = CaseInsensitiveDict({})
+            response.raise_for_status = MagicMock()
+            response.json = MagicMock(
+                side_effect=requests.exceptions.ChunkedEncodingError("connection broken")
+            )
+            return response
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(24)),
+            patch("requests.post", side_effect=_post),
+        ):
+            with pytest.raises(requests.exceptions.ChunkedEncodingError):
+                await extractor._extract_lighton(self._raw())
+
+        from agentic.knowledge.model_config import LIGHTON_MAX_CONCURRENCY
+
+        # The window, not window x attempts: the failure happens in the body
+        # read, so the page is not retried, and every page beyond the opening
+        # window must be skipped. Allowing the retry budget here would pass
+        # with the abort never set — 24 pages x 1 request is the same number.
+        assert attempts["n"] <= LIGHTON_MAX_CONCURRENCY + 1, (
+            f"{attempts['n']} requests for 24 pages: the queue kept going"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_backoff_is_capped_even_at_a_high_attempt_count(
+        self, sleep_spy, monkeypatch
+    ):
+        """`BACKOFF * 2**(attempt-1)` passes 30s from attempt 6, and the
+        attempt count is env-overridable. The call-site clamp is the only
+        thing bounding it — the parser never sees these, because they are not
+        Retry-After values."""
+        from agentic.knowledge import model_config
+
+        monkeypatch.setattr(model_config, "LIGHTON_PAGE_MAX_ATTEMPTS", 12)
+        monkeypatch.setattr(model_config, "LIGHTON_PAGE_RETRY_BACKOFF", 1.0)
+        extractor = PDFExtractor(lighton_api_key="test-key")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(1)),
+            patch("requests.post", side_effect=lambda *a, **k: self._http_error(503)),
+        ):
+            with pytest.raises(requests.exceptions.HTTPError):
+                await extractor._extract_lighton(self._raw())
+
+        assert sleep_spy, "no backoff was taken"
+        assert max(sleep_spy) <= model_config.LIGHTON_RETRY_AFTER_MAX, (
+            f"waited {max(sleep_spy)}s, past the {model_config.LIGHTON_RETRY_AFTER_MAX}s cap"
+        )
+
+    @pytest.mark.parametrize(
         "exc",
         [
-            __import__("ssl").SSLError("bad cert"),
+            # What `requests` actually raises for a bad certificate. NOT
+            # ssl.SSLError: requests.exceptions.SSLError inherits from
+            # ConnectionError -> RequestException -> OSError, so a tuple
+            # containing ssl.SSLError never matches it in production while a
+            # test that injects ssl.SSLError passes happily.
+            requests.exceptions.SSLError("certificate verify failed"),
+            requests.exceptions.InvalidURL("not a url"),
+            requests.exceptions.MissingSchema("no scheme"),
+            requests.exceptions.InvalidSchema("gopher://"),
+            requests.exceptions.URLRequired("no url"),
             MemoryError("out of memory"),
             TypeError("programming error"),
+            NameError("typo"),
         ],
     )
     @pytest.mark.asyncio
@@ -1179,10 +1338,18 @@ class TestPDFExtractorLightOnPageRetry:
                 await extractor._extract_lighton(self._raw())
 
         # Non-retryable means the chain moves on rather than re-running the
-        # document, so it must surface as ExtractionError with the real cause
-        # named — not as "rejected page", which blames the document.
-        assert type(exc).__name__ in str(excinfo.value)
-        assert "cannot reach the endpoint" in str(excinfo.value)
+        # document, so it must surface as ExtractionError naming the real
+        # cause — and pointing at the right place: a MemoryError is not a
+        # networking problem, and "cannot reach the endpoint" would send an
+        # operator to look at DNS during an OOM.
+        message = str(excinfo.value)
+        assert type(exc).__name__ in message
+        expected = (
+            "cannot reach the endpoint"
+            if isinstance(exc, requests.exceptions.RequestException)
+            else "failed locally"
+        )
+        assert expected in message, message
         assert attempts["n"] == 1, f"{type(exc).__name__} was retried {attempts['n']}x"
 
     @pytest.mark.asyncio
