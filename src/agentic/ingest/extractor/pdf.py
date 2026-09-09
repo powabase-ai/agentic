@@ -7,13 +7,14 @@ Uses fallback strategy: LightOnOCR → OpenDataLoader → PyMuPDF (fitz) → pdf
 
 import asyncio
 import base64
-import functools
+import contextlib
 import glob as glob_mod
 import io
 import logging
 import os
 import re
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 
 from agentic.ingest.extractor.base import (
     ExtractionError,
@@ -42,6 +43,39 @@ def _count_pages(data: bytes) -> int:
         rb"/Type\s*/Page([^s]|$)", re.MULTILINE | re.DOTALL
     )
     return len(rxcountpages.findall(data))
+
+
+def _lighton_error_detail(exc: Exception, limit: int = 200) -> str:
+    """Status and body excerpt for an OCR failure, when the error carries one.
+
+    ``404 Client Error: Not Found for url: ...`` says nothing about *why* the
+    endpoint refused; the body usually does, and is the only way to tell a
+    rejected page apart from a rate limit or an expired key.
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        return ""
+    body = (getattr(response, "text", "") or "").strip().replace("\n", " ")
+    if len(body) > limit:
+        body = body[: limit - 3] + "..."
+    return f" (status {getattr(response, 'status_code', '?')}; body: {body!r})"
+
+
+def _lighton_is_retryable(exc: Exception) -> bool:
+    """Whether re-sending the same page could plausibly succeed.
+
+    5xx, 408 and 429 are worth another attempt. Every other 4xx is the
+    endpoint saying this request is wrong — a bad key, an oversized page, an
+    unknown model — and ``_try_method`` retries the *whole document*, so
+    treating those as retryable spends three full passes to be refused three
+    times. Raised as ExtractionError instead, which the chain already routes
+    straight to the next extraction method.
+    """
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if status is None or not 400 <= status < 500:
+        return True
+    return status in (408, 429)
 
 
 def _split_pdf(data: bytes, batch_size: int) -> list[tuple[bytes, int, int]]:
@@ -904,60 +938,112 @@ class PDFExtractor(Extractor):
         logger.info("LightOnOCR: processing %d pages via %s", len(image_derivs), url)
 
         semaphore = asyncio.Semaphore(LIGHTON_MAX_CONCURRENCY)
+        loop = asyncio.get_running_loop()
 
-        async def _ocr_page(img_deriv: Derivative) -> str:
-            b64_img = base64.b64encode(img_deriv.content).decode("utf-8")
-            payload = {
-                "model": LIGHTON_DEFAULT_MODEL,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{b64_img}",
-                                },
-                            }
-                        ],
-                    }
-                ],
-                "max_tokens": LIGHTON_MAX_TOKENS,
-                "temperature": LIGHTON_TEMPERATURE,
-                "top_p": LIGHTON_TOP_P,
-            }
-
+        async def _ocr_page(executor, img_deriv: Derivative) -> str:
             async with semaphore:
-                # to_thread because `requests` is synchronous: called directly
-                # it blocks the event loop for the whole round trip, which
-                # both serialises these calls and stalls everything else the
-                # worker is running.
-                resp = await asyncio.to_thread(
-                    functools.partial(
-                        requests.post,
-                        url,
-                        json=payload,
-                        headers=headers,
-                        timeout=LIGHTON_TIMEOUT,
-                    )
-                )
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
+                # Built inside the semaphore, not before it. Every task runs
+                # to its first suspension the moment it is scheduled, so a
+                # payload constructed above this line exists once per page
+                # rather than once per slot: 252 pages of base64 (~0.5 MB
+                # each, twice over while the f-string holds a second copy)
+                # instead of eight.
+                payload = {
+                    "model": LIGHTON_DEFAULT_MODEL,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": "data:image/png;base64,"
+                                        + base64.b64encode(img_deriv.content).decode(
+                                            "utf-8"
+                                        ),
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                    "max_tokens": LIGHTON_MAX_TOKENS,
+                    "temperature": LIGHTON_TEMPERATURE,
+                    "top_p": LIGHTON_TOP_P,
+                }
 
-        tasks = [asyncio.create_task(_ocr_page(d)) for d in image_derivs]
+                # A dedicated executor, not asyncio.to_thread: that one uses
+                # the loop's default pool, sized min(32, cpu_count + 4) — six
+                # threads on a 2-vCPU container, which this alone would
+                # saturate, stalling every other to_thread user in the
+                # process (docx, pptx, xlsx, the embedder). `requests` is
+                # synchronous, so calling it without a thread at all would
+                # block the event loop for the whole round trip.
+                try:
+                    resp = await loop.run_in_executor(
+                        executor,
+                        lambda: requests.post(
+                            url, json=payload, headers=headers, timeout=LIGHTON_TIMEOUT
+                        ),
+                    )
+                    resp.raise_for_status()
+                    return resp.json()["choices"][0]["message"]["content"]
+                except Exception as e:
+                    # Serially, the failing page was wherever the loop stopped;
+                    # concurrently it is whichever page loses the race, and a
+                    # re-run names a different one. Without this the caller
+                    # reports "attempt 1/3 failed: 404 Client Error" with no
+                    # page, no document, and no body — and every failure after
+                    # the first is discarded by the cleanup gather below.
+                    logger.warning(
+                        "LightOnOCR page %s of %s failed: %s%s",
+                        img_deriv.page,
+                        raw.source_uri,
+                        e,
+                        _lighton_error_detail(e),
+                    )
+                    if _lighton_is_retryable(e):
+                        raise
+                    raise ExtractionError(
+                        f"LightOnOCR rejected page {img_deriv.page}: {e}"
+                        f"{_lighton_error_detail(e)}",
+                        extractor_name=self.name,
+                        source_uri=raw.source_uri,
+                    ) from e
+
+        # Sized to the semaphore: the concurrency bound is what the endpoint
+        # sees, and a wider pool would only queue work the semaphore has not
+        # admitted. cancel_futures so a failure does not leave the untouched
+        # pages queued behind requests that are already on the wire.
+        executor = ThreadPoolExecutor(
+            max_workers=LIGHTON_MAX_CONCURRENCY, thread_name_prefix="lighton-ocr"
+        )
         try:
-            # gather, not TaskGroup: the caller's retry chain distinguishes
-            # ExtractionError from everything else, so the first failure has
-            # to surface as itself rather than inside an ExceptionGroup.
-            page_markdowns = list(await asyncio.gather(*tasks))
-        except BaseException:
-            # Whatever failed, the caller re-runs the whole document — so the
-            # pages still queued are work about to be thrown away, against an
-            # endpoint that may be failing us for load in the first place.
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            raise
+            tasks = [asyncio.create_task(_ocr_page(executor, d)) for d in image_derivs]
+            try:
+                # gather, not TaskGroup: the caller's retry chain distinguishes
+                # ExtractionError from everything else, so the first failure has
+                # to surface as itself rather than inside an ExceptionGroup.
+                page_markdowns = list(await asyncio.gather(*tasks))
+            except BaseException:
+                # Whatever failed, the caller re-runs the whole document — so the
+                # pages still queued are work about to be thrown away, against an
+                # endpoint that may be failing us for load in the first place.
+                for task in tasks:
+                    task.cancel()
+                # suppress: this await is inside an exception handler, so a
+                # cancellation arriving here would replace the error being
+                # propagated — and CancelledError is not an Exception, so it
+                # would escape _try_method's retry, extract()'s fallback chain
+                # and every log line on the way out. On a pure cancellation the
+                # bare `raise` below still re-raises it.
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+        finally:
+            # wait=False: threads already inside requests.post cannot be
+            # interrupted, and waiting up to LIGHTON_TIMEOUT for them would
+            # hold up the fallback this failure is meant to reach.
+            executor.shutdown(wait=False, cancel_futures=True)
 
         # Page order comes from the document, never from completion order.
         page_text_derivs = [

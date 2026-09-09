@@ -305,15 +305,8 @@ LIGHTON_MAX_TOKENS = 4096
 LIGHTON_TEMPERATURE = 0.2
 LIGHTON_TOP_P = 0.9
 LIGHTON_TIMEOUT = 60  # seconds per page
-# Pages in flight per document. The model takes one page image per request,
-# so a document costs one round trip per page and every second of it is spent
-# waiting — a 252-page filing measured 19 minutes issued serially, at 0.15%
-# CPU. There is no batch endpoint to use instead: the OpenAI-compatible
-# deployment answers 404 for /v1/batches, and several page images in one chat
-# request would return one blob with no page boundaries, which is what
-# page_text derivatives are. Concurrency is the only lever, and this bounds
-# it — set for a shared endpoint that rate-limits, not for a private one.
-LIGHTON_MAX_CONCURRENCY = 8
+# Pages in flight per document — see LIGHTON_MAX_CONCURRENCY below, which is
+# env-overridable and so lives with the other _int_env constants.
 
 # --- LlamaParse (LlamaCloud) configuration ---
 # Uses the v2 Parse API with the most-advanced "Agentic Plus" tier (the standard
@@ -406,3 +399,20 @@ PAGEINDEX_LLM_TIMEOUT = _int_env("PAGEINDEX_LLM_TIMEOUT", 300)
 # (each retry re-sends a large prompt — the bounded-memory concern). Set to 0 to
 # fully restore the previous no-retry behavior. Env-overridable: PAGEINDEX_LLM_NUM_RETRIES.
 PAGEINDEX_LLM_NUM_RETRIES = _int_env("PAGEINDEX_LLM_NUM_RETRIES", 1)
+
+# LightOnOCR page images in flight per document.
+#
+# The model takes one page image per request, so a document costs one round
+# trip per page, and every second of that is spent waiting: a 252-page filing
+# measured 19 minutes issued serially, with the worker at 0.15% CPU. Neither
+# form of batching is available as an alternative — as of 2026-09, the IONOS
+# deployment at LIGHTON_DEFAULT_BASE_URL answers 404 for /v1/batches, and
+# several page images in one chat request return a single blob with no page
+# boundaries, which is what page_text derivatives are. So concurrency is the
+# lever, and this bounds it.
+#
+# The default suits a shared endpoint that rate-limits. Env-overridable
+# because the operator pointing LIGHTON_BASE_URL at their own deployment
+# (registry.py reads that from the environment already) is exactly the one
+# for whom a different number is right: LIGHTON_MAX_CONCURRENCY.
+LIGHTON_MAX_CONCURRENCY = _int_env("LIGHTON_MAX_CONCURRENCY", 8)
