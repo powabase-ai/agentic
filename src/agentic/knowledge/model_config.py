@@ -419,3 +419,25 @@ PAGEINDEX_LLM_NUM_RETRIES = _int_env("PAGEINDEX_LLM_NUM_RETRIES", 1)
 # PAGEINDEX_LLM_NUM_RETRIES: a pool of 0 workers and a Semaphore of -1 both
 # raise, and _int_env exists so a bad operator value cannot do that.
 LIGHTON_MAX_CONCURRENCY = max(1, _int_env("LIGHTON_MAX_CONCURRENCY", 8))
+
+# Attempts per page before a page is given up on, including the first.
+#
+# The retry that already existed is a *document* retry: `_try_method` calls
+# the extractor again, and the extractor holds nothing between calls, so one
+# rate-limited page throws away every page that succeeded and re-renders and
+# re-sends all of them. On a 252-page filing that is three full passes — up
+# to 756 requests — to recover from one 429.
+#
+# Retrying the page instead keeps the successes. The slot is held across the
+# backoff on purpose: when the reason is a rate limit, the useful response is
+# to send less, and a sleeping slot is one fewer request in flight.
+LIGHTON_PAGE_MAX_ATTEMPTS = max(1, _int_env("LIGHTON_PAGE_MAX_ATTEMPTS", 3))
+
+# First backoff, doubled per attempt: 1s, then 2s.
+LIGHTON_PAGE_RETRY_BACKOFF = 1.0
+
+# Ceiling on a server-supplied Retry-After. Honouring the header is the point
+# — the endpoint knows its own limits — but an unbounded one from a
+# misconfigured proxy would park a document for hours with nothing logged
+# between start and finish.
+LIGHTON_RETRY_AFTER_MAX = 30.0

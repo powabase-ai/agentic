@@ -86,6 +86,30 @@ def _lighton_error_detail(exc: Exception, limit: int = 200) -> str:
     return _response_excerpt(response, limit)
 
 
+def _lighton_retry_after(exc: Exception, cap: float) -> float | None:
+    """Seconds the endpoint asked us to wait, if it said so and we believe it.
+
+    Only the delta-seconds form is read. The HTTP-date form is legal and
+    would need clock-skew handling to be worth anything, so it is ignored
+    rather than half-supported.
+    """
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None) or {}
+    try:
+        raw = headers.get("Retry-After")
+    except Exception:  # pragma: no cover - headers is a mapping in practice
+        return None
+    if raw is None:
+        return None
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if seconds < 0:
+        return None
+    return min(seconds, cap)
+
+
 def _lighton_is_retryable(exc: Exception) -> bool:
     """Whether re-sending the same page could plausibly succeed.
 
@@ -939,6 +963,9 @@ class PDFExtractor(Extractor):
             LIGHTON_DEFAULT_MODEL,
             LIGHTON_MAX_CONCURRENCY,
             LIGHTON_MAX_TOKENS,
+            LIGHTON_PAGE_MAX_ATTEMPTS,
+            LIGHTON_PAGE_RETRY_BACKOFF,
+            LIGHTON_RETRY_AFTER_MAX,
             LIGHTON_TEMPERATURE,
             LIGHTON_TIMEOUT,
             LIGHTON_TOP_P,
@@ -1014,36 +1041,68 @@ class PDFExtractor(Extractor):
                 # process (docx, pptx, xlsx, the embedder). `requests` is
                 # synchronous, so calling it without a thread at all would
                 # block the event loop for the whole round trip.
-                try:
-                    resp = await loop.run_in_executor(
-                        executor,
-                        lambda: requests.post(
-                            url, json=payload, headers=headers, timeout=LIGHTON_TIMEOUT
-                        ),
-                    )
-                    resp.raise_for_status()
-                except Exception as e:
-                    # Serially, the failing page was wherever the loop stopped;
-                    # concurrently it is whichever page loses the race, and a
-                    # re-run names a different one. Without this the caller
-                    # reports "attempt 1/3 failed: 404 Client Error" with no
-                    # page, no document, and no body.
-                    aborted = True
-                    logger.warning(
-                        "LightOnOCR page %s of %s failed: %s%s",
-                        img_deriv.page,
-                        raw.source_uri,
-                        e,
-                        _lighton_error_detail(e),
-                    )
-                    if _lighton_is_retryable(e):
-                        raise
-                    raise ExtractionError(
-                        f"LightOnOCR rejected page {img_deriv.page}: {e}"
-                        f"{_lighton_error_detail(e)}",
-                        extractor_name=self.name,
-                        source_uri=raw.source_uri,
-                    ) from e
+                # Retry the *page*, not the document. The document retry in
+                # `_try_method` re-renders and re-sends every page, so one 429
+                # on the last page of a long filing discards every page that
+                # succeeded. Here the successes stay and only this page goes
+                # again — and the semaphore slot is deliberately held across
+                # the wait, because when the cause is a rate limit the useful
+                # response is fewer requests in flight, not the same number.
+                for attempt in range(1, LIGHTON_PAGE_MAX_ATTEMPTS + 1):
+                    try:
+                        resp = await loop.run_in_executor(
+                            executor,
+                            lambda: requests.post(
+                                url,
+                                json=payload,
+                                headers=headers,
+                                timeout=LIGHTON_TIMEOUT,
+                            ),
+                        )
+                        resp.raise_for_status()
+                        break
+                    except Exception as e:
+                        last_attempt = attempt >= LIGHTON_PAGE_MAX_ATTEMPTS
+                        if _lighton_is_retryable(e) and not last_attempt:
+                            wait = _lighton_retry_after(e, LIGHTON_RETRY_AFTER_MAX)
+                            if wait is None:
+                                wait = LIGHTON_PAGE_RETRY_BACKOFF * 2 ** (attempt - 1)
+                            logger.warning(
+                                "LightOnOCR page %s of %s attempt %d/%d failed: "
+                                "%s%s — retrying in %.1fs",
+                                img_deriv.page,
+                                raw.source_uri,
+                                attempt,
+                                LIGHTON_PAGE_MAX_ATTEMPTS,
+                                e,
+                                _lighton_error_detail(e),
+                                wait,
+                            )
+                            await asyncio.sleep(wait)
+                            continue
+
+                        # Out of attempts, or an error re-sending cannot fix.
+                        # Serially the failing page was wherever the loop
+                        # stopped; concurrently it is whichever page loses the
+                        # race, so the page number has to be in the log — the
+                        # caller only ever reports one exception.
+                        aborted = True
+                        logger.warning(
+                            "LightOnOCR page %s of %s failed after %d attempt(s): %s%s",
+                            img_deriv.page,
+                            raw.source_uri,
+                            attempt,
+                            e,
+                            _lighton_error_detail(e),
+                        )
+                        if _lighton_is_retryable(e):
+                            raise
+                        raise ExtractionError(
+                            f"LightOnOCR rejected page {img_deriv.page}: {e}"
+                            f"{_lighton_error_detail(e)}",
+                            extractor_name=self.name,
+                            source_uri=raw.source_uri,
+                        ) from e
 
                 try:
                     return resp.json()["choices"][0]["message"]["content"]

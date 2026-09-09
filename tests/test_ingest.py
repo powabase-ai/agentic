@@ -841,30 +841,34 @@ class TestPDFExtractorLightOnConcurrency:
         ]
 
     @pytest.mark.asyncio
-    async def test_a_failed_page_stops_the_remaining_requests(self):
-        """The caller retries the whole document on failure, so every page
-        issued after the first error is work about to be thrown away — and
-        hammers an endpoint that may be failing us for load in the first
-        place."""
+    async def test_a_failed_page_stops_the_remaining_requests(self, monkeypatch):
+        """Once a page has exhausted its own retries, the pages still queued
+        behind the semaphore are work about to be thrown away — the caller
+        re-runs the document — against an endpoint that may be failing for
+        load in the first place.
+
+        Counted in *pages*, not requests: a page may legitimately be sent
+        several times now that transient failures are retried per page."""
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
         import threading
         import time
 
         extractor = PDFExtractor(lighton_api_key="test-key")
         lock = threading.Lock()
-        calls = 0
+        pages_seen = set()
 
         def _post(*args, **kwargs):
-            nonlocal calls
+            page = TestPDFExtractorLightOnPageRetry._page_of(kwargs, args)
             with lock:
-                calls += 1
-                mine = calls
-            if mine == 1:
+                pages_seen.add(page)
+            # Page 1 fails every attempt, so it exhausts its retries and the
+            # document gives up — which is when the queue should stop.
+            if page == 1:
                 raise RuntimeError("lighton is down")
-            # The other pages in the opening window stay on the wire while
-            # the cancellation propagates. Without this they return instantly
-            # and free their slots, so pages *behind* the window start and
-            # the count measures scheduling luck (9-13 observed) rather than
-            # the property under test.
+            # The other pages of the opening window stay on the wire while the
+            # first one exhausts its attempts. Returning instantly would free
+            # their slots, letting pages *behind* the window start, so the
+            # count would measure scheduling luck rather than the property.
             time.sleep(0.5)
             return self._response("page")
 
@@ -887,31 +891,210 @@ class TestPDFExtractorLightOnConcurrency:
         # something to assert against. What must hold is that nothing beyond
         # the window is issued — the failing page frees its own slot, so one
         # queued page can still claim it.
-        assert calls <= LIGHTON_MAX_CONCURRENCY + 1, (
-            f"issued {calls} pages after the failure; the window is "
+        assert len(pages_seen) <= LIGHTON_MAX_CONCURRENCY + 1, (
+            f"started {len(pages_seen)} pages after the failure; the window is "
             f"{LIGHTON_MAX_CONCURRENCY}"
         )
+
+
+def _lighton_http_error(status, body="rate limited", headers=None):
+    """A `requests` HTTPError carrying a response, the way raise_for_status
+    raises one."""
+    response = MagicMock()
+    response.status_code = status
+    response.text = body
+    response.headers = headers or {}
+    error = requests.exceptions.HTTPError(f"{status} Client Error")
+    error.response = response
+    response.raise_for_status = MagicMock(side_effect=error)
+    return response
+
+
+class TestPDFExtractorLightOnPageRetry:
+    """A rate-limited page costs a page, not a document.
+
+    The retry that already existed belongs to `_try_method`, which knows
+    nothing about pages: it calls the extractor again, and the extractor
+    keeps nothing between calls. So one 429 on the last page of a 252-page
+    filing discarded 251 finished pages, re-rendered every image and re-sent
+    all of them — three times, up to 756 requests, to recover from one.
+    """
+
+    _raw = staticmethod(TestPDFExtractorLightOnConcurrency._raw)
+    _images = staticmethod(TestPDFExtractorLightOnConcurrency._images)
+    _response = staticmethod(TestPDFExtractorLightOnConcurrency._response)
+    _http_error = staticmethod(
+        lambda status, body="rate limited", headers=None: _lighton_http_error(
+            status, body, headers
+        )
+    )
+
+    @staticmethod
+    def _page_of(kwargs, args):
+        payload = kwargs.get("json") or args[1]
+        url = payload["messages"][0]["content"][0]["image_url"]["url"]
+        for n in range(1, 200):
+            if base64.b64encode(f"png-{n}".encode()).decode() in url:
+                return n
+        raise AssertionError("no page in payload")
+
+    @pytest.mark.asyncio
+    async def test_a_transient_page_failure_retries_only_that_page(self, monkeypatch):
+        """The successes stay. Only the failed page goes again."""
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        attempts = {}
+
+        def _post(*args, **kwargs):
+            page = self._page_of(kwargs, args)
+            attempts[page] = attempts.get(page, 0) + 1
+            if page == 3 and attempts[page] == 1:
+                return self._http_error(429)
+            return self._response(f"# Page {page}")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(8)),
+            patch("requests.post", side_effect=_post),
+        ):
+            result = await extractor._extract_lighton(self._raw())
+
+        assert attempts[3] == 2, "the rate-limited page should have been re-sent"
+        assert all(attempts[p] == 1 for p in attempts if p != 3), (
+            f"pages that succeeded were re-sent: {attempts}"
+        )
+        assert sum(attempts.values()) == 9, "a whole extra document pass was made"
+        page_derivs = [d for d in result.derivatives if d.type == "page_text"]
+        assert [d.page for d in page_derivs] == list(range(1, 9))
+        assert page_derivs[2].content == "# Page 3"
+
+    @pytest.mark.asyncio
+    async def test_a_deterministic_page_failure_is_not_retried(self, monkeypatch):
+        """A 413 will be a 413 next time; re-sending it is pure cost."""
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        attempts = {}
+
+        def _post(*args, **kwargs):
+            page = self._page_of(kwargs, args)
+            attempts[page] = attempts.get(page, 0) + 1
+            if page == 2:
+                return self._http_error(413, "page too large")
+            return self._response("page")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(4)),
+            patch("requests.post", side_effect=_post),
+        ):
+            with pytest.raises(ExtractionError, match="rejected page 2"):
+                await extractor._extract_lighton(self._raw())
+
+        assert attempts[2] == 1, f"a deterministic rejection was retried: {attempts}"
+
+    @pytest.mark.asyncio
+    async def test_a_page_that_keeps_failing_gives_up_after_its_attempts(self, monkeypatch):
+        """Bounded: the page gets its attempts, then the document fails — it
+        does not retry forever inside one pass."""
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+        from agentic.knowledge.model_config import LIGHTON_PAGE_MAX_ATTEMPTS
+
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        attempts = {}
+
+        def _post(*args, **kwargs):
+            page = self._page_of(kwargs, args)
+            attempts[page] = attempts.get(page, 0) + 1
+            if page == 1:
+                return self._http_error(503, "down")
+            return self._response("page")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(4)),
+            patch("requests.post", side_effect=_post),
+        ):
+            with pytest.raises(requests.exceptions.HTTPError):
+                await extractor._extract_lighton(self._raw())
+
+        assert attempts[1] == LIGHTON_PAGE_MAX_ATTEMPTS
+
+    @pytest.mark.asyncio
+    async def test_retry_after_is_honoured(self, monkeypatch):
+        """The endpoint knows its own limits better than a fixed backoff."""
+        slept = []
+
+        async def _sleep(seconds):
+            slept.append(seconds)
+
+        monkeypatch.setattr(asyncio, "sleep", _sleep)
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        seen = {"n": 0}
+
+        def _post(*args, **kwargs):
+            seen["n"] += 1
+            if seen["n"] == 1:
+                return self._http_error(429, headers={"Retry-After": "7"})
+            return self._response("page")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(2)),
+            patch("requests.post", side_effect=_post),
+        ):
+            await extractor._extract_lighton(self._raw())
+
+        assert 7 in slept, f"Retry-After was ignored: {slept}"
+
+    @pytest.mark.asyncio
+    async def test_an_absurd_retry_after_is_capped(self, monkeypatch):
+        """A misconfigured proxy should not park a document for hours with
+        nothing logged between start and finish."""
+        slept = []
+
+        async def _sleep(seconds):
+            slept.append(seconds)
+
+        monkeypatch.setattr(asyncio, "sleep", _sleep)
+        from agentic.knowledge.model_config import LIGHTON_RETRY_AFTER_MAX
+
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        seen = {"n": 0}
+
+        def _post(*args, **kwargs):
+            seen["n"] += 1
+            if seen["n"] == 1:
+                return self._http_error(429, headers={"Retry-After": "86400"})
+            return self._response("page")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(2)),
+            patch("requests.post", side_effect=_post),
+        ):
+            await extractor._extract_lighton(self._raw())
+
+        assert max(slept) <= LIGHTON_RETRY_AFTER_MAX
 
 
 class TestPDFExtractorLightOnFailures:
     """What survives a failure: the memory ceiling, the error, and the page
     number that names it."""
 
+    @pytest.fixture(autouse=True)
+    def _no_retry_backoff(self, monkeypatch):
+        """Transient failures are retried per page now, so every test here
+        that fails a page would otherwise pay 1s + 2s of real backoff. These
+        tests are about which error is reported and what gets logged; the
+        waiting itself is covered in TestPDFExtractorLightOnPageRetry.
+
+        The backoff constant is zeroed rather than `asyncio.sleep` replaced:
+        pytest-asyncio and the loop itself await `sleep`, so stubbing it for
+        a whole class takes the runner down with it."""
+        from agentic.knowledge import model_config
+
+        monkeypatch.setattr(model_config, "LIGHTON_PAGE_RETRY_BACKOFF", 0)
+
     _raw = staticmethod(TestPDFExtractorLightOnConcurrency._raw)
     _images = staticmethod(TestPDFExtractorLightOnConcurrency._images)
     _response = staticmethod(TestPDFExtractorLightOnConcurrency._response)
 
-    @staticmethod
-    def _http_error(status, body="rate limited"):
-        import requests
-
-        response = MagicMock()
-        response.status_code = status
-        response.text = body
-        error = requests.exceptions.HTTPError(f"{status} Client Error")
-        error.response = response
-        response.raise_for_status = MagicMock(side_effect=error)
-        return response
+    _http_error = staticmethod(_lighton_http_error)
 
     @pytest.mark.asyncio
     async def test_payloads_are_built_inside_the_semaphore_not_ahead_of_it(self):
