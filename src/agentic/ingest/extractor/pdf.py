@@ -10,9 +10,14 @@ import base64
 import glob as glob_mod
 import io
 import logging
+import math
 import os
 import re
+import ssl
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
+
+from requests import exceptions as requests_exceptions
 
 from agentic.ingest.extractor.base import (
     ExtractionError,
@@ -41,6 +46,156 @@ def _count_pages(data: bytes) -> int:
         rb"/Type\s*/Page([^s]|$)", re.MULTILINE | re.DOTALL
     )
     return len(rxcountpages.findall(data))
+
+
+class _PageAborted(Exception):
+    """A page that was never sent because an earlier page had already failed.
+
+    Not a failure of its own: it carries no diagnosis and must never be the
+    error the document reports.
+    """
+
+
+def _response_excerpt(response, limit: int = 200) -> str:
+    """``(status N; body: '...')`` for a response, or a note that it is unread.
+
+    ``.text`` is read inside exception handlers, and on a streamed or
+    already-closed response reading it can itself raise — which would replace
+    the error being reported with one about reporting. An unread body says so
+    rather than rendering as ``body: ''``, which is indistinguishable from a
+    response that genuinely had none.
+    """
+    try:
+        status = getattr(response, "status_code", "?")
+        body = (getattr(response, "text", "") or "").strip().replace("\n", " ")
+    except Exception as read_error:  # pragma: no cover - see docstring
+        # `getattr`'s default only swallows AttributeError, and `response`
+        # comes off an arbitrary exception — a property that raises anything
+        # else would replace the error being reported with one about
+        # reporting it.
+        return f" (status unreadable: {type(read_error).__name__})"
+    if limit > 3 and len(body) > limit:
+        body = body[: limit - 3] + "..."
+    elif len(body) > limit:
+        body = body[:limit]
+    return f" (status {status}; body: {body!r})"
+
+
+def _lighton_error_detail(exc: Exception, limit: int = 200) -> str:
+    """Status and body excerpt for an OCR failure, when the error carries one.
+
+    ``404 Client Error: Not Found for url: ...`` says nothing about *why* the
+    endpoint refused; the body usually does, and is the only way to tell a
+    rejected page apart from a rate limit or an expired key.
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        return ""
+    return _response_excerpt(response, limit)
+
+
+def _lighton_retry_after(exc: Exception, cap: float) -> float | None:
+    """Seconds the endpoint asked us to wait, if it said so and we believe it.
+
+    Only the delta-seconds form is read. The HTTP-date form is legal and
+    would need clock-skew handling to be worth anything, so it is ignored
+    rather than half-supported.
+    """
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None) or {}
+    try:
+        raw = headers.get("Retry-After")
+    except Exception:  # pragma: no cover - headers is a mapping in practice
+        return None
+    if raw is None:
+        return None
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        return None
+    # isfinite, not `seconds < 0`: NaN compares False against everything, so a
+    # `Retry-After: NaN` passes a negative check and survives min() unchanged
+    # — and asyncio.sleep(nan) raises, from inside the handler carrying the
+    # 429. inf is rejected here too; a header that says "wait forever" is not
+    # a wait, it is a broken header.
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    return min(seconds, cap)
+
+
+# Failures that re-sending the same request cannot fix: a malformed URL, a
+# certificate that will not validate, a name error in our own code, or memory
+# exhaustion — where retrying a base64 workload makes the shortage worse.
+#
+# `requests_exceptions.SSLError`, not `ssl.SSLError`: the two are unrelated
+# classes. requests' inherits ConnectionError -> RequestException -> OSError,
+# so a tuple naming ssl.SSLError never matches anything requests raises,
+# while a test injecting ssl.SSLError passes.
+#
+# AttributeError is deliberately absent. urllib3 raises it for a pooled
+# connection closed underneath a read ("'NoneType' object has no attribute
+# 'read'"), which is weather. False-fatal is the worse direction here:
+# ExtractionError means no page retry *and* no document retry, so one dropped
+# socket sends a scanned PDF to the text-layer extractors and an empty result
+# that reads as success.
+_LIGHTON_FATAL_ERRORS: tuple[type[BaseException], ...] = (
+    MemoryError,
+    TypeError,
+    NameError,
+    requests_exceptions.SSLError,
+    requests_exceptions.InvalidURL,
+    requests_exceptions.MissingSchema,
+    requests_exceptions.InvalidSchema,
+    requests_exceptions.URLRequired,
+)
+
+# TLS failures that are drops rather than refusals: a load balancer recycling
+# a connection, a peer closing mid-handshake. `requests` wraps these in the
+# same SSLError it uses for a certificate failure, so the distinction has to
+# come from the cause chain.
+_LIGHTON_TRANSIENT_TLS: tuple[type[BaseException], ...] = (
+    ssl.SSLEOFError,
+    ssl.SSLZeroReturnError,
+)
+
+
+def _is_transient_tls(exc: BaseException) -> bool:
+    """Whether an SSL failure is a dropped connection rather than a refusal."""
+    seen: set[int] = set()
+    pending: list[BaseException] = [exc]
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, _LIGHTON_TRANSIENT_TLS):
+            return True
+        # requests carries the urllib3/ssl original in args as often as in
+        # __cause__, depending on which layer wrapped it.
+        pending.extend(a for a in getattr(current, "args", ()) if isinstance(a, BaseException))
+        pending.extend(e for e in (current.__cause__, current.__context__) if e is not None)
+    return False
+
+
+def _lighton_is_retryable(exc: Exception) -> bool:
+    """Whether re-sending the same page could plausibly succeed.
+
+    5xx, 408 and 429 are worth another attempt. Every other 4xx is the
+    endpoint saying this request is wrong — a bad key, an oversized page, an
+    unknown model — and ``_try_method`` retries the *whole document*, so
+    treating those as retryable spends three full passes to be refused three
+    times. Raised as ExtractionError instead, which the chain already routes
+    straight to the next extraction method.
+    """
+    if isinstance(exc, requests_exceptions.SSLError) and _is_transient_tls(exc):
+        return True
+    if isinstance(exc, _LIGHTON_FATAL_ERRORS):
+        return False
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if not isinstance(status, int) or not 400 <= status < 500:
+        return True
+    return status in (408, 429)
 
 
 def _split_pdf(data: bytes, batch_size: int) -> list[tuple[bytes, int, int]]:
@@ -877,7 +1032,11 @@ class PDFExtractor(Extractor):
         from agentic.knowledge.model_config import (
             LIGHTON_DEFAULT_BASE_URL,
             LIGHTON_DEFAULT_MODEL,
+            LIGHTON_MAX_CONCURRENCY,
             LIGHTON_MAX_TOKENS,
+            LIGHTON_PAGE_MAX_ATTEMPTS,
+            LIGHTON_PAGE_RETRY_BACKOFF,
+            LIGHTON_RETRY_AFTER_MAX,
             LIGHTON_TEMPERATURE,
             LIGHTON_TIMEOUT,
             LIGHTON_TOP_P,
@@ -901,44 +1060,302 @@ class PDFExtractor(Extractor):
 
         logger.info("LightOnOCR: processing %d pages via %s", len(image_derivs), url)
 
-        page_markdowns = []
-        page_text_derivs = []
-        for img_deriv in image_derivs:
-            b64_img = base64.b64encode(img_deriv.content).decode("utf-8")
-            payload = {
-                "model": LIGHTON_DEFAULT_MODEL,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{b64_img}",
-                                },
-                            }
-                        ],
-                    }
-                ],
-                "max_tokens": LIGHTON_MAX_TOKENS,
-                "temperature": LIGHTON_TEMPERATURE,
-                "top_p": LIGHTON_TOP_P,
-            }
+        semaphore = asyncio.Semaphore(LIGHTON_MAX_CONCURRENCY)
+        loop = asyncio.get_running_loop()
 
-            resp = requests.post(url, json=payload, headers=headers, timeout=LIGHTON_TIMEOUT)
-            resp.raise_for_status()
-            data = resp.json()
+        # Set by the first page that fails. Pages still queued behind the
+        # semaphore check it and never send a request: the caller re-runs the
+        # whole document, so they are work about to be thrown away, against an
+        # endpoint that may be failing us for load in the first place. Pages
+        # already on the wire are *not* abandoned — their outcomes are what
+        # decide whether this document is retried at all (see below).
+        aborted = False
+        # What the retry cost, so a document that needed it is distinguishable
+        # from a clean one: same derivatives and same page count either way.
+        retried_pages: set = set()
+        retry_requests = [0]
 
-            page_md = data["choices"][0]["message"]["content"]
-            page_markdowns.append(page_md)
-            page_text_derivs.append(
-                Derivative(
-                    type="page_text",
-                    content=page_md,
-                    format="plain",
-                    page=img_deriv.page,
-                )
+        async def _ocr_page(executor, img_deriv: Derivative) -> str:
+            nonlocal aborted
+            async with semaphore:
+                if aborted:
+                    raise _PageAborted(img_deriv.page)
+                # Built inside the semaphore, not before it. Every task runs
+                # to its first suspension the moment it is scheduled, so a
+                # payload constructed above this line exists once per page
+                # rather than once per slot: 252 pages of base64 (~0.5 MB
+                # each, held twice while the concatenation builds the data:
+                # URI) instead of eight.
+                payload = {
+                    "model": LIGHTON_DEFAULT_MODEL,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": "data:image/png;base64,"
+                                        + base64.b64encode(img_deriv.content).decode(
+                                            "utf-8"
+                                        ),
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                    "max_tokens": LIGHTON_MAX_TOKENS,
+                    "temperature": LIGHTON_TEMPERATURE,
+                    "top_p": LIGHTON_TOP_P,
+                }
+
+                # A dedicated executor, not asyncio.to_thread: that one uses
+                # the loop's default pool, sized min(32, cpu_count + 4) — six
+                # threads on a 2-vCPU container, which this alone would
+                # saturate, stalling every other to_thread user in the
+                # process (docx, pptx, xlsx, the embedder). `requests` is
+                # synchronous, so calling it without a thread at all would
+                # block the event loop for the whole round trip.
+                # Retry the *page*, not the document. The document retry in
+                # `_try_method` re-renders and re-sends every page, so one 429
+                # on the last page of a long filing discards every page that
+                # succeeded. Here the successes stay and only this page goes
+                # again — and the semaphore slot is deliberately held across
+                # the wait, because when the cause is a rate limit the useful
+                # response is fewer requests in flight, not the same number.
+                for attempt in range(1, LIGHTON_PAGE_MAX_ATTEMPTS + 1):
+                    try:
+                        resp = await loop.run_in_executor(
+                            executor,
+                            lambda: requests.post(
+                                url,
+                                json=payload,
+                                headers=headers,
+                                timeout=LIGHTON_TIMEOUT,
+                            ),
+                        )
+                        resp.raise_for_status()
+                        break
+                    except Exception as e:
+                        last_attempt = attempt >= LIGHTON_PAGE_MAX_ATTEMPTS
+                        if _lighton_is_retryable(e) and not last_attempt:
+                            wait = _lighton_retry_after(e, LIGHTON_RETRY_AFTER_MAX)
+                            if wait is None:
+                                # Exponent capped before the multiply:
+                                # float * 2**1024 raises OverflowError,
+                                # and it would raise *here*, one line
+                                # above the clamp meant to prevent it —
+                                # inside the handler carrying the 429.
+                                wait = LIGHTON_PAGE_RETRY_BACKOFF * 2 ** min(
+                                    attempt - 1, 16
+                                )
+                            # Clamped again at the point of use: nothing that
+                            # reaches a sleep inside an exception handler may
+                            # be able to raise there, whatever a future
+                            # caller computes. Order matters — min() returns
+                            # nan unchanged and max() then rejects it, so
+                            # max(0, min(x, cap)) neutralises NaN and
+                            # min(max(...)) would not.
+                            wait = max(0.0, min(float(wait), LIGHTON_RETRY_AFTER_MAX))
+                            # INFO, not WARNING: a page that recovers is not
+                            # something an operator needs to act on, and at
+                            # 252 pages the warning level turns a successful
+                            # extraction into hundreds of them. The final
+                            # failure below stays at WARNING.
+                            logger.info(
+                                "LightOnOCR page %s of %s attempt %d/%d failed: "
+                                "%s%s — retrying in %.1fs",
+                                img_deriv.page,
+                                raw.source_uri,
+                                attempt,
+                                LIGHTON_PAGE_MAX_ATTEMPTS,
+                                e,
+                                _lighton_error_detail(e),
+                                wait,
+                            )
+                            retried_pages.add(img_deriv.page)
+                            retry_requests[0] += 1
+                            await asyncio.sleep(wait)
+                            # Re-checked after the wait, not only above the
+                            # loop: a page that was already sleeping when
+                            # another page failed the document would otherwise
+                            # wake and send a fresh request at an endpoint we
+                            # have given up on — and backoff is exactly the
+                            # rate-limit case. It also holds the known failure
+                            # back until every retrying sibling settles.
+                            if aborted:
+                                raise _PageAborted(img_deriv.page) from e
+                            continue
+
+                        # Out of attempts, or an error re-sending cannot fix.
+                        # Serially the failing page was wherever the loop
+                        # stopped; concurrently it is whichever page loses the
+                        # race, so the page number has to be in the log — the
+                        # caller only ever reports one exception.
+                        aborted = True
+                        logger.warning(
+                            "LightOnOCR page %s of %s failed after %d attempt(s): %s%s",
+                            img_deriv.page,
+                            raw.source_uri,
+                            attempt,
+                            e,
+                            _lighton_error_detail(e),
+                        )
+                        if _lighton_is_retryable(e):
+                            raise
+                        # "rejected" only when the endpoint did the rejecting.
+                        # A bad certificate or an unparseable URL is ours, and
+                        # calling it a rejected page sends the reader looking
+                        # at the document.
+                        refused = _lighton_error_detail(e)
+                        if refused:
+                            reason = f"rejected page {img_deriv.page}"
+                        elif isinstance(e, requests_exceptions.RequestException):
+                            reason = f"cannot reach the endpoint for page {img_deriv.page}"
+                        else:
+                            # A MemoryError is not a networking problem, and
+                            # "cannot reach the endpoint" would send an
+                            # operator to look at DNS during an OOM.
+                            reason = f"failed locally on page {img_deriv.page}"
+                        raise ExtractionError(
+                            f"LightOnOCR {reason}: {type(e).__name__}: {e}{refused}",
+                            extractor_name=self.name,
+                            source_uri=raw.source_uri,
+                        ) from e
+
+                try:
+                    return resp.json()["choices"][0]["message"]["content"]
+                except Exception as e:
+                    # Broad on purpose, though not for the reason it looks
+                    # like: with stream=False `requests` buffers the body
+                    # inside post(), so an ordinary mid-read drop surfaces up
+                    # there and `resp.json()` raises JSONDecodeError, which is
+                    # a ValueError. What this catches is everything else a
+                    # response object can throw on access — and anything that
+                    # escapes here escapes without setting the abort flag,
+                    # which leaves the queue running. The isinstance check
+                    # below keeps the old classification exactly.
+                    # A 2xx the client cannot read is deterministic: the same
+                    # request will be unreadable next time, so retrying the
+                    # document three times only asks three times. The body is
+                    # attached because it holds the answer the exception does
+                    # not — a KeyError carries no response, so `'choices'` is
+                    # otherwise the operator's entire diagnosis.
+                    aborted = True
+                    excerpt = _response_excerpt(resp)
+                    if not isinstance(e, (ValueError, KeyError, IndexError, TypeError)):
+                        # The response never fully arrived — transient, and
+                        # for the caller to retry rather than a body we can
+                        # describe.
+                        logger.warning(
+                            "LightOnOCR page %s of %s failed while reading the "
+                            "response: %s: %s",
+                            img_deriv.page,
+                            raw.source_uri,
+                            type(e).__name__,
+                            e,
+                        )
+                        raise
+                    logger.warning(
+                        "LightOnOCR page %s of %s returned an unusable body: %s: %s%s",
+                        img_deriv.page,
+                        raw.source_uri,
+                        type(e).__name__,
+                        e,
+                        excerpt,
+                    )
+                    raise ExtractionError(
+                        f"LightOnOCR returned an unusable body for page "
+                        f"{img_deriv.page}: {type(e).__name__}: {e}{excerpt}",
+                        extractor_name=self.name,
+                        source_uri=raw.source_uri,
+                    ) from e
+
+        # Sized to the semaphore, which is what the endpoint sees; a wider
+        # pool would only hold work the semaphore has not admitted.
+        executor = ThreadPoolExecutor(
+            max_workers=LIGHTON_MAX_CONCURRENCY, thread_name_prefix="lighton-ocr"
+        )
+        try:
+            # `return_exceptions=True`, and no cancellation of siblings: the
+            # abort flag has already stopped the queue, so what is left in
+            # flight is at most one window of requests that are going to
+            # finish regardless — a thread inside requests.post cannot be
+            # interrupted. Collecting them costs a bounded wait and buys the
+            # two things abandoning them loses: every failure gets logged
+            # rather than only whichever lost the race, and the *kind* of
+            # failure is known before the document is retried. Reporting a
+            # transient 503 while a deterministic 400 was still on the wire
+            # costs three full passes and never names the 400 at all.
+            #
+            # A cancellation from the caller still propagates out of this
+            # await, which is what a graceful drain or asyncio.timeout wants:
+            # gather's return_exceptions only covers the children.
+            #
+            # The property that keeps it that way: no `except BaseException`,
+            # no `contextlib.suppress`, no re-arming. Two earlier versions of
+            # this function lost the caller's error to an await inside an
+            # exception handler; the retry loop below still has one, which is
+            # why the value it sleeps on is clamped where it is computed *and*
+            # where it is used.
+            outcomes = await asyncio.gather(*(
+                _ocr_page(executor, d) for d in image_derivs
+            ), return_exceptions=True)
+        finally:
+            # Every *task* has settled by here, but on an external
+            # cancellation the threads those tasks were waiting on are still
+            # inside requests.post — a thread cannot be interrupted. So this
+            # releases the pool; it does not stop work in progress, and
+            # wait=False is what keeps a cancelled extraction from blocking
+            # on requests it can no longer use.
+            executor.shutdown(wait=False)
+
+        failures = [
+            o
+            for o in outcomes
+            if isinstance(o, BaseException) and not isinstance(o, _PageAborted)
+        ]
+        # A _PageAborted can only exist alongside the failure that caused it:
+        # both `aborted = True` sites raise in the same breath. Asserting it
+        # rather than reasoning about it across eighty lines — the failure
+        # mode otherwise is a page slot holding an exception where a string
+        # belongs, which surfaces as a TypeError from the join below.
+        if not failures and any(isinstance(o, _PageAborted) for o in outcomes):
+            raise ExtractionError(
+                "LightOnOCR aborted pages without recording why",
+                extractor_name=self.name,
+                source_uri=raw.source_uri,
             )
+        if failures:
+            # Deterministic first, whatever the wall clock said. ExtractionError
+            # tells `_try_method` not to retry and to fall through to the next
+            # extraction method; letting a slower 503 outrank it re-runs the
+            # whole document to be refused again.
+            deterministic = [f for f in failures if isinstance(f, ExtractionError)]
+            reported = (deterministic or failures)[0]
+            others = [f for f in failures if f is not reported]
+            if others:
+                logger.warning(
+                    "LightOnOCR: %d pages failed on %s; reporting %s. Others: %s",
+                    len(failures),
+                    raw.source_uri,
+                    "the deterministic rejection" if deterministic else "the first",
+                    "; ".join(f"{type(f).__name__}: {f}" for f in others),
+                )
+            raise reported
+
+        page_markdowns = list(outcomes)
+
+        # Page order comes from the document, never from completion order.
+        page_text_derivs = [
+            Derivative(
+                type="page_text",
+                content=page_md,
+                format="plain",
+                page=img_deriv.page,
+            )
+            for img_deriv, page_md in zip(image_derivs, page_markdowns, strict=True)
+        ]
 
         fulltext = "\n\n".join(page_markdowns)
 
@@ -961,7 +1378,14 @@ class PDFExtractor(Extractor):
                 "char_count": len(fulltext),
             },
             extraction_method="lighton_ocr",
-            stats={"pages_processed": len(page_markdowns)},
+            stats={
+                "pages_processed": len(page_markdowns),
+                # A document that needed retries produces the same derivatives
+                # and the same page count as one that did not; without these
+                # a 3x request cost is invisible to every downstream signal.
+                "pages_retried": len(retried_pages),
+                "retry_requests": retry_requests[0],
+            },
         )
 
     async def _extract_llamaparse(self, raw: RawContent) -> ExtractionResult:

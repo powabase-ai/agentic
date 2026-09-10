@@ -397,3 +397,46 @@ PAGEINDEX_LLM_TIMEOUT = _int_env("PAGEINDEX_LLM_TIMEOUT", 300)
 # (each retry re-sends a large prompt — the bounded-memory concern). Set to 0 to
 # fully restore the previous no-retry behavior. Env-overridable: PAGEINDEX_LLM_NUM_RETRIES.
 PAGEINDEX_LLM_NUM_RETRIES = _int_env("PAGEINDEX_LLM_NUM_RETRIES", 1)
+
+# LightOnOCR page images in flight per document.
+#
+# The model takes one page image per request, so a document costs one round
+# trip per page, and every second of that is spent waiting: a 252-page filing
+# measured 19 minutes issued serially, with the worker at 0.15% CPU. Neither
+# form of batching is available as an alternative — as of 2026-09, the IONOS
+# deployment at LIGHTON_DEFAULT_BASE_URL answers 404 for /v1/batches, and
+# several page images in one chat request return a single blob with no page
+# boundaries, which is what page_text derivatives are. So concurrency is the
+# lever, and this bounds it.
+#
+# The default suits a shared endpoint that rate-limits. Env-overridable
+# because the operator pointing LIGHTON_BASE_URL at their own deployment
+# (registry.py reads that from the environment already) is exactly the one
+# for whom a different number is right: LIGHTON_MAX_CONCURRENCY.
+# max(1, ...) because 0 is a typo here, not the "disable" it means for
+# PAGEINDEX_LLM_NUM_RETRIES: a pool of 0 workers and a Semaphore of -1 both
+# raise, and _int_env exists so a bad operator value cannot do that.
+LIGHTON_MAX_CONCURRENCY = max(1, _int_env("LIGHTON_MAX_CONCURRENCY", 8))
+
+# Attempts per page before a page is given up on, including the first.
+#
+# The retry that already existed is a *document* retry: `_try_method` calls
+# the extractor again, and the extractor holds nothing between calls, so one
+# rate-limited page throws away every page that succeeded and re-renders and
+# re-sends all of them. On a 252-page filing that is three full passes — up
+# to 756 requests — to recover from one 429.
+#
+# Retrying the page instead keeps the successes. The slot is held across the
+# backoff on purpose: when the reason is a rate limit, the useful response is
+# to send less, and a sleeping slot is one fewer request in flight.
+LIGHTON_PAGE_MAX_ATTEMPTS = max(1, _int_env("LIGHTON_PAGE_MAX_ATTEMPTS", 3))
+
+# First backoff; doubled per attempt, so the wait before attempt N is
+# BACKOFF * 2**(N-2). Not env-overridable, unlike the attempt count above.
+LIGHTON_PAGE_RETRY_BACKOFF = 1.0
+
+# Ceiling on a server-supplied Retry-After. Honouring the header is the point
+# — the endpoint knows its own limits — but an unbounded one from a
+# misconfigured proxy would park a document for hours with nothing logged
+# between start and finish. Not env-overridable.
+LIGHTON_RETRY_AFTER_MAX = 30.0

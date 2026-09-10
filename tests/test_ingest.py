@@ -2,10 +2,14 @@
 Tests for the Content Ingestion module.
 """
 
+import asyncio
+import base64
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import requests
+from requests.structures import CaseInsensitiveDict
 
 from agentic.ingest import (
     ContentItem,
@@ -622,22 +626,25 @@ class TestPDFExtractorLightOnOCR:
             Derivative(type="image", content=b"fake-png-2", format="png", page=2),
         ]
 
-        mock_response_1 = MagicMock()
-        mock_response_1.status_code = 200
-        mock_response_1.json.return_value = {
-            "choices": [{"message": {"content": "# Page 1\nOCR text"}}]
-        }
-        mock_response_1.raise_for_status = MagicMock()
-
-        mock_response_2 = MagicMock()
-        mock_response_2.status_code = 200
-        mock_response_2.json.return_value = {
-            "choices": [{"message": {"content": "# Page 2\nMore OCR text"}}]
-        }
-        mock_response_2.raise_for_status = MagicMock()
+        # Keyed by the page in the request, not by call order: a side_effect
+        # *list* is consumed in call order, which stopped being page order
+        # when the requests became concurrent. That made the pairing a race
+        # — measured at ~4% of runs delivering page 2's response to page 1 —
+        # which passes today only because nothing here asserts the mapping.
+        def _post(*args, **kwargs):
+            payload = kwargs.get("json") or args[1]
+            url = payload["messages"][0]["content"][0]["image_url"]["url"]
+            page = 1 if base64.b64encode(b"fake-png-1").decode() in url else 2
+            response = MagicMock()
+            response.status_code = 200
+            response.json.return_value = {
+                "choices": [{"message": {"content": f"# Page {page}\nOCR text"}}]
+            }
+            response.raise_for_status = MagicMock()
+            return response
 
         with patch.object(extractor, "_render_page_images", return_value=mock_img_derivs), \
-             patch("requests.post", side_effect=[mock_response_1, mock_response_2]):
+             patch("requests.post", side_effect=_post):
             result = await extractor.extract(raw)
 
         assert result.extraction_method == "lighton_ocr"
@@ -654,6 +661,10 @@ class TestPDFExtractorLightOnOCR:
         assert len(page_derivs) == 2
         assert page_derivs[0].page == 1
         assert page_derivs[1].page == 2
+        # The mapping, not just the numbering — the half that a call-ordered
+        # fixture could not assert.
+        assert "# Page 1" in page_derivs[0].content
+        assert "# Page 2" in page_derivs[1].content
 
         # Check image derivatives are included
         img_derivs = [d for d in result.derivatives if d.type == "image"]
@@ -673,6 +684,1183 @@ class TestPDFExtractorLightOnOCR:
         with patch.object(extractor, "_render_page_images", return_value=[]):
             with pytest.raises(ExtractionError, match="PyMuPDF"):
                 await extractor.extract(raw)
+
+
+class TestPDFExtractorLightOnConcurrency:
+    """One request per page is the model's requirement; one *at a time* was not.
+
+    Why concurrency is the only lever available — the serial measurement, the
+    absent batch API, and what multi-page requests would cost — is recorded
+    once, at ``LIGHTON_MAX_CONCURRENCY`` in ``knowledge/model_config.py``.
+    These tests pin the behaviour that follows from it.
+    """
+
+    @staticmethod
+    def _raw():
+        return RawContent(
+            content=b"%PDF-1.4 fake",
+            mime_type="application/pdf",
+            source_uri="upload://test.pdf",
+            metadata={"extraction_model": "lighton"},
+        )
+
+    @staticmethod
+    def _images(count):
+        return [
+            Derivative(type="image", content=f"png-{i}".encode(), format="png", page=i)
+            for i in range(1, count + 1)
+        ]
+
+    @staticmethod
+    def _response(text):
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"choices": [{"message": {"content": text}}]}
+        response.raise_for_status = MagicMock()
+        return response
+
+    @pytest.mark.asyncio
+    async def test_pages_are_requested_concurrently_up_to_the_ceiling(self):
+        """The property that makes a long document finish — and the ceiling
+        that keeps it from becoming a burst.
+
+        Asserted as an equality, because ``<=`` is satisfied by a thread pool
+        narrower than the bound: on a 2-vCPU runner the old default pool of 6
+        would have passed this with the bound deleted entirely.
+
+        What it pins is the number the endpoint sees, not which of the two
+        mechanisms produces it — the pool and the semaphore are sized to the
+        same constant, so this measures ``min(pool, semaphore)`` and removing
+        either alone leaves it at 8. The semaphore's own job is bounding
+        payloads in memory, and that is pinned by
+        ``test_payloads_are_built_inside_the_semaphore_not_ahead_of_it``,
+        which does fail when the semaphore goes.
+        """
+        import threading
+        import time
+
+        from agentic.knowledge.model_config import LIGHTON_MAX_CONCURRENCY
+
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        lock = threading.Lock()
+        in_flight = 0
+        peak = 0
+
+        def _post(*args, **kwargs):
+            nonlocal in_flight, peak
+            with lock:
+                in_flight += 1
+                peak = max(peak, in_flight)
+            time.sleep(0.05)
+            with lock:
+                in_flight -= 1
+            return self._response("page")
+
+        with (
+            patch.object(
+                extractor,
+                "_render_page_images",
+                return_value=self._images(LIGHTON_MAX_CONCURRENCY * 3),
+            ),
+            patch("requests.post", side_effect=_post),
+        ):
+            await extractor.extract(self._raw())
+
+        assert peak == LIGHTON_MAX_CONCURRENCY, (
+            f"expected exactly {LIGHTON_MAX_CONCURRENCY} pages in flight, saw {peak}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_page_order_follows_the_document_not_the_responses(self):
+        """Concurrency reorders completions, so page attribution has to come
+        from the page rather than from whoever answered first.
+
+        Nothing in this repo reads ``.page`` off a ``page_text`` derivative —
+        ``get_all_text()`` excludes them — so the consumer is downstream: a
+        host that stores these per page and attaches page images by number.
+        The contract is the derivative's, either way."""
+        import time
+
+        extractor = PDFExtractor(lighton_api_key="test-key")
+
+        def _post(*args, **kwargs):
+            payload = kwargs.get("json") or args[1]
+            url = payload["messages"][0]["content"][0]["image_url"]["url"]
+            page = 1 if url.endswith(base64.b64encode(b"png-1").decode()) else 2
+            # Page 1 answers last.
+            time.sleep(0.15 if page == 1 else 0.01)
+            return self._response(f"# Page {page}")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(2)),
+            patch("requests.post", side_effect=_post),
+        ):
+            result = await extractor.extract(self._raw())
+
+        page_derivs = [d for d in result.derivatives if d.type == "page_text"]
+        assert [d.page for d in page_derivs] == [1, 2]
+        assert page_derivs[0].content == "# Page 1"
+        assert page_derivs[1].content == "# Page 2"
+        markdown = [d for d in result.derivatives if d.type == "markdown"][0].content
+        assert markdown.index("# Page 1") < markdown.index("# Page 2")
+
+    @pytest.mark.asyncio
+    async def test_page_order_survives_more_pages_than_the_window(self):
+        """Two pages never refill the semaphore, so ordering was only ever
+        proven within a single window. With 20 pages and a bound of 8 the
+        results arrive in three waves, deliberately scrambled inside each."""
+        import random
+        import time
+
+        from agentic.knowledge.model_config import LIGHTON_MAX_CONCURRENCY
+
+        pages = LIGHTON_MAX_CONCURRENCY * 2 + 4
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        rng = random.Random(7)
+
+        def _post(*args, **kwargs):
+            payload = kwargs.get("json") or args[1]
+            url = payload["messages"][0]["content"][0]["image_url"]["url"]
+            page = next(
+                n
+                for n in range(1, pages + 1)
+                if base64.b64encode(f"png-{n}".encode()).decode() in url
+            )
+            time.sleep(rng.uniform(0.01, 0.12))
+            return self._response(f"# Page {page}")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(pages)),
+            patch("requests.post", side_effect=_post),
+        ):
+            result = await extractor._extract_lighton(self._raw())
+
+        page_derivs = [d for d in result.derivatives if d.type == "page_text"]
+        assert [d.page for d in page_derivs] == list(range(1, pages + 1))
+        assert [d.content for d in page_derivs] == [
+            f"# Page {n}" for n in range(1, pages + 1)
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_page_stops_the_remaining_requests(self, monkeypatch):
+        """Once a page has exhausted its own retries, the pages still queued
+        behind the semaphore are work about to be thrown away — the caller
+        re-runs the document — against an endpoint that may be failing for
+        load in the first place.
+
+        Counted in *pages*, not requests: a page may legitimately be sent
+        several times now that transient failures are retried per page."""
+        from agentic.knowledge import model_config
+
+        # Zero the backoff rather than stub `asyncio.sleep` — the last
+        # holdout of the pattern that has taken this runner down.
+        monkeypatch.setattr(model_config, "LIGHTON_PAGE_RETRY_BACKOFF", 0)
+        import threading
+        import time
+
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        lock = threading.Lock()
+        pages_seen = set()
+
+        def _post(*args, **kwargs):
+            page = TestPDFExtractorLightOnPageRetry._page_of(kwargs, args)
+            with lock:
+                pages_seen.add(page)
+            # Page 1 fails every attempt, so it exhausts its retries and the
+            # document gives up — which is when the queue should stop.
+            if page == 1:
+                raise RuntimeError("lighton is down")
+            # The other pages of the opening window stay on the wire while the
+            # first one exhausts its attempts. Returning instantly would free
+            # their slots, letting pages *behind* the window start, so the
+            # count would measure scheduling luck rather than the property.
+            time.sleep(0.5)
+            return self._response("page")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(60)),
+            patch("requests.post", side_effect=_post),
+        ):
+            with pytest.raises(RuntimeError, match="lighton is down"):
+                await extractor._extract_lighton(self._raw())
+
+        from agentic.knowledge.model_config import LIGHTON_MAX_CONCURRENCY
+
+        # The contract is "no page beyond the in-flight window is issued", not
+        # "fewer than all of them": `< 60` would pass a regression that kept
+        # going until page 55.
+        # Upper bound only. How many of the opening window get sent before the
+        # first failure sets the flag depends on how the loop interleaves the
+        # tasks with the failing page's resumption: on a busy 2-core runner it
+        # can be as few as one, which is the *better* outcome and not
+        # something to assert against. What must hold is that nothing beyond
+        # the window is issued — the failing page frees its own slot, so one
+        # queued page can still claim it.
+        assert len(pages_seen) <= LIGHTON_MAX_CONCURRENCY + 1, (
+            f"started {len(pages_seen)} pages after the failure; the window is "
+            f"{LIGHTON_MAX_CONCURRENCY}"
+        )
+
+
+def _lighton_http_error(status, body="rate limited", headers=None):
+    """A `requests` HTTPError carrying a response, the way raise_for_status
+    raises one."""
+    response = MagicMock()
+    response.status_code = status
+    response.text = body
+    # CaseInsensitiveDict, as `requests` builds: HTTP/2 lowercases header
+    # names, so a plain dict here would let a case-sensitive lookup pass.
+    response.headers = CaseInsensitiveDict(headers or {})
+    error = requests.exceptions.HTTPError(f"{status} Client Error")
+    error.response = response
+    response.raise_for_status = MagicMock(side_effect=error)
+    return response
+
+
+class TestPDFExtractorLightOnPageRetry:
+    """A rate-limited page costs a page, not a document.
+
+    The retry that already existed belongs to `_try_method`, which knows
+    nothing about pages: it calls the extractor again, and the extractor
+    keeps nothing between calls. So one 429 on the last page of a 252-page
+    filing discarded 251 finished pages, re-rendered every image and re-sent
+    all of them — three times, up to 756 requests, to recover from one.
+    """
+
+    _raw = staticmethod(TestPDFExtractorLightOnConcurrency._raw)
+    _images = staticmethod(TestPDFExtractorLightOnConcurrency._images)
+    _response = staticmethod(TestPDFExtractorLightOnConcurrency._response)
+    _http_error = staticmethod(
+        lambda status, body="rate limited", headers=None: _lighton_http_error(
+            status, body, headers
+        )
+    )
+
+    @pytest.fixture(autouse=True)
+    def _no_retry_backoff(self, monkeypatch):
+        """Zero the backoff rather than stub `asyncio.sleep`: pytest-asyncio
+        and the loop itself await `sleep`, and replacing it wholesale has
+        taken the runner down. Tests that need to *see* the wait use
+        `sleep_spy`, which records and still delegates."""
+        from agentic.knowledge import model_config
+
+        monkeypatch.setattr(model_config, "LIGHTON_PAGE_RETRY_BACKOFF", 0)
+
+    @pytest.fixture
+    def sleep_spy(self, monkeypatch):
+        """Record what the retry asked to wait, without replacing sleep."""
+        real_sleep = asyncio.sleep
+        waits: list[float] = []
+
+        async def _spy(seconds, *args, **kwargs):
+            waits.append(seconds)
+            return await real_sleep(0, *args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "sleep", _spy)
+        return waits
+
+    @staticmethod
+    def _page_of(kwargs, args):
+        payload = kwargs.get("json") or args[1]
+        url = payload["messages"][0]["content"][0]["image_url"]["url"]
+        for n in range(1, 200):
+            if base64.b64encode(f"png-{n}".encode()).decode() in url:
+                return n
+        raise AssertionError("no page in payload")
+
+    @pytest.mark.asyncio
+    async def test_a_transient_page_failure_retries_only_that_page(self):
+        """The successes stay. Only the failed page goes again."""
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        attempts = {}
+
+        def _post(*args, **kwargs):
+            page = self._page_of(kwargs, args)
+            attempts[page] = attempts.get(page, 0) + 1
+            if page == 3 and attempts[page] == 1:
+                return self._http_error(429)
+            return self._response(f"# Page {page}")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(8)),
+            patch("requests.post", side_effect=_post),
+        ):
+            result = await extractor._extract_lighton(self._raw())
+
+        assert attempts[3] == 2, "the rate-limited page should have been re-sent"
+        assert all(attempts[p] == 1 for p in attempts if p != 3), (
+            f"pages that succeeded were re-sent: {attempts}"
+        )
+        assert sum(attempts.values()) == 9, "a whole extra document pass was made"
+        page_derivs = [d for d in result.derivatives if d.type == "page_text"]
+        assert [d.page for d in page_derivs] == list(range(1, 9))
+        assert page_derivs[2].content == "# Page 3"
+
+    @pytest.mark.asyncio
+    async def test_a_deterministic_page_failure_is_not_retried(self):
+        """A 413 will be a 413 next time; re-sending it is pure cost."""
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        attempts = {}
+
+        def _post(*args, **kwargs):
+            page = self._page_of(kwargs, args)
+            attempts[page] = attempts.get(page, 0) + 1
+            if page == 2:
+                return self._http_error(413, "page too large")
+            return self._response("page")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(4)),
+            patch("requests.post", side_effect=_post),
+        ):
+            with pytest.raises(ExtractionError, match="rejected page 2"):
+                await extractor._extract_lighton(self._raw())
+
+        assert attempts[2] == 1, f"a deterministic rejection was retried: {attempts}"
+
+    @pytest.mark.asyncio
+    async def test_a_page_that_keeps_failing_gives_up_after_its_attempts(self):
+        """Bounded: the page gets its attempts, then the document fails — it
+        does not retry forever inside one pass."""
+        from agentic.knowledge.model_config import LIGHTON_PAGE_MAX_ATTEMPTS
+
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        attempts = {}
+
+        def _post(*args, **kwargs):
+            page = self._page_of(kwargs, args)
+            attempts[page] = attempts.get(page, 0) + 1
+            if page == 1:
+                return self._http_error(503, "down")
+            return self._response("page")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(4)),
+            patch("requests.post", side_effect=_post),
+        ):
+            with pytest.raises(requests.exceptions.HTTPError):
+                await extractor._extract_lighton(self._raw())
+
+        assert attempts[1] == LIGHTON_PAGE_MAX_ATTEMPTS
+
+    @pytest.mark.asyncio
+    async def test_retry_after_is_honoured(self, sleep_spy):
+        """The endpoint knows its own limits better than a fixed backoff."""
+        slept = sleep_spy
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        seen = {"n": 0}
+
+        def _post(*args, **kwargs):
+            seen["n"] += 1
+            if seen["n"] == 1:
+                return self._http_error(429, headers={"Retry-After": "7"})
+            return self._response("page")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(2)),
+            patch("requests.post", side_effect=_post),
+        ):
+            await extractor._extract_lighton(self._raw())
+
+        assert 7 in slept, f"Retry-After was ignored: {slept}"
+
+    @pytest.mark.asyncio
+    async def test_an_absurd_retry_after_is_capped(self, sleep_spy):
+        """A misconfigured proxy should not park a document for hours with
+        nothing logged between start and finish."""
+        slept = sleep_spy
+        from agentic.knowledge.model_config import LIGHTON_RETRY_AFTER_MAX
+
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        seen = {"n": 0}
+
+        def _post(*args, **kwargs):
+            seen["n"] += 1
+            if seen["n"] == 1:
+                return self._http_error(429, headers={"Retry-After": "86400"})
+            return self._response("page")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(2)),
+            patch("requests.post", side_effect=_post),
+        ):
+            await extractor._extract_lighton(self._raw())
+
+        assert max(slept) <= LIGHTON_RETRY_AFTER_MAX
+
+
+    @pytest.mark.parametrize("header", ["NaN", "nan"])
+    @pytest.mark.asyncio
+    async def test_a_nonsense_retry_after_falls_back_to_the_backoff(self, header, caplog):
+        """`float("NaN")` parses, and then defeats both guards: `nan < 0` is
+        False and `min(nan, cap)` is `nan`. `asyncio.sleep(nan)` raises
+        `ValueError` — from inside the `except` handling the 429, so it
+        replaces the error being carried, escapes before `aborted` is set,
+        and reaches `_try_method` as something that is not an
+        `ExtractionError`. The operator's diagnosis for a rate-limit outage
+        becomes "Invalid delay: NaN"."""
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        seen = {"n": 0}
+
+        def _post(*args, **kwargs):
+            seen["n"] += 1
+            if seen["n"] == 1:
+                return self._http_error(429, headers={"Retry-After": header})
+            return self._response("page")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(2)),
+            patch("requests.post", side_effect=_post),
+            caplog.at_level(logging.INFO),
+        ):
+            result = await extractor._extract_lighton(self._raw())
+
+        assert len(result.derivatives) > 0, "a nonsense header took the document down"
+        # INFO, not WARNING: the retry line was demoted, so capturing at
+        # WARNING would make this assertion unable to fail.
+        retry_lines = [r.getMessage() for r in caplog.records if "retrying in" in r.getMessage()]
+        assert retry_lines, "no retry was logged"
+        assert not any("nan" in line.lower() for line in retry_lines)
+
+    @pytest.mark.asyncio
+    async def test_a_page_in_backoff_does_not_fire_after_the_abort(self):
+        """`if aborted:` is checked once, above the attempt loop. A page
+        already sleeping has passed it, so it wakes and sends a fresh request
+        at an endpoint the document has already given up on — and backoff is
+        precisely the rate-limit case. It also delays the known failure until
+        every retrying sibling settles."""
+        from agentic.knowledge.model_config import LIGHTON_MAX_CONCURRENCY
+
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        per_page: dict[int, int] = {}
+
+        def _post(*args, **kwargs):
+            page = TestPDFExtractorLightOnPageRetry._page_of(kwargs, args)
+            per_page[page] = per_page.get(page, 0) + 1
+            if page == 1:
+                # Deterministic: aborts the document on its first request.
+                return self._http_error(400, "page malformed")
+            return self._http_error(429, "slow down")
+
+        with (
+            patch.object(
+                extractor,
+                "_render_page_images",
+                return_value=self._images(LIGHTON_MAX_CONCURRENCY * 3),
+            ),
+            patch("requests.post", side_effect=_post),
+        ):
+            with pytest.raises(ExtractionError):
+                await extractor._extract_lighton(self._raw())
+
+        retried_after_abort = {p: n for p, n in per_page.items() if p != 1 and n > 1}
+        assert not retried_after_abort, (
+            f"pages retried after the document had already failed: {retried_after_abort}"
+        )
+
+    @pytest.mark.parametrize(
+        "underlying",
+        [__import__("ssl").SSLEOFError("eof"), __import__("ssl").SSLZeroReturnError("closed")],
+    )
+    @pytest.mark.asyncio
+    async def test_a_dropped_tls_connection_is_still_retried(self, underlying):
+        """Not every TLS failure is a bad certificate. A load balancer
+        recycling connections raises SSLEOFError / SSLZeroReturnError, which
+        `requests` wraps in the same SSLError as a certificate failure — and
+        treating those as fatal is the worse direction: ExtractionError means
+        no page retry *and* no document retry, so one dropped socket
+        downgrades a scanned PDF to the text-layer extractors and an empty
+        result the operator sees as success."""
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        attempts = {"n": 0}
+
+        def _post(*args, **kwargs):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise requests.exceptions.SSLError(underlying)
+            return self._response("page")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(1)),
+            patch("requests.post", side_effect=_post),
+        ):
+            result = await extractor._extract_lighton(self._raw())
+
+        assert attempts["n"] == 2, "a transient TLS drop was treated as fatal"
+        assert result.stats["pages_retried"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_torn_down_socket_is_still_retried(self):
+        """urllib3 raises AttributeError for a pooled connection closed
+        underneath it mid-read — "'NoneType' object has no attribute 'read'".
+        That is weather, not a programming bug, and the fatal list had it."""
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        attempts = {"n": 0}
+
+        def _post(*args, **kwargs):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise AttributeError("'NoneType' object has no attribute 'read'")
+            return self._response("page")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(1)),
+            patch("requests.post", side_effect=_post),
+        ):
+            await extractor._extract_lighton(self._raw())
+
+        assert attempts["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_the_two_retry_counters_measure_different_things(self):
+        """One page retried twice is one retried page and two retry requests.
+        The earlier fixture failed four pages once each, so both counters read
+        4 and either could stand in for the other."""
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        seen: dict[int, int] = {}
+
+        def _post(*args, **kwargs):
+            page = self._page_of(kwargs, args)
+            seen[page] = seen.get(page, 0) + 1
+            if page == 2 and seen[page] <= 2:
+                return self._http_error(503, "flaky")
+            return self._response("page")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(4)),
+            patch("requests.post", side_effect=_post),
+        ):
+            result = await extractor._extract_lighton(self._raw())
+
+        assert result.stats["pages_retried"] == 1
+        assert result.stats["retry_requests"] == 2
+
+    @pytest.mark.asyncio
+    async def test_a_connection_dropped_while_reading_stops_the_queue(self):
+        """`ChunkedEncodingError` comes out of the body read, not the request,
+        so it used to leave `_ocr_page` without setting the abort flag and the
+        queued pages kept going. It stays transient — the response never
+        arrived, which says nothing about the next one."""
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        attempts = {"n": 0}
+
+        def _post(*args, **kwargs):
+            attempts["n"] += 1
+            response = MagicMock()
+            response.status_code = 200
+            response.text = "partial"
+            response.headers = CaseInsensitiveDict({})
+            response.raise_for_status = MagicMock()
+            response.json = MagicMock(
+                side_effect=requests.exceptions.ChunkedEncodingError("connection broken")
+            )
+            return response
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(24)),
+            patch("requests.post", side_effect=_post),
+        ):
+            with pytest.raises(requests.exceptions.ChunkedEncodingError):
+                await extractor._extract_lighton(self._raw())
+
+        from agentic.knowledge.model_config import LIGHTON_MAX_CONCURRENCY
+
+        # The window, not window x attempts: the failure happens in the body
+        # read, so the page is not retried, and every page beyond the opening
+        # window must be skipped. Allowing the retry budget here would pass
+        # with the abort never set — 24 pages x 1 request is the same number.
+        assert attempts["n"] <= LIGHTON_MAX_CONCURRENCY + 1, (
+            f"{attempts['n']} requests for 24 pages: the queue kept going"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_backoff_is_capped_even_at_a_high_attempt_count(
+        self, sleep_spy, monkeypatch
+    ):
+        """`BACKOFF * 2**(attempt-1)` passes 30s from attempt 6, and the
+        attempt count is env-overridable. The call-site clamp is the only
+        thing bounding it — the parser never sees these, because they are not
+        Retry-After values."""
+        from agentic.knowledge import model_config
+
+        monkeypatch.setattr(model_config, "LIGHTON_PAGE_MAX_ATTEMPTS", 12)
+        monkeypatch.setattr(model_config, "LIGHTON_PAGE_RETRY_BACKOFF", 1.0)
+        extractor = PDFExtractor(lighton_api_key="test-key")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(1)),
+            patch("requests.post", side_effect=lambda *a, **k: self._http_error(503)),
+        ):
+            with pytest.raises(requests.exceptions.HTTPError):
+                await extractor._extract_lighton(self._raw())
+
+        assert sleep_spy, "no backoff was taken"
+        assert max(sleep_spy) <= model_config.LIGHTON_RETRY_AFTER_MAX, (
+            f"waited {max(sleep_spy)}s, past the {model_config.LIGHTON_RETRY_AFTER_MAX}s cap"
+        )
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            # What `requests` actually raises for a bad certificate. NOT
+            # ssl.SSLError: requests.exceptions.SSLError inherits from
+            # ConnectionError -> RequestException -> OSError, so a tuple
+            # containing ssl.SSLError never matches it in production while a
+            # test that injects ssl.SSLError passes happily.
+            requests.exceptions.SSLError("certificate verify failed"),
+            requests.exceptions.InvalidURL("not a url"),
+            requests.exceptions.MissingSchema("no scheme"),
+            requests.exceptions.InvalidSchema("gopher://"),
+            requests.exceptions.URLRequired("no url"),
+            MemoryError("out of memory"),
+            TypeError("programming error"),
+            NameError("typo"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_errors_that_cannot_be_transient_are_not_retried(self, exc):
+        """A typo'd base URL, a bad certificate, or memory exhaustion will not
+        resolve by sending the same request again — and retrying under an OOM
+        makes it worse. Without a status they all read as retryable, which
+        now costs 3 page attempts x 3 document passes."""
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        attempts = {"n": 0}
+
+        def _post(*args, **kwargs):
+            attempts["n"] += 1
+            raise exc
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(1)),
+            patch("requests.post", side_effect=_post),
+        ):
+            with pytest.raises(ExtractionError) as excinfo:
+                await extractor._extract_lighton(self._raw())
+
+        # Non-retryable means the chain moves on rather than re-running the
+        # document, so it must surface as ExtractionError naming the real
+        # cause — and pointing at the right place: a MemoryError is not a
+        # networking problem, and "cannot reach the endpoint" would send an
+        # operator to look at DNS during an OOM.
+        message = str(excinfo.value)
+        assert type(exc).__name__ in message
+        expected = (
+            "cannot reach the endpoint"
+            if isinstance(exc, requests.exceptions.RequestException)
+            else "failed locally"
+        )
+        assert expected in message, message
+        assert attempts["n"] == 1, f"{type(exc).__name__} was retried {attempts['n']}x"
+
+    @pytest.mark.asyncio
+    async def test_a_document_that_needed_retries_says_so(self, caplog):
+        """A retried document is otherwise indistinguishable from a clean one:
+        same derivatives, same `pages_processed`. Three times the requests and
+        a much longer wall clock, invisible to every downstream signal — and
+        reported only as a pile of WARNINGs for an extraction that succeeded.
+        """
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        seen: dict[int, int] = {}
+
+        def _post(*args, **kwargs):
+            page = TestPDFExtractorLightOnPageRetry._page_of(kwargs, args)
+            seen[page] = seen.get(page, 0) + 1
+            if seen[page] == 1:
+                return self._http_error(503, "flaky")
+            return self._response("page")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(4)),
+            patch("requests.post", side_effect=_post),
+            caplog.at_level(logging.INFO),
+        ):
+            result = await extractor._extract_lighton(self._raw())
+
+        stats = result.stats or {}
+        assert stats.get("pages_retried") == 4
+        assert stats.get("retry_requests") == 4
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert not warnings, (
+            f"a successful extraction logged {len(warnings)} warnings: "
+            f"{[r.getMessage()[:60] for r in warnings]}"
+        )
+
+
+    @pytest.mark.parametrize(
+        "header,expected",
+        [
+            ("7", 7.0),
+            ("0", 0.0),
+            ("86400", 30.0),  # capped
+            ("-5", None),
+            ("NaN", None),
+            ("inf", None),
+            ("soon", None),
+            (None, None),
+        ],
+    )
+    def test_retry_after_parsing(self, header, expected):
+        """Pinned at the parser, not only through a sleep.
+
+        The call site clamps as well, and `max(0.0, nan)` happens to return
+        0.0 — so a NaN that reaches it is harmless *by accident*, and a test
+        that only drives the sleep passes with this guard deleted. The guard
+        is what stops a non-finite value existing in the first place:
+        `nan < 0` is False and `min(nan, cap)` is `nan`, so neither the sign
+        check nor the cap sees it, and `asyncio.sleep(nan)` raises from
+        inside the handler carrying the original error.
+        """
+        from agentic.ingest.extractor.pdf import _lighton_retry_after
+
+        headers = {} if header is None else {"Retry-After": header}
+        error = _lighton_http_error(429, headers=headers).raise_for_status.side_effect
+
+        assert _lighton_retry_after(error, 30.0) == expected
+
+    def test_retry_after_is_read_case_insensitively(self):
+        """HTTP/2 lowercases header names."""
+        from agentic.ingest.extractor.pdf import _lighton_retry_after
+
+        error = _lighton_http_error(429, headers={"retry-after": "5"}).raise_for_status.side_effect
+
+        assert _lighton_retry_after(error, 30.0) == 5.0
+
+
+class TestPDFExtractorLightOnFailures:
+    """What survives a failure: the memory ceiling, the error, and the page
+    number that names it."""
+
+    @pytest.fixture(autouse=True)
+    def _no_retry_backoff(self, monkeypatch):
+        """Transient failures are retried per page now, so every test here
+        that fails a page would otherwise pay 1s + 2s of real backoff. These
+        tests are about which error is reported and what gets logged; the
+        waiting itself is covered in TestPDFExtractorLightOnPageRetry.
+
+        The backoff constant is zeroed rather than `asyncio.sleep` replaced:
+        pytest-asyncio and the loop itself await `sleep`, so stubbing it for
+        a whole class takes the runner down with it."""
+        from agentic.knowledge import model_config
+
+        monkeypatch.setattr(model_config, "LIGHTON_PAGE_RETRY_BACKOFF", 0)
+
+    _raw = staticmethod(TestPDFExtractorLightOnConcurrency._raw)
+    _images = staticmethod(TestPDFExtractorLightOnConcurrency._images)
+    _response = staticmethod(TestPDFExtractorLightOnConcurrency._response)
+
+    _http_error = staticmethod(_lighton_http_error)
+
+    @pytest.mark.asyncio
+    async def test_payloads_are_built_inside_the_semaphore_not_ahead_of_it(self):
+        """Peak memory has to follow the semaphore, not the page count.
+
+        Every task runs to its first suspension the moment it is scheduled,
+        so a payload built *above* the `async with` exists once per page: at
+        150 DPI that is ~0.5 MB of base64 per page, held twice over, which on
+        a 252-page filing is the difference between ~107 MB and ~363 MB — an
+        OOM kill in a worker container rather than a slow document.
+
+        Counted at the encoder, not at the request: a thread pool sized to the
+        same bound caps requests in flight either way, so a test that watches
+        `requests.post` passes with the semaphore deleted outright.
+        """
+        import threading
+        import time
+
+        from agentic.knowledge.model_config import LIGHTON_MAX_CONCURRENCY
+
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        lock = threading.Lock()
+        encoded = 0
+        seen_at_first_completion = None
+        real_b64encode = base64.b64encode
+
+        def _counting_b64encode(data):
+            nonlocal encoded
+            with lock:
+                encoded += 1
+            return real_b64encode(data)
+
+        def _post(*args, **kwargs):
+            nonlocal seen_at_first_completion
+            # Long enough for every other task to run its prologue if it can.
+            time.sleep(0.1)
+            with lock:
+                if seen_at_first_completion is None:
+                    seen_at_first_completion = encoded
+            return self._response("page")
+
+        pages = LIGHTON_MAX_CONCURRENCY * 4
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(pages)),
+            patch("requests.post", side_effect=_post),
+            patch("base64.b64encode", side_effect=_counting_b64encode),
+        ):
+            await extractor.extract(self._raw())
+
+        assert encoded == pages, "every page should still be encoded exactly once"
+        # Slack of one: a slot can free and be refilled while the first
+        # request is finishing. `pages` is 4x the bound, so an unbounded
+        # build is unambiguous.
+        assert seen_at_first_completion <= LIGHTON_MAX_CONCURRENCY + 1, (
+            f"{seen_at_first_completion} payloads built before the first request "
+            f"finished, for a bound of {LIGHTON_MAX_CONCURRENCY}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_loops_default_thread_pool_is_not_used(self):
+        """`asyncio.to_thread` runs on the loop's default executor, sized
+        `min(32, cpu_count + 4)` — six threads on a 2-vCPU container. OCR
+        alone would saturate that, stalling every other `to_thread` caller in
+        the process (docx, pptx, xlsx, the embedder), and capping this at six
+        while the code says eight.
+
+        A default executor narrower than the bound stands in for that small
+        container: concurrency has to come from the extractor's own pool.
+        """
+        import threading
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+
+        from agentic.knowledge.model_config import LIGHTON_MAX_CONCURRENCY
+
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        lock = threading.Lock()
+        in_flight = 0
+        peak = 0
+
+        def _post(*args, **kwargs):
+            nonlocal in_flight, peak
+            with lock:
+                in_flight += 1
+                peak = max(peak, in_flight)
+            time.sleep(0.05)
+            with lock:
+                in_flight -= 1
+            return self._response("page")
+
+        narrow = ThreadPoolExecutor(max_workers=2, thread_name_prefix="narrow-default")
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(narrow)
+        try:
+            with (
+                patch.object(
+                    extractor,
+                    "_render_page_images",
+                    return_value=self._images(LIGHTON_MAX_CONCURRENCY * 3),
+                ),
+                patch("requests.post", side_effect=_post),
+            ):
+                await extractor.extract(self._raw())
+        finally:
+            narrow.shutdown(wait=False)
+
+        assert peak == LIGHTON_MAX_CONCURRENCY, (
+            f"saw {peak} in flight with a 2-thread default executor — the OCR "
+            "calls are running on the shared pool"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_failing_page_is_named_in_the_log(self, caplog):
+        """Serially the failing page was wherever the loop stopped; with
+        pages in flight it is whichever loses the race, and a re-run names a
+        different one. The caller only ever reports the first exception, so
+        without this the operator gets '404 Client Error' and no page."""
+        extractor = PDFExtractor(lighton_api_key="test-key")
+
+        def _post(*args, **kwargs):
+            payload = kwargs.get("json") or args[1]
+            url = payload["messages"][0]["content"][0]["image_url"]["url"]
+            if base64.b64encode(b"png-2").decode() in url:
+                return self._http_error(500, "upstream exploded")
+            return self._response("page")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(3)),
+            patch("requests.post", side_effect=_post),
+            caplog.at_level(logging.WARNING),
+        ):
+            with pytest.raises(requests.exceptions.HTTPError):
+                await extractor._extract_lighton(self._raw())
+
+        failures = [r.getMessage() for r in caplog.records if "LightOnOCR page" in r.getMessage()]
+        assert failures, "the failing page logged nothing"
+        assert "page 2" in failures[0]
+        assert "upload://test.pdf" in failures[0]
+        assert "upstream exploded" in failures[0], "the body is the only 'why' available"
+
+    @pytest.mark.asyncio
+    async def test_a_deterministic_rejection_is_not_retried_for_the_whole_document(self):
+        """`_try_method` retries the *document*, so a 400/401/413 costs three
+        full passes to be refused three times. ExtractionError is the shape
+        the chain already routes straight to the next extraction method."""
+        extractor = PDFExtractor(lighton_api_key="test-key")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(2)),
+            patch("requests.post", side_effect=lambda *a, **k: self._http_error(413, "too big")),
+        ):
+            with pytest.raises(ExtractionError, match="rejected page"):
+                await extractor._extract_lighton(self._raw())
+
+    @pytest.mark.parametrize("status", [408, 429, 500, 503])
+    @pytest.mark.asyncio
+    async def test_transient_statuses_stay_retryable(self, status):
+        """The 4xx worth another attempt, and the 5xx that always are —
+        classifying any of them as deterministic turns a passing outage into
+        a hard failure. 408 was untested: narrowing the tuple to `(429,)`
+        alone passed the suite."""
+        extractor = PDFExtractor(lighton_api_key="test-key")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(2)),
+            patch("requests.post", side_effect=lambda *a, **k: self._http_error(status)),
+        ):
+            with pytest.raises(requests.exceptions.RequestException) as excinfo:
+                await extractor._extract_lighton(self._raw())
+
+        assert not isinstance(excinfo.value, ExtractionError), (
+            f"{status} must stay retryable, not short-circuit to the next method"
+        )
+
+    @pytest.mark.parametrize("value,expected", [("0", 1), ("-4", 1), ("3", 3), ("abc", 8)])
+    def test_the_concurrency_bound_cannot_be_configured_below_one(self, value, expected):
+        """`0` here is a typo, not the "disable" it means for the retry
+        counts: a pool of 0 workers and a `Semaphore(-1)` both raise, and
+        they raise *after* every page image has been rendered — three times,
+        once per attempt. `_int_env` exists so an operator value cannot take
+        the module down; out-of-range needs the same treatment as malformed."""
+        import importlib
+        import os
+
+        from agentic.knowledge import model_config
+
+        # The restoring reload happens *outside* the patched environment:
+        # inside it, the module would be rebuilt from the same bad value and
+        # every later test in the session would see that bound.
+        try:
+            with patch.dict(os.environ, {"LIGHTON_MAX_CONCURRENCY": value}):
+                reloaded = importlib.reload(model_config)
+                assert reloaded.LIGHTON_MAX_CONCURRENCY == expected
+        finally:
+            importlib.reload(model_config)
+
+        assert model_config.LIGHTON_MAX_CONCURRENCY == 8, "the module was left poisoned"
+
+    def test_a_long_error_body_is_truncated(self):
+        """The excerpt reaches an error message and a log line; an endpoint
+        that answers with a page of HTML should not put it in both."""
+        from agentic.ingest.extractor.pdf import _response_excerpt
+
+        response = MagicMock()
+        response.status_code = 502
+        response.text = "x" * 5000
+
+        excerpt = _response_excerpt(response)
+
+        assert len(excerpt) < 260
+        assert excerpt.endswith("...')")
+
+    def test_an_unreadable_body_says_so(self):
+        """`body: ''` would be indistinguishable from a response that had
+        none — and reading `.text` inside an exception handler is exactly
+        where a second failure must not replace the first."""
+        from agentic.ingest.extractor.pdf import _response_excerpt
+
+        response = MagicMock()
+        response.status_code = 500
+        type(response).text = property(
+            lambda self: (_ for _ in ()).throw(RuntimeError("not read"))
+        )
+
+        excerpt = _response_excerpt(response)
+
+        assert "unreadable" in excerpt
+        assert "RuntimeError" in excerpt
+
+    @pytest.mark.asyncio
+    async def test_a_page_failure_still_reaches_the_caller(self):
+        """The failure a page raises is what the document reports — pages that
+        were never sent contribute nothing to that decision."""
+        extractor = PDFExtractor(lighton_api_key="test-key")
+
+        def _post(*args, **kwargs):
+            raise RuntimeError("the original failure")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(4)),
+            patch("requests.post", side_effect=_post),
+        ):
+            with pytest.raises(RuntimeError, match="the original failure"):
+                await extractor._extract_lighton(self._raw())
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_extraction_stays_cancelled(self):
+        """A caller's cancellation — a graceful worker drain, an
+        `asyncio.timeout` — has to be honoured. Swallowing it returns a
+        successful extraction to a caller that asked to stop, and lets the
+        retry chain run two more full passes afterwards.
+
+        `CancelledError` is not an `Exception`, so nothing between here and
+        the caller would notice: not `_try_method`'s `except Exception`, not
+        `extract()`'s fallback chain, not a log line."""
+        import threading
+        import time
+
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        first_request = threading.Event()
+
+        def _post(*args, **kwargs):
+            first_request.set()
+            time.sleep(0.3)
+            return self._response("page")
+
+        async def _run():
+            return await extractor._extract_lighton(self._raw())
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(24)),
+            patch("requests.post", side_effect=_post),
+        ):
+            task = asyncio.create_task(_run())
+            while not first_request.is_set():
+                await asyncio.sleep(0.01)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert task.cancelled(), "the cancellation was swallowed"
+
+    @pytest.mark.asyncio
+    async def test_a_deterministic_rejection_outranks_a_transient_one(self):
+        """`gather` settles children in completion order, and with the
+        classification change that order decides whether the *document* is
+        retried. A 503 that lands first would send the whole document round
+        three more times while the 400 that will refuse it every time is
+        still on the wire — and never gets logged at all, because its task
+        was abandoned. Both outcomes are collected, and deterministic wins
+        regardless of the clock."""
+        import time
+
+        extractor = PDFExtractor(lighton_api_key="test-key")
+
+        def _post(*args, **kwargs):
+            payload = kwargs.get("json") or args[1]
+            url = payload["messages"][0]["content"][0]["image_url"]["url"]
+            # Every page dwells before answering, so all 8 are on the wire
+            # before any of them fails: whether a page beyond the window is
+            # ever sent depends on scheduling, but pages *inside* it are
+            # already in flight, and those are the ones being ranked.
+            if base64.b64encode(b"png-3").decode() in url:
+                time.sleep(0.1)
+                return self._http_error(503, "service unavailable")
+            if base64.b64encode(b"png-6").decode() in url:
+                # Later in the document *and* slower to answer, so neither
+                # submission order nor the wall clock favours it.
+                time.sleep(0.3)
+                return self._http_error(400, "page malformed")
+            time.sleep(0.5)
+            return self._response("page")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(8)),
+            patch("requests.post", side_effect=_post),
+        ):
+            with pytest.raises(ExtractionError, match="rejected page 6"):
+                await extractor._extract_lighton(self._raw())
+
+    @pytest.mark.asyncio
+    async def test_every_failure_is_logged_not_only_the_first(self, caplog):
+        """Which page `gather` reported used to depend on the clock, so log
+        coverage of a multi-page failure swung between one page and all of
+        them on timing alone."""
+        import time
+
+        extractor = PDFExtractor(lighton_api_key="test-key")
+
+        def _post(*args, **kwargs):
+            # Dwell first: all four pages are inside the window, so they are
+            # in flight before the first failure sets the abort flag.
+            time.sleep(0.1)
+            return self._http_error(500, "boom")
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(4)),
+            patch("requests.post", side_effect=_post),
+            caplog.at_level(logging.WARNING),
+        ):
+            with pytest.raises(requests.exceptions.HTTPError):
+                await extractor._extract_lighton(self._raw())
+
+        named = {
+            f"page {n}"
+            for n in range(1, 5)
+            if any(f"page {n} " in r.getMessage() for r in caplog.records)
+        }
+        assert len(named) >= 2, f"only these pages were logged: {named}"
+        summary = [r.getMessage() for r in caplog.records if "pages failed" in r.getMessage()]
+        assert summary, "the summary naming how many failed is missing"
+        # The reported failure is raised; "Others" must not repeat it.
+        assert str(len(named)) in summary[0] or "pages failed" in summary[0]
+
+    @pytest.mark.asyncio
+    async def test_a_200_with_an_unusable_body_carries_the_body(self, caplog):
+        """`resp.json()["choices"]` on an error envelope raises `KeyError`,
+        which carries no response — so `failed: 'choices'` was the operator's
+        entire diagnosis while the answer sat unread two lines away. It is
+        also deterministic: the same request is unreadable next time, so it
+        must not cost three document passes."""
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        response = MagicMock()
+        response.status_code = 200
+        response.text = '{"error": {"message": "model not loaded"}}'
+        response.json.return_value = {"error": {"message": "model not loaded"}}
+        response.raise_for_status = MagicMock()
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(2)),
+            patch("requests.post", side_effect=lambda *a, **k: response),
+            caplog.at_level(logging.WARNING),
+        ):
+            with pytest.raises(ExtractionError) as excinfo:
+                await extractor._extract_lighton(self._raw())
+
+        assert "model not loaded" in str(excinfo.value), "the body is the diagnosis"
+        assert "KeyError" in str(excinfo.value)
+        assert any("model not loaded" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_the_thread_pool_does_not_outlive_the_document(self):
+        """One pool per document, and none of it outlives the document.
+
+        Note this passes with the explicit `shutdown` removed: the executor
+        is unreferenced once `_extract_lighton` returns, and CPython's
+        refcounting collects it, which wakes the idle workers. The shutdown
+        is there so the release does not depend on that, and so it happens
+        on the failure path before the fallback runs — this test pins the
+        property, not the call."""
+        import threading
+
+        extractor = PDFExtractor(lighton_api_key="test-key")
+        before = {t for t in threading.enumerate() if t.name.startswith("lighton-ocr")}
+
+        with (
+            patch.object(extractor, "_render_page_images", return_value=self._images(4)),
+            patch("requests.post", side_effect=lambda *a, **k: self._response("page")),
+        ):
+            await extractor._extract_lighton(self._raw())
+
+        for _ in range(50):
+            alive = {
+                t
+                for t in threading.enumerate()
+                if t.name.startswith("lighton-ocr") and t not in before and t.is_alive()
+            }
+            if not alive:
+                break
+            await asyncio.sleep(0.05)
+
+        assert not alive, f"{len(alive)} OCR threads still running after extraction"
 
 
 class TestPDFExtractorLlamaParse:
