@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/powabase-ai/agentic/compare/v0.3.1...v0.3.2) (2026-09-10)
+
+
+### Performance Improvements
+
+* **ingest:** issue LightOnOCR page requests concurrently ([#28](https://github.com/powabase-ai/agentic/issues/28)) ([9126537](https://github.com/powabase-ai/agentic/commit/9126537b34eed4cb56452093ade095f81ad0f02f))
+
 ## [0.3.1](https://github.com/powabase-ai/agentic/compare/v0.3.0...v0.3.1) (2026-08-12)
 
 
