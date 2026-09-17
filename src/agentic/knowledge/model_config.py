@@ -443,8 +443,8 @@ LIGHTON_RETRY_AFTER_MAX = 30.0
 
 # Largest PDF sent to Mistral OCR in one upload. Mistral documents 50 MB per
 # OCR document; the page cap (1,000) is PDFExtractor.max_pages. A scanned book
-# passes the page cap long before the byte cap — 1,000 pages at ~220 KB is
-# 210 MB — and an oversized upload fails only after the full transfer, three
+# reaches the byte cap long before the page cap — 1,000 pages at ~220 KB is
+# 220 MB — and an oversized upload fails only after the full transfer, three
 # times over. Batches are therefore sized by bytes too, and a single page
 # above this is refused before anything is sent. Env-overridable:
 # MISTRAL_MAX_FILE_BYTES.

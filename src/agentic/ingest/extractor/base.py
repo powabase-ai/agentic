@@ -135,6 +135,33 @@ class ExtractionError(Exception):
         return " | ".join(parts)
 
 
+class PageImageSinkError(Exception):
+    """The host's page-image sink raised while taking a rendered page.
+
+    Raised by an extractor that was given ``raw.metadata["page_image_sink"]``
+    when that callable fails. It ends the whole extraction: the extractor does
+    not retry the method or move on to another one, because every method
+    delivers its pages to the same sink and an OCR method pays for every page
+    it sends first. Whether to try again is the caller's decision.
+
+    Deliberately not an ``ExtractionError``, which callers may treat as a
+    permanent verdict on the document: a sink that cannot store a page is
+    usually a storage outage, not a bad document.
+
+    Attributes:
+        page: 1-indexed page the sink was given when it failed
+        cause: the exception the sink raised (also ``__cause__``)
+    """
+
+    def __init__(self, page: int | None, cause: BaseException):
+        super().__init__(
+            f"page image sink failed on page {page}: {type(cause).__name__}: {cause}"
+        )
+        self.page = page
+        self.cause = cause
+        self.__cause__ = cause
+
+
 def replace_image_annotations(
     markdown: str,
     annotations: list[tuple[str, str | None]],

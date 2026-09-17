@@ -23,6 +23,7 @@ from requests import exceptions as requests_exceptions
 from agentic.ingest.extractor.base import (
     ExtractionError,
     Extractor,
+    PageImageSinkError,
     replace_image_annotations,
 )
 from agentic.ingest.models import Derivative, ExtractionResult, RawContent
@@ -286,6 +287,24 @@ def _page_image_sink(raw: RawContent):
     return sink if callable(sink) else None
 
 
+class _PageImages(list):
+    """The list ``_render_page_images`` returns, plus whether it is partial.
+
+    ``incomplete`` is set when rendering failed after the sink had already
+    taken some pages: those pages are stored and cannot be taken back, so the
+    result has to say the set is partial rather than read as a clean run.
+    """
+
+    incomplete = False
+
+
+def _page_image_metadata(images) -> dict:
+    """``auto_metadata`` entries describing a page-image set."""
+    if getattr(images, "incomplete", False):
+        return {"page_images_incomplete": True}
+    return {}
+
+
 class PDFExtractor(Extractor):
     """
     PDF extraction with fallback strategy.
@@ -389,9 +408,15 @@ class PDFExtractor(Extractor):
         ``ExtractionResult``. The sink is called once per page, never
         concurrently, and possibly from a worker thread; pages arrive in
         order here, but LightOnOCR delivers them as each page's OCR completes,
-        and a method that fails is followed by one that delivers the same
-        pages again. An exception from the sink propagates; a rendering
-        failure does not (see below).
+        and a method that fails for another reason is followed by one that
+        delivers the same pages again.
+
+        An exception from the sink is raised as ``PageImageSinkError``, which
+        ends the whole extraction: no method retries it and no further method
+        runs. A rendering failure does not raise. Without a sink it degrades
+        to no images, as it always has; with a sink, pages already delivered
+        stay delivered, and the method's ``auto_metadata`` carries
+        ``page_images_incomplete: True``.
 
         Args:
             raw: RawContent with PDF bytes
@@ -400,9 +425,13 @@ class PDFExtractor(Extractor):
         Returns:
             List of image Derivative objects, one per page — or empty when a
             sink received them, or when rendering failed.
+
+        Raises:
+            PageImageSinkError: the sink raised.
         """
         sink = _page_image_sink(raw)
-        image_derivs: list[Derivative] = []
+        image_derivs = _PageImages()
+        delivered = 0
         pages = self._iter_page_images(raw, dpi)
         try:
             while True:
@@ -410,17 +439,31 @@ class PDFExtractor(Extractor):
                     deriv = next(pages)
                 except StopIteration:
                     break
-                except ImportError:
-                    logger.warning("PyMuPDF not available for page image rendering")
-                    return []
                 except Exception as e:
-                    logger.warning(f"Failed to render page images: {e}")
-                    return []
+                    if isinstance(e, ImportError):
+                        logger.warning("PyMuPDF not available for page image rendering")
+                    else:
+                        logger.warning(f"Failed to render page images: {e}")
+                    failed = _PageImages()
+                    if delivered:
+                        logger.warning(
+                            "Page images for %s are incomplete: %d page(s) had "
+                            "already reached the sink",
+                            raw.source_uri,
+                            delivered,
+                        )
+                        failed.incomplete = True
+                    return failed
                 if sink is None:
                     image_derivs.append(deriv)
-                else:
+                    continue
+                page = deriv.page
+                try:
                     sink(deriv)
-                    del deriv
+                except Exception as e:
+                    raise PageImageSinkError(page, e) from e
+                delivered += 1
+                del deriv
         finally:
             pages.close()
         return image_derivs
@@ -442,8 +485,8 @@ class PDFExtractor(Extractor):
             for attempt in range(max_retries):
                 try:
                     return await self._extract_mistral(raw)
-                except ExtractionError:
-                    raise  # deterministic — don't retry
+                except (ExtractionError, PageImageSinkError):
+                    raise  # deterministic, or not ours to retry
                 except Exception as e:
                     if attempt < max_retries - 1:
                         wait = 2 ** attempt  # 1s, 2s
@@ -469,7 +512,7 @@ class PDFExtractor(Extractor):
             for attempt in range(max_retries):
                 try:
                     return await self._extract_paddleocr(raw)
-                except ExtractionError:
+                except (ExtractionError, PageImageSinkError):
                     raise
                 except Exception as e:
                     if attempt < max_retries - 1:
@@ -495,7 +538,9 @@ class PDFExtractor(Extractor):
             for attempt in range(max_retries):
                 try:
                     return await self._extract_lighton(raw)
-                except ExtractionError:
+                except (ExtractionError, PageImageSinkError):
+                    # A sink failure is storage, not the page: another pass
+                    # re-sends every page and fails on the same storage.
                     raise
                 except Exception as e:
                     if attempt < max_retries - 1:
@@ -563,6 +608,9 @@ class PDFExtractor(Extractor):
         if preference != "auto":
             try:
                 return await self._try_method(preference, raw)
+            except PageImageSinkError:
+                # Every method delivers its pages to the same sink.
+                raise
             except Exception as e:
                 # Local methods have no further fallback
                 if preference in LOCAL_METHODS:
@@ -578,6 +626,8 @@ class PDFExtractor(Extractor):
                         result.auto_metadata["requested_method"] = preference
                         result.auto_metadata["fallback_reason"] = str(e)
                         return result
+                    except PageImageSinkError:
+                        raise
                     except Exception as fallback_err:
                         logger.warning(
                             f"Local fallback {method} also failed: {fallback_err}"
@@ -617,6 +667,10 @@ class PDFExtractor(Extractor):
         for i, method in enumerate(chain):
             try:
                 return await self._try_method(method, raw)
+            except PageImageSinkError:
+                # Not a verdict on this method: the next one would re-send
+                # pages to a paid endpoint and fail on the same sink.
+                raise
             except Exception as e:
                 last_error = e
                 remaining = chain[i + 1:]
@@ -722,6 +776,7 @@ class PDFExtractor(Extractor):
             auto_metadata={
                 "page_count": num_pages,
                 "char_count": len(fulltext),
+                **_page_image_metadata(image_derivs),
             },
             extraction_method="opendataloader",
             stats={"pages_processed": num_pages},
@@ -790,6 +845,7 @@ class PDFExtractor(Extractor):
             auto_metadata={
                 "page_count": len(page_text_strings),
                 "char_count": len(fulltext),
+                **_page_image_metadata(image_derivs),
             },
             extraction_method="fitz",
             stats={"pages_processed": len(page_text_strings)},
@@ -970,6 +1026,7 @@ class PDFExtractor(Extractor):
             derivatives.extend(page_text_derivs)
 
             # Render page images only for single-PDF path (not per-batch)
+            image_derivs: list[Derivative] = []
             if render_images:
                 image_derivs = self._render_page_images(raw)
                 derivatives.extend(image_derivs)
@@ -981,6 +1038,7 @@ class PDFExtractor(Extractor):
                 auto_metadata={
                     "page_count": len(page_markdowns),
                     "char_count": len(fulltext),
+                    **_page_image_metadata(image_derivs),
                 },
                 extraction_method="mistral_ocr",
                 stats={"pages_processed": len(page_markdowns)},
@@ -1035,6 +1093,7 @@ class PDFExtractor(Extractor):
             auto_metadata={
                 "page_count": total_pages,
                 "char_count": len(fulltext),
+                **_page_image_metadata(image_derivs),
             },
             extraction_method="mistral_ocr",
             stats={
@@ -1140,6 +1199,7 @@ class PDFExtractor(Extractor):
             auto_metadata={
                 "page_count": len(page_markdowns),
                 "char_count": len(fulltext),
+                **_page_image_metadata(image_derivs),
             },
             extraction_method="paddleocr_vl",
             stats={"pages_processed": len(page_markdowns)},
@@ -1447,13 +1507,21 @@ class PDFExtractor(Extractor):
                     page = img_deriv.page
                     try:
                         outcome = await _ocr_page(executor, img_deriv)
-                        await loop.run_in_executor(sink_pool, sink, img_deriv)
                     except Exception as e:
-                        # _ocr_page has already set the flag for its own
-                        # failures; a sink failure has to set it here.
+                        # _ocr_page sets the flag for the failures it
+                        # diagnoses; anything else it raised sets it here.
                         if not isinstance(e, _PageAborted):
                             aborted = True
                         outcome = e
+                    else:
+                        try:
+                            await loop.run_in_executor(sink_pool, sink, img_deriv)
+                        except Exception as e:
+                            # Storage is failing, not OCR: stop sending pages
+                            # now, since every one sent from here is paid for
+                            # and cannot be stored.
+                            aborted = True
+                            outcome = PageImageSinkError(page, e)
                     del img_deriv
                     settled.append((page, outcome))
 
@@ -1463,9 +1531,18 @@ class PDFExtractor(Extractor):
                 )
             finally:
                 # Queued behind any render still running on that thread, so
-                # the generator is never closed while it is executing.
+                # the generator is never closed while it is executing — and
+                # waited for, because PyMuPDF is not thread-safe: the next
+                # method in the chain opens the document on this thread, and
+                # must not do so while this one is still closing its copy. On
+                # a normal exit every worker has already collected its render,
+                # so this waits only for the close; on a cancellation it can
+                # also wait out the one page being rendered.
                 render_pool.submit(pages.close)
-                render_pool.shutdown(wait=False)
+                render_pool.shutdown(wait=True)
+                # Not waited for: on a normal exit every sink call has been
+                # awaited already, and on a cancellation the sink is host code
+                # (an upload) that this extraction no longer needs.
                 sink_pool.shutdown(wait=False)
 
             if not settled:
@@ -1541,15 +1618,26 @@ class PDFExtractor(Extractor):
             # tells `_try_method` not to retry and to fall through to the next
             # extraction method; letting a slower 503 outrank it re-runs the
             # whole document to be refused again.
+            #
+            # A sink failure outranks both: it ends the whole extraction rather
+            # than this method, and reporting a page refusal instead would send
+            # the chain on to a method that stores pages to the same sink.
+            sink_failures = [f for f in failures if isinstance(f, PageImageSinkError)]
             deterministic = [f for f in failures if isinstance(f, ExtractionError)]
-            reported = (deterministic or failures)[0]
+            reported = (sink_failures or deterministic or failures)[0]
             others = [f for f in failures if f is not reported]
             if others:
+                if sink_failures:
+                    which = "the page image sink failure"
+                elif deterministic:
+                    which = "the deterministic rejection"
+                else:
+                    which = "the first"
                 logger.warning(
                     "LightOnOCR: %d pages failed on %s; reporting %s. Others: %s",
                     len(failures),
                     raw.source_uri,
-                    "the deterministic rejection" if deterministic else "the first",
+                    which,
                     "; ".join(f"{type(f).__name__}: {f}" for f in others),
                 )
             raise reported
@@ -1633,7 +1721,8 @@ class PDFExtractor(Extractor):
         ]
         derivatives.extend(page_text_derivs)
         # Render page images for image-mode retrieval (consistent with other methods)
-        derivatives.extend(self._render_page_images(raw))
+        image_derivs = self._render_page_images(raw)
+        derivatives.extend(image_derivs)
 
         return ExtractionResult(
             source_uri=raw.source_uri,
@@ -1642,6 +1731,7 @@ class PDFExtractor(Extractor):
             auto_metadata={
                 "page_count": len(page_markdowns),
                 "char_count": len(fulltext),
+                **_page_image_metadata(image_derivs),
             },
             extraction_method="llamaparse_ocr",
             stats={"pages_processed": len(page_markdowns)},
@@ -1697,6 +1787,7 @@ class PDFExtractor(Extractor):
             auto_metadata={
                 "page_count": len(text_parts),
                 "char_count": len(fulltext),
+                **_page_image_metadata(image_derivs),
             },
             extraction_method="pdfplumber",
             stats={"pages_processed": len(text_parts)},
