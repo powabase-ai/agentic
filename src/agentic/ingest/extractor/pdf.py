@@ -15,6 +15,7 @@ import os
 import re
 import ssl
 import tempfile
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 
 from requests import exceptions as requests_exceptions
@@ -198,31 +199,91 @@ def _lighton_is_retryable(exc: Exception) -> bool:
     return status in (408, 429)
 
 
-def _split_pdf(data: bytes, batch_size: int) -> list[tuple[bytes, int, int]]:
-    """Split a PDF into batches of at most *batch_size* pages.
+class _BatchTooLarge(Exception):
+    """A single page that is larger than the upload limit on its own."""
 
-    Returns a list of (pdf_bytes, start_page, end_page) tuples where
-    start_page and end_page are 1-indexed inclusive.
+    def __init__(self, page: int, size: int):
+        super().__init__(page, size)
+        self.page = page
+        self.size = size
+
+
+def _plan_pdf_batches(
+    data: bytes, max_pages: int, max_bytes: int
+) -> list[tuple[int, int]]:
+    """Page ranges of at most *max_pages* pages whose PDFs fit in *max_bytes*.
+
+    Returns 0-indexed inclusive ``(start, end)`` ranges. Only the ranges are
+    kept, never the batch bytes, so planning a 300 MB document costs one batch
+    at a time. The whole plan is made before anything is uploaded, so a page
+    that cannot fit is reported before any batch has been sent.
+
+    Raises:
+        _BatchTooLarge: a single page is larger than *max_bytes* on its own.
     """
     import fitz
 
     src = fitz.open(stream=data, filetype="pdf")
     try:
         total = len(src)
-        batches: list[tuple[bytes, int, int]] = []
-
-        for start in range(0, total, batch_size):
-            end = min(start + batch_size, total) - 1  # 0-indexed inclusive
-            batch_doc = fitz.open()  # new empty PDF
-            try:
-                batch_doc.insert_pdf(src, from_page=start, to_page=end)
-                batches.append((batch_doc.tobytes(), start + 1, end + 1))  # 1-indexed
-            finally:
-                batch_doc.close()
-
-        return batches
+        per_batch = max_pages
+        if len(data) > max_bytes:
+            # First guess from the average page; uneven pages are corrected by
+            # halving below.
+            per_batch = max(1, min(max_pages, total * max_bytes // len(data)))
+        pending = [
+            (start, min(start + per_batch, total) - 1)
+            for start in reversed(range(0, total, per_batch))
+        ]
+        ranges: list[tuple[int, int]] = []
+        while pending:
+            start, end = pending.pop()
+            size = len(_pdf_page_range(src, start, end))
+            if size <= max_bytes:
+                ranges.append((start, end))
+            elif start == end:
+                raise _BatchTooLarge(start + 1, size)
+            else:
+                mid = (start + end) // 2
+                pending.append((mid + 1, end))
+                pending.append((start, mid))
+        return ranges
     finally:
         src.close()
+
+
+def _pdf_page_range(src, start: int, end: int) -> bytes:
+    """Bytes of a new PDF holding pages *start*..*end* (0-indexed, inclusive)."""
+    import fitz
+
+    batch_doc = fitz.open()
+    try:
+        batch_doc.insert_pdf(src, from_page=start, to_page=end)
+        return batch_doc.tobytes()
+    finally:
+        batch_doc.close()
+
+
+def _iter_pdf_batches(data: bytes, ranges: list[tuple[int, int]]):
+    """Yield ``(pdf_bytes, start_page, end_page)`` per range, one at a time.
+
+    start_page and end_page are 1-indexed inclusive. Built lazily so only the
+    batch being sent is in memory, not every batch of the document.
+    """
+    import fitz
+
+    src = fitz.open(stream=data, filetype="pdf")
+    try:
+        for start, end in ranges:
+            yield _pdf_page_range(src, start, end), start + 1, end + 1
+    finally:
+        src.close()
+
+
+def _page_image_sink(raw: RawContent):
+    """The host's page-image callback from ``raw.metadata``, if it passed one."""
+    sink = (raw.metadata or {}).get("page_image_sink")
+    return sink if callable(sink) else None
 
 
 class PDFExtractor(Extractor):
@@ -288,45 +349,81 @@ class PDFExtractor(Extractor):
         self.llamaparse_base_url = llamaparse_base_url
         self.max_pages = max_pages
 
+    def _iter_page_images(self, raw: RawContent, dpi: int = 150) -> Iterator[Derivative]:
+        """Render PDF pages as PNG image derivatives, one page at a time.
+
+        Raises ImportError when PyMuPDF is missing and whatever PyMuPDF raises
+        for a document it cannot render; ``_render_page_images`` is the
+        forgiving wrapper.
+        """
+        import fitz
+
+        doc = fitz.open(stream=raw.content, filetype="pdf")
+        try:
+            zoom = dpi / 72
+            mat = fitz.Matrix(zoom, zoom)
+            for page in doc:
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                deriv = Derivative(
+                    type="image",
+                    content=pix.tobytes("png"),
+                    format="png",
+                    page=page.number + 1,  # 1-indexed
+                    metadata={"width": pix.width, "height": pix.height, "dpi": dpi},
+                )
+                # The raw pixmap is several times the PNG; drop it before the
+                # consumer holds this page for as long as it likes.
+                del pix
+                yield deriv
+        finally:
+            doc.close()
+
     def _render_page_images(self, raw: RawContent, dpi: int = 150) -> list[Derivative]:
         """Render each PDF page as a PNG image derivative using PyMuPDF.
+
+        When the host passed ``raw.metadata["page_image_sink"]`` — a callable
+        taking one image ``Derivative`` — each page is handed to it as soon as
+        it is rendered and is not retained, and the returned list is empty.
+        A 1,500-page scan renders to gigabytes of PNG, so a host that stores
+        page images should pass a sink rather than receive them all in the
+        ``ExtractionResult``. The sink is called once per page, never
+        concurrently, and possibly from a worker thread; pages arrive in
+        order here, but LightOnOCR delivers them as each page's OCR completes,
+        and a method that fails is followed by one that delivers the same
+        pages again. An exception from the sink propagates; a rendering
+        failure does not (see below).
 
         Args:
             raw: RawContent with PDF bytes
             dpi: Resolution for rendering (default 150)
 
         Returns:
-            List of image Derivative objects, one per page.
+            List of image Derivative objects, one per page — or empty when a
+            sink received them, or when rendering failed.
         """
+        sink = _page_image_sink(raw)
+        image_derivs: list[Derivative] = []
+        pages = self._iter_page_images(raw, dpi)
         try:
-            import fitz
-        except ImportError:
-            logger.warning("PyMuPDF not available for page image rendering")
-            return []
-
-        try:
-            doc = fitz.open(stream=raw.content, filetype="pdf")
-            try:
-                image_derivs = []
-                zoom = dpi / 72
-                mat = fitz.Matrix(zoom, zoom)
-                for page in doc:
-                    pix = page.get_pixmap(matrix=mat, alpha=False)
-                    image_derivs.append(
-                        Derivative(
-                            type="image",
-                            content=pix.tobytes("png"),
-                            format="png",
-                            page=page.number + 1,  # 1-indexed
-                            metadata={"width": pix.width, "height": pix.height, "dpi": dpi},
-                        )
-                    )
-            finally:
-                doc.close()
-            return image_derivs
-        except Exception as e:
-            logger.warning(f"Failed to render page images: {e}")
-            return []
+            while True:
+                try:
+                    deriv = next(pages)
+                except StopIteration:
+                    break
+                except ImportError:
+                    logger.warning("PyMuPDF not available for page image rendering")
+                    return []
+                except Exception as e:
+                    logger.warning(f"Failed to render page images: {e}")
+                    return []
+                if sink is None:
+                    image_derivs.append(deriv)
+                else:
+                    sink(deriv)
+                    del deriv
+        finally:
+            pages.close()
+        return image_derivs
 
     async def _try_method(self, method: str, raw: RawContent) -> ExtractionResult:
         """Call a single extraction method by name.
@@ -571,7 +668,7 @@ class PDFExtractor(Extractor):
 
             with tempfile.TemporaryDirectory() as tmpdir:
                 for page_num in range(num_pages):
-                    # Create a single-page PDF via insert_pdf (same pattern as _split_pdf)
+                    # Create a single-page PDF via insert_pdf (same pattern as _pdf_page_range)
                     single = fitz.open()  # new empty PDF
                     try:
                         single.insert_pdf(src_doc, from_page=page_num, to_page=page_num)
@@ -699,24 +796,30 @@ class PDFExtractor(Extractor):
         )
 
     async def _extract_mistral(self, raw: RawContent) -> ExtractionResult:
-        """Orchestrate Mistral OCR — batching large PDFs automatically."""
+        """Orchestrate Mistral OCR — batching large PDFs automatically.
+
+        Batches are bounded by pages (``max_pages``) and by bytes
+        (``MISTRAL_MAX_FILE_BYTES``), and built one at a time.
+        """
+        from agentic.knowledge.model_config import MISTRAL_MAX_FILE_BYTES
+
         page_count = _count_pages(raw.content)
         logger.info(
-            f"Mistral OCR: {page_count} pages, batch size {self.max_pages}"
+            f"Mistral OCR: {page_count} pages, {len(raw.content)} bytes, "
+            f"batch size {self.max_pages}"
         )
 
-        if page_count <= self.max_pages:
+        if page_count <= self.max_pages and len(raw.content) <= MISTRAL_MAX_FILE_BYTES:
             # Fast path — single API call, render images directly
             return await self._extract_mistral_single(
                 raw.content, raw, page_offset=0, render_images=True
             )
 
         # Batch path — split PDF, process sequentially, combine
-        logger.info(
-            f"Splitting {page_count}-page PDF into batches of {self.max_pages}"
-        )
         try:
-            batches = _split_pdf(raw.content, self.max_pages)
+            ranges = _plan_pdf_batches(
+                raw.content, self.max_pages, MISTRAL_MAX_FILE_BYTES
+            )
         except ImportError:
             raise ExtractionError(
                 "PyMuPDF (fitz) is required for PDF splitting. "
@@ -724,22 +827,39 @@ class PDFExtractor(Extractor):
                 extractor_name=self.name,
                 source_uri=raw.source_uri,
             ) from None
-        logger.info(f"Created {len(batches)} batches")
+        except _BatchTooLarge as e:
+            # Deterministic: _try_method does not retry an ExtractionError, and
+            # the chain moves on without having uploaded anything.
+            raise ExtractionError(
+                f"Mistral OCR cannot take this document: page {e.page} alone is "
+                f"{e.size} bytes, above the {MISTRAL_MAX_FILE_BYTES}-byte upload limit",
+                extractor_name=self.name,
+                source_uri=raw.source_uri,
+            ) from None
+        logger.info(
+            f"Splitting {page_count}-page PDF into {len(ranges)} batches "
+            f"(at most {self.max_pages} pages and {MISTRAL_MAX_FILE_BYTES} bytes each)"
+        )
 
         batch_results: list[ExtractionResult] = []
-        for i, (batch_bytes, start_page, end_page) in enumerate(batches):
-            logger.info(
-                f"Processing batch {i + 1}/{len(batches)}: "
-                f"pages {start_page}-{end_page}"
-            )
-            # page_offset so page_text derivatives get correct 1-indexed numbers
-            result = await self._extract_mistral_single(
-                batch_bytes,
-                raw,
-                page_offset=start_page - 1,
-                render_images=False,
-            )
-            batch_results.append(result)
+        batches = _iter_pdf_batches(raw.content, ranges)
+        try:
+            for i, (batch_bytes, start_page, end_page) in enumerate(batches):
+                logger.info(
+                    f"Processing batch {i + 1}/{len(ranges)}: "
+                    f"pages {start_page}-{end_page}"
+                )
+                # page_offset so page_text derivatives get correct 1-indexed numbers
+                result = await self._extract_mistral_single(
+                    batch_bytes,
+                    raw,
+                    page_offset=start_page - 1,
+                    render_images=False,
+                )
+                del batch_bytes
+                batch_results.append(result)
+        finally:
+            batches.close()
 
         return self._combine_batch_results(batch_results, raw, page_count)
 
@@ -1049,16 +1169,23 @@ class PDFExtractor(Extractor):
             "Content-Type": "application/json",
         }
 
-        # Render pages once — reuse for both API calls and image derivatives
-        image_derivs = self._render_page_images(raw)
-        if not image_derivs:
-            raise ExtractionError(
-                "LightOnOCR requires PyMuPDF to render page images",
-                extractor_name=self.name,
-                source_uri=raw.source_uri,
-            )
-
-        logger.info("LightOnOCR: processing %d pages via %s", len(image_derivs), url)
+        sink = _page_image_sink(raw)
+        if sink is None:
+            # Render pages once — reuse for both API calls and image derivatives
+            image_derivs = self._render_page_images(raw)
+            if not image_derivs:
+                raise ExtractionError(
+                    "LightOnOCR requires PyMuPDF to render page images",
+                    extractor_name=self.name,
+                    source_uri=raw.source_uri,
+                )
+            logger.info("LightOnOCR: processing %d pages via %s", len(image_derivs), url)
+        else:
+            # Pages are rendered as request slots free up and handed to the
+            # sink once read, so a long scan holds a window of pages rather
+            # than the whole document (see _ocr_streamed below).
+            image_derivs = None
+            logger.info("LightOnOCR: streaming pages via %s", url)
 
         semaphore = asyncio.Semaphore(LIGHTON_MAX_CONCURRENCY)
         loop = asyncio.get_running_loop()
@@ -1271,6 +1398,85 @@ class PDFExtractor(Extractor):
                         source_uri=raw.source_uri,
                     ) from e
 
+        async def _ocr_streamed(executor) -> tuple[list, list]:
+            """OCR pages as they are rendered, handing each to the sink once read.
+
+            One worker per request slot, each holding at most one page: the
+            document's image footprint is a window of pages, not all of them.
+            Rendering and the sink each get a single thread, so the document is
+            never rendered concurrently and the sink is never called
+            concurrently. Workers stop taking pages once ``aborted`` is set,
+            which is also what stops the rendering.
+            """
+            nonlocal aborted
+            pages = self._iter_page_images(raw)
+            render_pool = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="lighton-render"
+            )
+            sink_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lighton-sink")
+            settled: list[tuple[int, object]] = []
+
+            async def _worker():
+                nonlocal aborted
+                while not aborted:
+                    try:
+                        img_deriv = await loop.run_in_executor(
+                            render_pool, next, pages, None
+                        )
+                    except ImportError:
+                        aborted = True
+                        settled.append((0, ExtractionError(
+                            "LightOnOCR requires PyMuPDF to render page images",
+                            extractor_name=self.name,
+                            source_uri=raw.source_uri,
+                        )))
+                        return
+                    except Exception as e:
+                        # A document PyMuPDF cannot render will not render on
+                        # a second pass either.
+                        aborted = True
+                        settled.append((0, ExtractionError(
+                            f"LightOnOCR could not render page images: "
+                            f"{type(e).__name__}: {e}",
+                            extractor_name=self.name,
+                            source_uri=raw.source_uri,
+                        )))
+                        return
+                    if img_deriv is None:
+                        return
+                    page = img_deriv.page
+                    try:
+                        outcome = await _ocr_page(executor, img_deriv)
+                        await loop.run_in_executor(sink_pool, sink, img_deriv)
+                    except Exception as e:
+                        # _ocr_page has already set the flag for its own
+                        # failures; a sink failure has to set it here.
+                        if not isinstance(e, _PageAborted):
+                            aborted = True
+                        outcome = e
+                    del img_deriv
+                    settled.append((page, outcome))
+
+            try:
+                await asyncio.gather(
+                    *(_worker() for _ in range(LIGHTON_MAX_CONCURRENCY))
+                )
+            finally:
+                # Queued behind any render still running on that thread, so
+                # the generator is never closed while it is executing.
+                render_pool.submit(pages.close)
+                render_pool.shutdown(wait=False)
+                sink_pool.shutdown(wait=False)
+
+            if not settled:
+                raise ExtractionError(
+                    "LightOnOCR requires PyMuPDF to render page images",
+                    extractor_name=self.name,
+                    source_uri=raw.source_uri,
+                )
+            settled.sort(key=lambda item: item[0])
+            return [p for p, _ in settled], [o for _, o in settled]
+
         # Sized to the semaphore, which is what the endpoint sees; a wider
         # pool would only hold work the semaphore has not admitted.
         executor = ThreadPoolExecutor(
@@ -1298,9 +1504,13 @@ class PDFExtractor(Extractor):
             # exception handler; the retry loop below still has one, which is
             # why the value it sleeps on is clamped where it is computed *and*
             # where it is used.
-            outcomes = await asyncio.gather(*(
-                _ocr_page(executor, d) for d in image_derivs
-            ), return_exceptions=True)
+            if image_derivs is None:
+                page_numbers, outcomes = await _ocr_streamed(executor)
+            else:
+                page_numbers = [d.page for d in image_derivs]
+                outcomes = await asyncio.gather(*(
+                    _ocr_page(executor, d) for d in image_derivs
+                ), return_exceptions=True)
         finally:
             # Every *task* has settled by here, but on an external
             # cancellation the threads those tasks were waiting on are still
@@ -1352,9 +1562,9 @@ class PDFExtractor(Extractor):
                 type="page_text",
                 content=page_md,
                 format="plain",
-                page=img_deriv.page,
+                page=page,
             )
-            for img_deriv, page_md in zip(image_derivs, page_markdowns, strict=True)
+            for page, page_md in zip(page_numbers, page_markdowns, strict=True)
         ]
 
         fulltext = "\n\n".join(page_markdowns)
@@ -1367,7 +1577,8 @@ class PDFExtractor(Extractor):
             ),
         ]
         derivatives.extend(page_text_derivs)
-        derivatives.extend(image_derivs)
+        if image_derivs is not None:
+            derivatives.extend(image_derivs)
 
         return ExtractionResult(
             source_uri=raw.source_uri,
