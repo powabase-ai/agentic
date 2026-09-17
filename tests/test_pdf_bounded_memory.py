@@ -815,3 +815,71 @@ class TestPartialPageImages:
 
         assert [d for d in result.derivatives if d.type == "image"] == []
         assert "page_images_incomplete" not in result.auto_metadata
+
+    @pytest.mark.asyncio
+    async def test_single_mistral_call_reports_a_partial_image_set(self):
+        page = MagicMock(markdown="text", images=[], index=0, dimensions=None)
+        client = MagicMock()
+        client.ocr.process.return_value = MagicMock(pages=[page])
+        extractor = PDFExtractor(mistral_api_key="m")
+        raw = _raw(_text_pdf(3), page_image_sink=lambda d: None)
+
+        with (
+            patch("mistralai.client.Mistral", return_value=client, create=True),
+            patch.object(extractor, "_iter_page_images", side_effect=_failing_after(1)),
+        ):
+            result = await extractor._extract_mistral_single(raw.content, raw)
+
+        assert result.auto_metadata["page_images_incomplete"] is True
+
+    @pytest.mark.asyncio
+    async def test_paddleocr_reports_a_partial_image_set(self):
+        response = MagicMock()
+        response.json.return_value = {
+            "result": {"layoutParsingResults": [{"markdown": {"text": "page"}}]}
+        }
+        extractor = PDFExtractor(paddleocr_api_key="p")
+        raw = _raw(_text_pdf(3), page_image_sink=lambda d: None)
+
+        with (
+            patch("requests.post", return_value=response),
+            patch.object(extractor, "_iter_page_images", side_effect=_failing_after(1)),
+        ):
+            result = await extractor._extract_paddleocr(raw)
+
+        assert result.auto_metadata["page_images_incomplete"] is True
+
+    @pytest.mark.asyncio
+    async def test_llamaparse_reports_a_partial_image_set(self):
+        extractor = PDFExtractor(llamaparse_api_key="l")
+        raw = _raw(_text_pdf(3), page_image_sink=lambda d: None)
+
+        with (
+            patch(
+                "agentic.ingest.extractor.llamaparse.parse_pages",
+                return_value=[{"markdown": "page", "page_number": 1}],
+            ),
+            patch.object(extractor, "_iter_page_images", side_effect=_failing_after(1)),
+        ):
+            result = await extractor._extract_llamaparse(raw)
+
+        assert result.auto_metadata["page_images_incomplete"] is True
+
+    def test_opendataloader_reports_a_partial_image_set(self):
+        import os
+        import sys
+
+        def convert(input_path, output_dir, format, quiet):
+            os.makedirs(output_dir, exist_ok=True)
+            with open(os.path.join(output_dir, "page.md"), "w") as f:
+                f.write("page")
+
+        extractor = PDFExtractor()
+        raw = _raw(_text_pdf(2), page_image_sink=lambda d: None)
+        with (
+            patch.dict(sys.modules, {"opendataloader_pdf": MagicMock(convert=convert)}),
+            patch.object(extractor, "_iter_page_images", side_effect=_failing_after(1)),
+        ):
+            result = extractor._extract_opendataloader(raw)
+
+        assert result.auto_metadata["page_images_incomplete"] is True
