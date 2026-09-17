@@ -19,6 +19,10 @@ jobs:
   test:
     name: pytest (Python 3.13)
     runs-on: ubuntu-latest
+    # A backstop behind the per-test timeout in pyproject.toml: the suite
+    # takes well under a minute, and a hang that escapes the per-test limit
+    # would otherwise hold a runner for GitHub's default of six hours.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
