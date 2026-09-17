@@ -15,6 +15,7 @@ import os
 import re
 import ssl
 import tempfile
+import threading
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 
@@ -282,9 +283,21 @@ def _iter_pdf_batches(data: bytes, ranges: list[tuple[int, int]]):
 
 
 def _page_image_sink(raw: RawContent):
-    """The host's page-image callback from ``raw.metadata``, if it passed one."""
+    """The host's page-image callback from ``raw.metadata``, if it passed one.
+
+    Raises:
+        TypeError: the host passed something that is not callable. Ignoring
+            it would quietly turn the memory bound off.
+    """
     sink = (raw.metadata or {}).get("page_image_sink")
-    return sink if callable(sink) else None
+    if sink is None:
+        return None
+    if not callable(sink):
+        raise TypeError(
+            f'raw.metadata["page_image_sink"] must be callable or None, '
+            f"not {type(sink).__name__}"
+        )
+    return sink
 
 
 class _PageImages(list):
@@ -405,11 +418,17 @@ class PDFExtractor(Extractor):
         it is rendered and is not retained, and the returned list is empty.
         A 1,500-page scan renders to gigabytes of PNG, so a host that stores
         page images should pass a sink rather than receive them all in the
-        ``ExtractionResult``. The sink is called once per page, never
-        concurrently, and possibly from a worker thread; pages arrive in
-        order here, but LightOnOCR delivers them as each page's OCR completes,
-        and a method that fails for another reason is followed by one that
-        delivers the same pages again.
+        ``ExtractionResult``.
+
+        Which thread calls it: the thread that called the extraction method
+        (the event loop's, under ``extract()``) for the local methods, Mistral,
+        PaddleOCR and LlamaParse; a single dedicated ``lighton-sink`` thread
+        for LightOnOCR, whose pages are delivered as each page's OCR
+        completes. Within one method's pass the sink is called once per page
+        and never concurrently. Pages arrive in order except under LightOnOCR.
+        A method that fails for a reason other than the sink is followed by
+        one that delivers the same pages again, so a sink should be keyed by
+        page. A value that is not callable raises ``TypeError``.
 
         An exception from the sink is raised as ``PageImageSinkError``, which
         ends the whole extraction: no method retries it and no further method
@@ -598,6 +617,10 @@ class PDFExtractor(Extractor):
             EXTRACTION_DEFAULT_METHOD,
             EXTRACTION_FALLBACK_CHAIN,
         )
+
+        # Checked before any method runs: a bad sink is the caller's error,
+        # not a failure for the retry loops or the fallback chain to absorb.
+        _page_image_sink(raw)
 
         preference = (raw.metadata or {}).get(
             "extraction_model", EXTRACTION_DEFAULT_METHOD
@@ -1475,6 +1498,20 @@ class PDFExtractor(Extractor):
             )
             sink_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lighton-sink")
             settled: list[tuple[int, object]] = []
+            # Set on the sink thread itself, the moment the sink raises. The
+            # abort flag is only set once that failure is back on the event
+            # loop, and by then another page's call can already be queued
+            # behind it on the sink thread.
+            sink_failed = threading.Event()
+
+            def _deliver(img_deriv):
+                if sink_failed.is_set():
+                    raise _PageAborted(img_deriv.page)
+                try:
+                    sink(img_deriv)
+                except BaseException:
+                    sink_failed.set()
+                    raise
 
             async def _worker():
                 nonlocal aborted
@@ -1524,13 +1561,21 @@ class PDFExtractor(Extractor):
                             settled.append((page, outcome))
                             continue
                         try:
-                            await loop.run_in_executor(sink_pool, sink, img_deriv)
+                            await loop.run_in_executor(sink_pool, _deliver, img_deriv)
+                        except _PageAborted as e:
+                            outcome = e
                         except Exception as e:
                             # Storage is failing, not OCR: stop sending pages
                             # now, since every one sent from here is paid for
                             # and cannot be stored.
                             aborted = True
                             outcome = PageImageSinkError(page, e)
+                        except BaseException:
+                            # Not ours to wrap, but the other request slots
+                            # must still stop taking pages before it unwinds
+                            # the extraction.
+                            aborted = True
+                            raise
                     del img_deriv
                     settled.append((page, outcome))
 

@@ -5,6 +5,7 @@ Extractors process raw content into derivatives (text, images, etc.)
 """
 
 import logging
+import pickle
 import re
 from abc import ABC, abstractmethod
 
@@ -155,7 +156,7 @@ class PageImageSinkError(Exception):
 
     def __init__(self, page: int | None, cause: BaseException):
         super().__init__(
-            f"page image sink failed on page {page}: {type(cause).__name__}: {cause}"
+            f"page image sink failed on page {page}: {_describe_exception(cause)}"
         )
         self.page = page
         self.cause = cause
@@ -165,7 +166,30 @@ class PageImageSinkError(Exception):
         # BaseException pickles as ``type(self)(*self.args)``, and args holds
         # only the message; rebuild from the constructor's own arguments so
         # the error survives a trip through a task queue or process pool.
-        return (type(self), (self.page, self.cause))
+        # The cause is the host's exception and may not survive that trip
+        # itself (a constructor taking other arguments, a lock); then it
+        # travels as text, so the error stays reportable.
+        cause = self.cause
+        try:
+            pickle.loads(pickle.dumps(cause))
+        except Exception:
+            cause = RuntimeError(_describe_exception(cause))
+        return (_rebuild_page_image_sink_error, (type(self), self.page, cause, self.args))
+
+
+def _describe_exception(exc: BaseException) -> str:
+    """``Type: message``, even for an exception whose ``__str__`` raises."""
+    try:
+        text = str(exc)
+    except Exception:
+        text = "<exception message could not be read>"
+    return f"{type(exc).__name__}: {text}"
+
+
+def _rebuild_page_image_sink_error(cls, page, cause, args):
+    error = cls(page, cause)
+    error.args = args
+    return error
 
 
 def replace_image_annotations(
