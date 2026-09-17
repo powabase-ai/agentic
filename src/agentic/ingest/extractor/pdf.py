@@ -1514,6 +1514,15 @@ class PDFExtractor(Extractor):
                             aborted = True
                         outcome = e
                     else:
+                        if aborted:
+                            # Another page has already failed the document —
+                            # possibly the sink itself. This page's OCR was on
+                            # the wire before that; its image is not stored,
+                            # since the extraction is not going to succeed.
+                            outcome = _PageAborted(page)
+                            del img_deriv
+                            settled.append((page, outcome))
+                            continue
                         try:
                             await loop.run_in_executor(sink_pool, sink, img_deriv)
                         except Exception as e:
@@ -1536,8 +1545,11 @@ class PDFExtractor(Extractor):
                 # method in the chain opens the document on this thread, and
                 # must not do so while this one is still closing its copy. On
                 # a normal exit every worker has already collected its render,
-                # so this waits only for the close; on a cancellation it can
-                # also wait out the one page being rendered.
+                # so this waits only for the close. On a cancellation it also
+                # waits out the one page being rendered, and it does so
+                # synchronously: the event loop is blocked for up to one page
+                # render (a few seconds for a large scanned page). Accepted,
+                # because the alternative is PyMuPDF on two threads at once.
                 render_pool.submit(pages.close)
                 render_pool.shutdown(wait=True)
                 # Not waited for: on a normal exit every sink call has been

@@ -161,6 +161,12 @@ class PageImageSinkError(Exception):
         self.cause = cause
         self.__cause__ = cause
 
+    def __reduce__(self):
+        # BaseException pickles as ``type(self)(*self.args)``, and args holds
+        # only the message; rebuild from the constructor's own arguments so
+        # the error survives a trip through a task queue or process pool.
+        return (type(self), (self.page, self.cause))
+
 
 def replace_image_annotations(
     markdown: str,
