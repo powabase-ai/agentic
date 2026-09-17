@@ -15,9 +15,11 @@ footprint near one page instead:
 
 import base64
 import io
+import pickle
 import threading
 import time
-from unittest.mock import MagicMock, patch
+import types
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import fitz
 import numpy as np
@@ -546,15 +548,72 @@ class TestSinkFailureAbortsExtraction:
             lighton_api_key="k", mistral_api_key="m", paddleocr_api_key="p"
         )
         failure = PageImageSinkError(1, RuntimeError("storage down"))
+        sleep = AsyncMock()
+        # Only the module under test sees the stub; the event loop and every
+        # other asyncio user keep the real sleep.
         with (
             patch.object(extractor, f"_extract_{method}", side_effect=failure) as run,
-            patch("asyncio.sleep") as sleep,
+            patch.object(pdf_module, "asyncio", types.SimpleNamespace(sleep=sleep)),
         ):
             with pytest.raises(PageImageSinkError):
                 await extractor._try_method(method, _raw(b"%PDF-fake"))
 
         assert run.call_count == 1
         sleep.assert_not_called()
+
+
+    def test_sink_error_survives_pickling(self):
+        """Task queues pickle exceptions to report them across processes."""
+        cause = RuntimeError("storage down")
+        error = PageImageSinkError(7, cause)
+
+        restored = pickle.loads(pickle.dumps(error))
+
+        assert type(restored) is PageImageSinkError
+        assert restored.page == 7
+        assert isinstance(restored.cause, RuntimeError)
+        assert str(restored.cause) == "storage down"
+        assert restored.__cause__ is restored.cause
+        assert str(restored) == str(error)
+
+    @pytest.mark.asyncio
+    async def test_sink_is_not_called_again_once_a_sink_call_has_failed(self):
+        """Pages already on the wire when the sink fails still finish OCR, but
+        are not handed to a sink that is known to be failing. The sink here
+        does not short-circuit itself, as a host's sink need not."""
+        concurrency = 4
+        in_flight = threading.Barrier(concurrency, timeout=10)
+        sink_failed = threading.Event()
+        sink_calls = []
+
+        def post(url, json=None, **kwargs):
+            page = _page_of(json)
+            in_flight.wait()
+            if page != 1:
+                sink_failed.wait(timeout=10)
+                # Let the event loop record the failure before this page's
+                # OCR completes.
+                time.sleep(0.2)
+            return _ok_response(f"text of page {page}")
+
+        def sink(d):
+            sink_calls.append(d.page)
+            sink_failed.set()
+            raise RuntimeError("storage down")
+
+        extractor = PDFExtractor(lighton_api_key="k")
+        raw = _raw(b"%PDF-fake", page_image_sink=sink)
+        with (
+            patch("agentic.knowledge.model_config.LIGHTON_MAX_CONCURRENCY", concurrency),
+            patch.object(
+                extractor, "_iter_page_images", side_effect=_fake_pages(concurrency)
+            ),
+            patch("requests.post", side_effect=post),
+        ):
+            with pytest.raises(PageImageSinkError):
+                await extractor._extract_lighton(raw)
+
+        assert sink_calls == [1]
 
 
 class TestLightOnStreamingOrder:
@@ -833,6 +892,19 @@ class TestPartialPageImages:
 
         result = getattr(PDFExtractor(), f"_extract_{method}")(raw)
 
+        assert "page_images_incomplete" not in result.auto_metadata
+
+    def test_render_failure_before_any_page_reached_the_sink_carries_no_flag(self):
+        """Nothing was stored, so there is no partial set to report: the same
+        "no images" outcome as without a sink."""
+        extractor = PDFExtractor()
+        received = []
+        raw = _raw(_text_pdf(3), page_image_sink=received.append)
+
+        with patch.object(extractor, "_iter_page_images", side_effect=_failing_after(0)):
+            result = extractor._extract_fitz(raw)
+
+        assert received == []
         assert "page_images_incomplete" not in result.auto_metadata
 
     def test_render_failure_without_a_sink_degrades_to_no_images_as_before(self):
