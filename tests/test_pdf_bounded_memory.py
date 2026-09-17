@@ -13,13 +13,15 @@ footprint near one page instead:
   before any upload.
 """
 
+import asyncio
 import base64
+import gc
 import io
 import pickle
 import threading
 import time
-import types
-from unittest.mock import AsyncMock, MagicMock, patch
+import weakref
+from unittest.mock import MagicMock, patch
 
 import fitz
 import numpy as np
@@ -548,19 +550,140 @@ class TestSinkFailureAbortsExtraction:
             lighton_api_key="k", mistral_api_key="m", paddleocr_api_key="p"
         )
         failure = PageImageSinkError(1, RuntimeError("storage down"))
-        sleep = AsyncMock()
-        # Only the module under test sees the stub; the event loop and every
-        # other asyncio user keep the real sleep.
-        with (
-            patch.object(extractor, f"_extract_{method}", side_effect=failure) as run,
-            patch.object(pdf_module, "asyncio", types.SimpleNamespace(sleep=sleep)),
-        ):
+        # No sleep stub: a retry backs off for at least a second before its
+        # second attempt, so a retried sink failure shows up as a timeout here
+        # as well as in the call count.
+        with patch.object(
+            extractor, f"_extract_{method}", side_effect=failure
+        ) as run:
             with pytest.raises(PageImageSinkError):
-                await extractor._try_method(method, _raw(b"%PDF-fake"))
+                await asyncio.wait_for(
+                    extractor._try_method(method, _raw(b"%PDF-fake")), timeout=0.5
+                )
 
         assert run.call_count == 1
-        sleep.assert_not_called()
 
+
+    def test_sink_error_pickles_a_cause_that_cannot_be_pickled_as_text(self):
+        """A cause with a multi-argument constructor fails to unpickle, and one
+        holding a lock fails to pickle. Neither may make the sink error itself
+        unreportable."""
+
+        class NeedsTwoArgs(Exception):
+            def __init__(self, bucket, key):
+                super().__init__(f"{bucket}/{key} refused")
+
+        class HoldsALock(Exception):
+            def __init__(self):
+                super().__init__("storage down")
+                self.lock = threading.Lock()
+
+        for cause in (NeedsTwoArgs("bucket", "key"), HoldsALock()):
+            error = PageImageSinkError(3, cause)
+
+            restored = pickle.loads(pickle.dumps(error))
+
+            assert type(restored) is PageImageSinkError
+            assert restored.page == 3
+            assert str(restored) == str(error)
+            assert type(cause).__name__ in str(restored.cause)
+            assert str(cause) in str(restored.cause)
+            assert restored.__cause__ is restored.cause
+
+    def test_sink_error_message_survives_a_cause_that_cannot_be_printed(self):
+        class Unprintable(Exception):
+            def __str__(self):
+                raise ValueError("no")
+
+        cause = Unprintable()
+
+        error = PageImageSinkError(2, cause)
+
+        assert error.cause is cause
+        assert error.__cause__ is cause
+        assert "page 2" in str(error)
+        assert "Unprintable" in str(error)
+
+    @pytest.mark.parametrize("sink", ["not callable", 42])
+    @pytest.mark.asyncio
+    async def test_a_sink_that_is_not_callable_is_refused(self, sink):
+        """Silently ignoring it would turn the memory bound off with no sign."""
+        extractor = PDFExtractor()
+        raw = _raw(_text_pdf(2), extraction_model="fitz", page_image_sink=sink)
+
+        with pytest.raises(TypeError, match="page_image_sink"):
+            await extractor.extract(raw)
+        with pytest.raises(TypeError, match="page_image_sink"):
+            extractor._render_page_images(raw)
+
+    def test_a_sink_of_none_means_no_sink(self):
+        images = PDFExtractor()._render_page_images(
+            _raw(_text_pdf(2), page_image_sink=None)
+        )
+
+        assert [d.page for d in images] == [1, 2]
+
+    def test_renderer_is_closed_when_the_sink_fails(self):
+        """Not left to the garbage collector: the traceback keeps the frame,
+        and with it an open PyMuPDF document, alive for as long as the caller
+        holds the error."""
+        extractor = PDFExtractor()
+        closed = []
+
+        def fake_iter(raw, dpi=150):
+            try:
+                yield from _fake_pages(5)(raw, dpi)
+            finally:
+                closed.append(True)
+
+        def sink(d):
+            raise RuntimeError("storage down")
+
+        with patch.object(extractor, "_iter_page_images", side_effect=fake_iter):
+            with pytest.raises(PageImageSinkError) as excinfo:
+                extractor._render_page_images(_raw(b"%PDF-fake", page_image_sink=sink))
+
+        assert excinfo.value.page == 1
+        assert closed == [True]
+
+    @pytest.mark.asyncio
+    async def test_a_base_exception_from_the_sink_stops_the_other_workers(self):
+        """Not an Exception, so not a PageImageSinkError, but the other request
+        slots must still stop taking pages rather than run on against a sink
+        that is gone."""
+
+        class Interrupted(BaseException):
+            pass
+
+        concurrency, total = 2, 20
+        sink_calls = []
+        posts = []
+
+        def post(url, json=None, **kwargs):
+            posts.append(_page_of(json))
+            time.sleep(0.05)
+            return _ok_response("ocr")
+
+        def sink(d):
+            sink_calls.append(d.page)
+            raise Interrupted()
+
+        extractor = PDFExtractor(lighton_api_key="k")
+        raw = _raw(b"%PDF-fake", page_image_sink=sink)
+        with (
+            patch("agentic.knowledge.model_config.LIGHTON_MAX_CONCURRENCY", concurrency),
+            patch.object(extractor, "_iter_page_images", side_effect=_fake_pages(total)),
+            patch("requests.post", side_effect=post),
+        ):
+            with pytest.raises(Interrupted):
+                await extractor._extract_lighton(raw)
+            posts_at_raise = len(posts)
+            # Give any worker still running the chance to take another page.
+            await asyncio.sleep(0.5)
+
+        assert len(sink_calls) == 1
+        assert len(posts) == posts_at_raise
+        assert posts_at_raise <= concurrency
 
     def test_sink_error_survives_pickling(self):
         """Task queues pickle exceptions to report them across processes."""
@@ -983,3 +1106,166 @@ class TestPartialPageImages:
             result = extractor._extract_opendataloader(raw)
 
         assert result.auto_metadata["page_images_incomplete"] is True
+
+
+class TestDeliveredImagesAreReleased:
+    """With a sink, a page image the sink has taken must not stay reachable
+    from the extractor. A regression here holds every page of a long scan
+    again while every other test stays green."""
+
+    def test_local_render_holds_no_page_the_sink_has_already_taken(self):
+        extractor = PDFExtractor()
+        delivered = []
+        alive_at_each_delivery = []
+
+        def sink(d):
+            gc.collect()
+            alive_at_each_delivery.append(sum(ref() is not None for ref in delivered))
+            delivered.append(weakref.ref(d))
+
+        raw = _raw(_text_pdf(6), page_image_sink=sink)
+        extractor._extract_fitz(raw)
+        gc.collect()
+
+        assert alive_at_each_delivery == [0] * 6
+        assert sum(ref() is not None for ref in delivered) == 0
+
+    @pytest.mark.asyncio
+    async def test_streamed_lighton_holds_at_most_a_window_of_taken_pages(self):
+        from agentic.knowledge.model_config import LIGHTON_MAX_CONCURRENCY
+
+        # More pages than two windows, so retaining taken pages cannot hide
+        # inside the bound.
+        total = LIGHTON_MAX_CONCURRENCY * 2 + 3
+        lock = threading.Lock()
+        delivered = []
+        peak_alive = 0
+
+        def sink(d):
+            nonlocal peak_alive
+            with lock:
+                gc.collect()
+                alive = sum(ref() is not None for ref in delivered)
+                peak_alive = max(peak_alive, alive)
+                delivered.append(weakref.ref(d))
+
+        def post(*a, **k):
+            time.sleep(0.005)
+            return _ok_response("ocr")
+
+        extractor = PDFExtractor(lighton_api_key="k")
+        raw = _raw(b"%PDF-fake", page_image_sink=sink)
+        with (
+            patch.object(extractor, "_iter_page_images", side_effect=_fake_pages(total)),
+            patch("requests.post", side_effect=post),
+        ):
+            await extractor._extract_lighton(raw)
+        gc.collect()
+
+        assert len(delivered) == total
+        assert peak_alive <= LIGHTON_MAX_CONCURRENCY, peak_alive
+        assert sum(ref() is not None for ref in delivered) == 0
+
+    def test_pages_are_rendered_one_at_a_time_and_pixmaps_are_freed(self):
+        """At page N's delivery exactly N pixmaps have been made — rendering is
+        lazy — and none of them is still alive: the raw pixmap, several times
+        the PNG, is not kept."""
+        extractor = PDFExtractor()
+        real_get_pixmap = fitz.Page.get_pixmap
+        pixmaps = []
+        seen = []
+
+        def counting_get_pixmap(page, *args, **kwargs):
+            pix = real_get_pixmap(page, *args, **kwargs)
+            pixmaps.append(weakref.ref(pix))
+            return pix
+
+        def sink(d):
+            gc.collect()
+            seen.append((d.page, len(pixmaps), sum(r() is not None for r in pixmaps)))
+
+        with patch.object(fitz.Page, "get_pixmap", counting_get_pixmap):
+            extractor._render_page_images(_raw(_text_pdf(5), page_image_sink=sink))
+
+        assert seen == [(n, n, 0) for n in range(1, 6)]
+
+
+class TestSinkThreadContract:
+    """The sink is called from one thread at a time within a pass: the
+    caller's thread for the local methods, and a single dedicated thread for
+    streamed LightOn, never the event loop's."""
+
+    @pytest.mark.asyncio
+    async def test_streamed_lighton_calls_the_sink_on_one_thread_off_the_loop(self):
+        concurrency, total = 4, 16
+        lock = threading.Lock()
+        threads = set()
+        active = 0
+        peak_active = 0
+        loop_thread = threading.get_ident()
+
+        def sink(d):
+            nonlocal active, peak_active
+            with lock:
+                threads.add((threading.get_ident(), threading.current_thread().name))
+                active += 1
+                peak_active = max(peak_active, active)
+            time.sleep(0.01)
+            with lock:
+                active -= 1
+
+        extractor = PDFExtractor(lighton_api_key="k")
+        raw = _raw(b"%PDF-fake", page_image_sink=sink)
+        with (
+            patch("agentic.knowledge.model_config.LIGHTON_MAX_CONCURRENCY", concurrency),
+            patch.object(extractor, "_iter_page_images", side_effect=_fake_pages(total)),
+            patch("requests.post", side_effect=lambda *a, **k: _ok_response("ocr")),
+        ):
+            await extractor._extract_lighton(raw)
+
+        assert peak_active == 1
+        assert len(threads) == 1
+        (ident, name), = threads
+        assert ident != loop_thread
+        assert name.startswith("lighton-sink")
+
+    def test_local_methods_call_the_sink_on_the_callers_thread(self):
+        threads = set()
+        raw = _raw(
+            _text_pdf(3),
+            page_image_sink=lambda d: threads.add(threading.get_ident()),
+        )
+
+        PDFExtractor()._extract_fitz(raw)
+
+        assert threads == {threading.get_ident()}
+
+
+class TestMistralPlanningBounds:
+    def test_page_cap_still_applies_when_the_byte_cap_sizes_batches(self):
+        data = _text_pdf(12)
+
+        ranges = pdf_module._plan_pdf_batches(data, max_pages=4, max_bytes=len(data) - 1)
+
+        assert all(end - start + 1 <= 4 for start, end in ranges), ranges
+        assert ranges[0][0] == 0 and ranges[-1][1] == 11
+
+    def test_planning_starts_from_the_average_page_not_the_whole_document(self):
+        """Without a first guess from the average page size, planning builds
+        the whole document once before halving: a second copy of a 365 MB
+        source."""
+        data = _scan_pdf(12)
+        limit = len(data) // 3
+        real_range = pdf_module._pdf_page_range
+        built = []
+
+        def recording(src, start, end):
+            out = real_range(src, start, end)
+            built.append(len(out))
+            return out
+
+        with patch.object(pdf_module, "_pdf_page_range", side_effect=recording):
+            pdf_module._plan_pdf_batches(data, max_pages=1000, max_bytes=limit)
+
+        assert built
+        assert max(built) <= 2 * limit, (max(built), limit)
