@@ -495,7 +495,9 @@ class TestSinkFailureAbortsExtraction:
         extractor = PDFExtractor(mistral_api_key="m")
         raw = _raw(_text_pdf(1), extraction_model="mistral", page_image_sink=sink)
         with (
-            patch("mistralai.client.Mistral", return_value=client),
+            # create=True: whether mistralai.client exports Mistral depends on
+            # the installed mistralai major version.
+            patch("mistralai.client.Mistral", return_value=client, create=True),
             patch.object(extractor, "_extract_opendataloader") as opendataloader,
             patch.object(extractor, "_extract_fitz") as fitz_method,
             patch.object(extractor, "_extract_pdfplumber") as pdfplumber,
