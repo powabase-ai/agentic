@@ -27,7 +27,7 @@ Example:
     >>> registry.register(MyCustomExtractor())
 """
 
-from agentic.ingest.extractor.base import ExtractionError, Extractor
+from agentic.ingest.extractor.base import ExtractionError, Extractor, PageImageSinkError
 from agentic.ingest.extractor.docx import DocxExtractor
 from agentic.ingest.extractor.html import HTMLExtractor
 from agentic.ingest.extractor.image import ImageExtractor
@@ -41,6 +41,7 @@ from agentic.ingest.extractor.xlsx import XlsxExtractor
 __all__ = [
     "Extractor",
     "ExtractionError",
+    "PageImageSinkError",
     "ExtractorRegistry",
     # Built-in extractors
     "TextExtractor",

@@ -49,8 +49,21 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "pytest-mock>=3.14.0",
+    "pytest-timeout>=2.3.0",
     "ruff>=0.8.0",
 ]
+
+[tool.pytest.ini_options]
+# The whole suite runs in well under a minute. A test that takes longer than
+# this has hung — typically a streaming worker that never exits — and failing
+# it here names the test, where a CI job would otherwise wait out its limit.
+timeout = 60
+# "thread", not the default "signal": a hung streaming test is blocked in an
+# event loop whose worker threads never finish, and the signal method was
+# observed not to interrupt it once the rest of the suite had run first. The
+# thread method dumps every thread's stack and ends the run, which fails the
+# job within a minute and shows where it was stuck.
+timeout_method = "thread"
 
 [build-system]
 requires = ["hatchling"]

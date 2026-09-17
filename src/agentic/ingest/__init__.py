@@ -36,6 +36,7 @@ from agentic.ingest.extractor import (
     ExtractorRegistry,
     HTMLExtractor,
     ImageExtractor,
+    PageImageSinkError,
     PDFExtractor,
     PptxExtractor,
     TextExtractor,
@@ -55,6 +56,7 @@ __all__ = [
     # Extractors
     "Extractor",
     "ExtractionError",
+    "PageImageSinkError",
     "ExtractorRegistry",
     "TextExtractor",
     "HTMLExtractor",

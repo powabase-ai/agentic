@@ -5,6 +5,7 @@ Extractors process raw content into derivatives (text, images, etc.)
 """
 
 import logging
+import pickle
 import re
 from abc import ABC, abstractmethod
 
@@ -133,6 +134,62 @@ class ExtractionError(Exception):
         if self.source_uri:
             parts.append(f"source={self.source_uri}")
         return " | ".join(parts)
+
+
+class PageImageSinkError(Exception):
+    """The host's page-image sink raised while taking a rendered page.
+
+    Raised by an extractor that was given ``raw.metadata["page_image_sink"]``
+    when that callable fails. It ends the whole extraction: the extractor does
+    not retry the method or move on to another one, because every method
+    delivers its pages to the same sink and an OCR method pays for every page
+    it sends first. Whether to try again is the caller's decision.
+
+    Deliberately not an ``ExtractionError``, which callers may treat as a
+    permanent verdict on the document: a sink that cannot store a page is
+    usually a storage outage, not a bad document.
+
+    Attributes:
+        page: 1-indexed page the sink was given when it failed
+        cause: the exception the sink raised (also ``__cause__``)
+    """
+
+    def __init__(self, page: int | None, cause: BaseException):
+        super().__init__(
+            f"page image sink failed on page {page}: {_describe_exception(cause)}"
+        )
+        self.page = page
+        self.cause = cause
+        self.__cause__ = cause
+
+    def __reduce__(self):
+        # BaseException pickles as ``type(self)(*self.args)``, and args holds
+        # only the message; rebuild from the constructor's own arguments so
+        # the error survives a trip through a task queue or process pool.
+        # The cause is the host's exception and may not survive that trip
+        # itself (a constructor taking other arguments, a lock); then it
+        # travels as text, so the error stays reportable.
+        cause = self.cause
+        try:
+            pickle.loads(pickle.dumps(cause))
+        except Exception:
+            cause = RuntimeError(_describe_exception(cause))
+        return (_rebuild_page_image_sink_error, (type(self), self.page, cause, self.args))
+
+
+def _describe_exception(exc: BaseException) -> str:
+    """``Type: message``, even for an exception whose ``__str__`` raises."""
+    try:
+        text = str(exc)
+    except Exception:
+        text = "<exception message could not be read>"
+    return f"{type(exc).__name__}: {text}"
+
+
+def _rebuild_page_image_sink_error(cls, page, cause, args):
+    error = cls(page, cause)
+    error.args = args
+    return error
 
 
 def replace_image_annotations(
