@@ -302,8 +302,11 @@ class TestMistralFileLimit:
         data = _scan_pdf(2)
         extractor = PDFExtractor(mistral_api_key="m")
 
+        guarded, _ = _guarded_page_range(limit_calls=20)
+
         with (
             patch("agentic.knowledge.model_config.MISTRAL_MAX_FILE_BYTES", 1000),
+            patch.object(pdf_module, "_pdf_page_range", side_effect=guarded),
             patch.object(extractor, "_extract_mistral_single") as single,
         ):
             with pytest.raises(ExtractionError, match="upload limit"):
@@ -481,6 +484,31 @@ class TestSinkFailureAbortsExtraction:
             with pytest.raises(PageImageSinkError):
                 await extractor.extract(raw)
 
+        pdfplumber.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sink_failure_in_a_local_fallback_ends_the_fallbacks(self):
+        """The requested OCR method failed for its own reason; the first local
+        fallback then cannot store a page. The later fallbacks would store to
+        the same sink, so none of them runs."""
+        extractor = PDFExtractor(lighton_api_key="k")
+        raw = _raw(b"%PDF-fake", extraction_model="lighton")
+        sink_failure = PageImageSinkError(1, RuntimeError("storage down"))
+        with (
+            patch.object(
+                extractor, "_extract_lighton", side_effect=ExtractionError("refused")
+            ),
+            patch.object(
+                extractor, "_extract_opendataloader", side_effect=sink_failure
+            ),
+            patch.object(extractor, "_extract_fitz") as fitz_method,
+            patch.object(extractor, "_extract_pdfplumber") as pdfplumber,
+        ):
+            with pytest.raises(PageImageSinkError) as excinfo:
+                await extractor.extract(raw)
+
+        assert excinfo.value is sink_failure
+        fitz_method.assert_not_called()
         pdfplumber.assert_not_called()
 
     @pytest.mark.asyncio
