@@ -605,14 +605,26 @@ class TestSinkFailureAbortsExtraction:
         assert "Unprintable" in str(error)
 
     @pytest.mark.parametrize("sink", ["not callable", 42])
+    @pytest.mark.parametrize("model", ["auto", "lighton", "fitz"])
     @pytest.mark.asyncio
-    async def test_a_sink_that_is_not_callable_is_refused(self, sink):
-        """Silently ignoring it would turn the memory bound off with no sign."""
-        extractor = PDFExtractor()
-        raw = _raw(_text_pdf(2), extraction_model="fitz", page_image_sink=sink)
+    async def test_a_sink_that_is_not_callable_is_refused(self, sink, model):
+        """Silently ignoring it would turn the memory bound off with no sign.
+        It is the caller's error, so it is raised at once: not retried by a
+        method's retry loop, and not absorbed by the fallback chain."""
+        extractor = PDFExtractor(lighton_api_key="k", mistral_api_key="m")
+        raw = _raw(_text_pdf(2), extraction_model=model, page_image_sink=sink)
 
-        with pytest.raises(TypeError, match="page_image_sink"):
-            await extractor.extract(raw)
+        with (
+            patch.object(extractor, "_extract_lighton") as lighton,
+            patch.object(extractor, "_extract_mistral") as mistral,
+            patch.object(extractor, "_extract_opendataloader") as opendataloader,
+        ):
+            with pytest.raises(TypeError, match="page_image_sink"):
+                await asyncio.wait_for(extractor.extract(raw), timeout=0.5)
+
+        lighton.assert_not_called()
+        mistral.assert_not_called()
+        opendataloader.assert_not_called()
         with pytest.raises(TypeError, match="page_image_sink"):
             extractor._render_page_images(raw)
 
@@ -684,6 +696,82 @@ class TestSinkFailureAbortsExtraction:
         assert len(sink_calls) == 1
         assert len(posts) == posts_at_raise
         assert posts_at_raise <= concurrency
+
+    @pytest.mark.asyncio
+    async def test_a_base_exception_from_the_sink_leaves_no_worker_running(self):
+        """The slot that was mid-render when the sink raised must not carry on
+        into another request after the extraction has already unwound."""
+
+        class Interrupted(BaseException):
+            pass
+
+        def fake_iter(raw, dpi=150):
+            for page in range(1, 11):
+                if page == 3:
+                    # Still rendering when page 1's sink call raises.
+                    time.sleep(0.3)
+                yield Derivative(
+                    type="image", content=f"page-{page}".encode(), format="png", page=page
+                )
+
+        def sink(d):
+            if d.page == 1:
+                time.sleep(0.05)
+                raise Interrupted()
+
+        extractor = PDFExtractor(lighton_api_key="k")
+        raw = _raw(b"%PDF-fake", page_image_sink=sink)
+        with (
+            patch("agentic.knowledge.model_config.LIGHTON_MAX_CONCURRENCY", 2),
+            patch.object(extractor, "_iter_page_images", side_effect=fake_iter),
+            patch("requests.post", side_effect=lambda *a, **k: _ok_response("ocr")),
+        ):
+            with pytest.raises(Interrupted):
+                await extractor._extract_lighton(raw)
+            await asyncio.sleep(0.2)
+            lingering = [
+                t
+                for t in asyncio.all_tasks()
+                if t is not asyncio.current_task() and not t.done()
+            ]
+
+        assert lingering == []
+
+    @pytest.mark.asyncio
+    async def test_a_page_refusal_keeps_pages_already_in_flight_from_the_sink(self):
+        """The abort need not come from the sink: once any page has failed the
+        document, pages whose OCR was already on the wire are not stored."""
+        import requests
+
+        concurrency = 4
+        in_flight = threading.Barrier(concurrency, timeout=10)
+        stored = []
+
+        def post(url, json=None, **kwargs):
+            page = _page_of(json)
+            in_flight.wait()
+            if page == 1:
+                response = requests.Response()
+                response.status_code = 400
+                response._content = b"bad page"
+                raise requests.HTTPError("400", response=response)
+            # Let the event loop record page 1's refusal first.
+            time.sleep(0.3)
+            return _ok_response("ocr")
+
+        extractor = PDFExtractor(lighton_api_key="k")
+        raw = _raw(b"%PDF-fake", page_image_sink=lambda d: stored.append(d.page))
+        with (
+            patch("agentic.knowledge.model_config.LIGHTON_MAX_CONCURRENCY", concurrency),
+            patch.object(
+                extractor, "_iter_page_images", side_effect=_fake_pages(concurrency)
+            ),
+            patch("requests.post", side_effect=post),
+        ):
+            with pytest.raises(ExtractionError, match="rejected page 1"):
+                await extractor._extract_lighton(raw)
+
+        assert stored == []
 
     def test_sink_error_survives_pickling(self):
         """Task queues pickle exceptions to report them across processes."""
