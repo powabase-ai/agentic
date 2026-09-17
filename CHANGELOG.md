@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/powabase-ai/agentic/compare/v0.3.1...v0.4.0) (2026-09-17)
+
+
+### Features
+
+* **ingest:** bound PDF extraction memory for hosts that stream page images to a sink ([#30](https://github.com/powabase-ai/agentic/issues/30)) ([1baaf39](https://github.com/powabase-ai/agentic/commit/1baaf39380d49837f9c0d7ebaa5160558abb63c2))
+
+
+### Performance Improvements
+
+* **ingest:** issue LightOnOCR page requests concurrently ([#28](https://github.com/powabase-ai/agentic/issues/28)) ([9126537](https://github.com/powabase-ai/agentic/commit/9126537b34eed4cb56452093ade095f81ad0f02f))
+
 ## [0.3.1](https://github.com/powabase-ai/agentic/compare/v0.3.0...v0.3.1) (2026-08-12)
 
 
