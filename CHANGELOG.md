@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/powabase-ai/agentic/compare/v0.4.0...v0.5.0) (2026-09-21)
+
+
+### Features
+
+* **agent:** set Anthropic prompt-cache breakpoints on the agent loop ([#31](https://github.com/powabase-ai/agentic/issues/31)) ([5982cc5](https://github.com/powabase-ai/agentic/commit/5982cc59817de4addfe758893e6bd2cbbf7191db))
+
 ## [0.4.0](https://github.com/powabase-ai/agentic/compare/v0.3.1...v0.4.0) (2026-09-17)
 
 
