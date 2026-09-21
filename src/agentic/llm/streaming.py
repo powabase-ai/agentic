@@ -351,10 +351,12 @@ def accumulate_stream(
 def _extract_usage(chunk_usage: Any) -> dict:
     """Normalize the usage chunk's shape to a plain dict.
 
-    Mirrors Agent._extract_usage in agent.py: captures `reasoning_tokens` and
-    `cached_tokens` from their nested details objects so the streaming path
-    surfaces them for reasoning-capable models. Without this, streaming runs
-    persisted `reasoning_tokens=0` even when the model clearly used reasoning.
+    Mirrors Agent._extract_usage in agent.py: captures `reasoning_tokens`,
+    `cached_tokens` and `cache_creation_tokens` (prompt-cache writes, reported
+    only where the cache needs explicit breakpoints) from their nested details
+    objects so the streaming path surfaces them for reasoning-capable models.
+    Without this, streaming runs persisted `reasoning_tokens=0` even when the
+    model clearly used reasoning.
     Naming variation across APIs:
       - Chat Completions:  completion_tokens_details.reasoning_tokens,
                            prompt_tokens_details.cached_tokens
@@ -395,6 +397,11 @@ def _extract_usage(chunk_usage: Any) -> dict:
         cached = _get(details, "cached_tokens")
         if cached is not None:
             out["cached_tokens"] = cached
+            break
+    for details_key in ("prompt_tokens_details", "input_tokens_details"):
+        written = _get(_get(chunk_usage, details_key), "cache_creation_tokens")
+        if written is not None:
+            out["cache_creation_tokens"] = written
             break
 
     return out

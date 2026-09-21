@@ -16,7 +16,7 @@ from typing import Any
 
 import litellm
 
-from agentic.agent.cache import sort_tools_for_cache
+from agentic.agent.cache import add_cache_breakpoints, sort_tools_for_cache
 from agentic.agent.compaction import (
     compact_messages,
     estimate_token_count,
@@ -393,11 +393,14 @@ class Agent:
             # report them and the host aggregates the full breakdown.
             # Limiting this dict to the standard 3 keys silently drops
             # reasoning info from multi-step ReAct loops.
+            # cache_creation_tokens: prompt-cache writes, which providers with
+            # explicit breakpoints bill above the normal input rate.
             total_usage: dict[str, int] = {
                 "prompt_tokens": 0,
                 "completion_tokens": 0,
                 "reasoning_tokens": 0,
                 "cached_tokens": 0,
+                "cache_creation_tokens": 0,
                 "total_tokens": 0,
             }
             # For doom loop detection: list of (tool_name, arguments_str) tuples
@@ -548,6 +551,20 @@ class Agent:
                 call_kwargs.update(
                     reasoning_call_kwargs(effective_effort, routed_model)
                 )
+
+                # Claude caches only up to explicit breakpoints. They go on
+                # copies for this request: `normalized` and state.messages
+                # stay unmarked, or the markers would pile up step by step.
+                # A last step that withholds the agent's tools is skipped: tools
+                # open the cached prefix, so it can match no earlier entry, and
+                # the loop ends after it, so nothing would read what it wrote.
+                if step_tools or not tool_schemas:
+                    cached_messages, cached_tools = add_cache_breakpoints(
+                        routed_model, normalized, step_tools
+                    )
+                    call_kwargs["messages"] = cached_messages
+                    if cached_tools:
+                        call_kwargs["tools"] = cached_tools
 
                 # Streaming flag: read per-call, not module-level, so
                 # monkeypatch.setenv works in tests.
@@ -1773,12 +1790,18 @@ class Agent:
                 break
 
         # Prompt cache details — Chat Completions = prompt_tokens_details,
-        # Responses API = input_tokens_details.
+        # Responses API = input_tokens_details. cache_creation_tokens (cache
+        # writes) is reported only by providers with explicit breakpoints.
         for details_key in ("prompt_tokens_details", "input_tokens_details"):
             details = _get(usage_obj, details_key)
             cached = _get(details, "cached_tokens")
             if cached is not None:
                 usage["cached_tokens"] = cached
+                break
+        for details_key in ("prompt_tokens_details", "input_tokens_details"):
+            written = _get(_get(usage_obj, details_key), "cache_creation_tokens")
+            if written is not None:
+                usage["cache_creation_tokens"] = written
                 break
 
         # Drop any leftover None values so downstream code can treat keys as

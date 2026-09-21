@@ -260,6 +260,7 @@ class SequentialEngine(StrategyEngine):
             "completion_tokens": 0,
             "reasoning_tokens": 0,
             "cached_tokens": 0,
+            "cache_creation_tokens": 0,
             "total_tokens": 0,
         }
 
@@ -400,6 +401,7 @@ class ParallelEngine(StrategyEngine):
             "completion_tokens": 0,
             "reasoning_tokens": 0,
             "cached_tokens": 0,
+            "cache_creation_tokens": 0,
             "total_tokens": 0,
         }
 

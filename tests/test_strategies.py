@@ -215,3 +215,57 @@ class TestParallelEngine:
 
         output = orch.run("test")
         assert output.status.value == "failed"
+
+
+def _mock_cached_response(content):
+    """A response whose usage reports prompt-cache reads and writes."""
+    response = _mock_response(content)
+    response.usage = SimpleNamespace(
+        prompt_tokens=10,
+        completion_tokens=5,
+        total_tokens=15,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=3, cache_creation_tokens=7),
+    )
+    return response
+
+
+class TestUsageRollup:
+    """Orchestration usage sums its agents' usage, cache writes included."""
+
+    @patch("agentic.agent.agent.litellm")
+    def test_sequential_sums_cache_writes(self, mock_litellm, monkeypatch):
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "false")
+        mock_litellm.completion.side_effect = [
+            _mock_cached_response("one"),
+            _mock_cached_response("two"),
+        ]
+        orch = Orchestration(name="t", description="t", strategy="sequential")
+        orch.add_entity(
+            entity_type="agent", agent=Agent(model="gpt-4o-mini", name="a"), position=0
+        )
+        orch.add_entity(
+            entity_type="agent", agent=Agent(model="gpt-4o-mini", name="b"), position=1
+        )
+
+        output = orch.run("go")
+
+        assert output.status.is_success()
+        assert output.usage["cached_tokens"] == 6
+        assert output.usage["cache_creation_tokens"] == 14
+
+    @patch("agentic.agent.agent.litellm")
+    def test_parallel_sums_cache_writes_including_merge(
+        self, mock_litellm, monkeypatch
+    ):
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "false")
+        mock_litellm.completion.side_effect = lambda **_: _mock_cached_response("ok")
+        orch = Orchestration(name="t", description="t", strategy="parallel")
+        orch.add_entity(entity_type="agent", agent=Agent(model="gpt-4o-mini", name="a"))
+        orch.add_entity(entity_type="agent", agent=Agent(model="gpt-4o-mini", name="b"))
+
+        output = orch.run("go")
+
+        assert output.status.is_success()
+        calls = mock_litellm.completion.call_count
+        assert calls >= 3  # two agents + the merge
+        assert output.usage["cache_creation_tokens"] == 7 * calls

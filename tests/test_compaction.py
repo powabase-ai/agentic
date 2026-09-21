@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -521,6 +522,24 @@ class TestCompactMessagesTools:
         kwargs = mock_litellm.completion.call_args.kwargs
         assert "tools" not in kwargs
         assert "tool_choice" not in kwargs
+
+
+class TestCompactMessagesCacheBreakpoints:
+    """Compaction sends no explicit cache breakpoints, on any model. On
+    Anthropic-family models the cached prefix is keyed on the request's
+    thinking and effort settings too, and this call forwards neither, so on a
+    reasoning-enabled agent it cannot read what the agent loop cached — a
+    breakpoint would only buy a cache write."""
+
+    @patch("agentic.agent.compaction.litellm")
+    def test_claude_gets_no_breakpoints(self, mock_litellm):
+        mock_litellm.completion.return_value = _mock_response("<summary>s</summary>")
+        compact_messages(
+            _BASE, model="claude-opus-4-8", tools=TestCompactMessagesTools._TOOLS
+        )
+        kwargs = mock_litellm.completion.call_args.kwargs
+        assert "cache_control" not in json.dumps(kwargs["messages"])
+        assert kwargs["tools"] == TestCompactMessagesTools._TOOLS
 
 
 class TestCompactionInstructionContent:
