@@ -254,10 +254,14 @@ def compact_messages(
     an exact leading prefix of the serialized request — tool definitions come
     first, so omitting or altering them breaks the match at the very first
     block and makes this (full-context) call entirely cache-cold, defeating the
-    whole reason we feed compaction the un-pruned history. Anthropic caching is
-    NOT in play: it requires explicit ``cache_control`` breakpoints, which this
-    codebase does not set anywhere. ``tool_choice="none"`` keeps the model
-    summarizing instead of trying to call one of them.
+    whole reason we feed compaction the un-pruned history. Anthropic-family
+    models cache only up to explicit ``cache_control`` breakpoints, which the
+    agent loop sets (``add_cache_breakpoints``) but this call deliberately does
+    not: the provider keys the cached prefix on the request's thinking and
+    effort settings as well as its content, and this call forwards neither (see
+    below), so on a reasoning-enabled agent it cannot read what the loop
+    cached and a breakpoint would only buy a cache write. ``tool_choice="none"``
+    keeps the model summarizing instead of trying to call one of them.
 
     Messages are run through ``normalize_messages`` first: not every call site
     hands us already-normalized history, and non-standard bookkeeping keys
