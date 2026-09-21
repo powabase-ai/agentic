@@ -223,15 +223,6 @@ class TestAddCacheBreakpoints:
         assert messages[-1]["cache_control"] == _EPHEMERAL
         assert "cache_control" not in messages[-1]["content"][0]
 
-    def test_mark_last_message_false_leaves_history_unmarked(self):
-        messages, tools = add_cache_breakpoints(
-            "claude-opus-4-8", _history(), _tools(), mark_last_message=False
-        )
-        assert messages[0]["cache_control"] == _EPHEMERAL
-        assert tools[-1]["cache_control"] == _EPHEMERAL
-        for later in messages[1:]:
-            assert "cache_control" not in json.dumps(later)
-
     def test_no_system_message(self):
         messages, tools = add_cache_breakpoints(
             "claude-opus-4-8", _history()[1:], _tools()

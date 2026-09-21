@@ -525,45 +525,21 @@ class TestCompactMessagesTools:
 
 
 class TestCompactMessagesCacheBreakpoints:
-    """On Anthropic-family models the tools + system prefix is marked so the
-    compaction call can read what the agent loop cached. The history is not:
-    ``tool_choice`` differs from the loop's calls, which invalidates the
-    provider's message-level cache, so a history breakpoint would only buy a
-    cache write over the whole conversation."""
-
-    _EPHEMERAL = {"type": "ephemeral"}
-    _TOOLS = TestCompactMessagesTools._TOOLS + [
-        {
-            "type": "function",
-            "function": {"name": "fetch", "description": "f", "parameters": {}},
-        }
-    ]
+    """Compaction sends no explicit cache breakpoints, on any model. On
+    Anthropic-family models the cached prefix is keyed on the request's
+    thinking and effort settings too, and this call forwards neither, so on a
+    reasoning-enabled agent it cannot read what the agent loop cached — a
+    breakpoint would only buy a cache write."""
 
     @patch("agentic.agent.compaction.litellm")
-    def test_claude_marks_system_and_last_tool_only(self, mock_litellm):
+    def test_claude_gets_no_breakpoints(self, mock_litellm):
         mock_litellm.completion.return_value = _mock_response("<summary>s</summary>")
-        compact_messages(_BASE, model="claude-opus-4-8", tools=self._TOOLS)
-        kwargs = mock_litellm.completion.call_args.kwargs
-
-        assert kwargs["messages"][0]["cache_control"] == self._EPHEMERAL
-        assert kwargs["tools"][-1]["cache_control"] == self._EPHEMERAL
-        assert "cache_control" not in kwargs["tools"][0]
-        assert "cache_control" not in json.dumps(kwargs["messages"][1:])
-
-    @patch("agentic.agent.compaction.litellm")
-    def test_claude_rebuilt_history_carries_no_breakpoints(self, mock_litellm):
-        mock_litellm.completion.return_value = _mock_response("<summary>s</summary>")
-        result = compact_messages(_BASE, model="claude-opus-4-8", tools=self._TOOLS)
-        assert result is not _BASE
-        assert "cache_control" not in json.dumps(result)
-
-    @patch("agentic.agent.compaction.litellm")
-    def test_non_claude_gets_no_breakpoints(self, mock_litellm):
-        mock_litellm.completion.return_value = _mock_response("<summary>s</summary>")
-        compact_messages(_BASE, model="gpt-5.4", tools=self._TOOLS)
+        compact_messages(
+            _BASE, model="claude-opus-4-8", tools=TestCompactMessagesTools._TOOLS
+        )
         kwargs = mock_litellm.completion.call_args.kwargs
         assert "cache_control" not in json.dumps(kwargs["messages"])
-        assert kwargs["tools"] == self._TOOLS
+        assert kwargs["tools"] == TestCompactMessagesTools._TOOLS
 
 
 class TestCompactionInstructionContent:
