@@ -675,9 +675,12 @@ class TestPromptCacheBreakpoints:
         assert [_markers(kwargs) for kwargs in calls] == [0, 0, 0]
 
     @patch("agentic.agent.agent.litellm")
-    def test_last_step_without_tools_still_marks_system_and_history(
+    def test_last_step_that_withholds_tools_gets_no_breakpoints(
         self, mock_litellm, monkeypatch
     ):
+        # Tools open the cached prefix, so a call that drops them matches no
+        # earlier entry; and the loop ends after it, so an entry it wrote would
+        # never be read. Breakpoints there would only buy a cache write.
         monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "false")
         mock_litellm.completion.return_value = _mock_completion_response("done")
         agent = Agent(model="claude-opus-4-8", system_prompt="You are a bot.")
@@ -685,9 +688,54 @@ class TestPromptCacheBreakpoints:
 
         kwargs = mock_litellm.completion.call_args.kwargs
         assert "tools" not in kwargs
+        assert _markers(kwargs) == 0
+
+    @patch("agentic.agent.agent.litellm")
+    def test_agent_without_tools_marks_system_and_history(
+        self, mock_litellm, monkeypatch
+    ):
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "false")
+        mock_litellm.completion.return_value = _mock_completion_response("done")
+        agent = Agent(model="claude-opus-4-8", system_prompt="You are a bot.")
+        agent.run("question")
+
+        kwargs = mock_litellm.completion.call_args.kwargs
         assert kwargs["messages"][0]["cache_control"] == self._EPHEMERAL
         assert kwargs["messages"][-1]["cache_control"] == self._EPHEMERAL
         assert _markers(kwargs) == 2
+
+    @patch("agentic.agent.agent.litellm")
+    def test_caller_breakpoints_never_push_a_request_past_four(
+        self, mock_litellm, monkeypatch
+    ):
+        # A caller managing its own caching can pass block-level breakpoints in
+        # the input; they survive normalization and count toward the limit.
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "false")
+        mock_litellm.completion.side_effect = [
+            _mock_tool_call_response("lookup", '{"q": "a"}', call_id="call_1"),
+            _mock_completion_response("done"),
+        ]
+        caller_input = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "doc one", "cache_control": self._EPHEMERAL}
+                ],
+            },
+            {"role": "assistant", "content": "noted"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "doc two", "cache_control": self._EPHEMERAL}
+                ],
+            },
+        ]
+        agent = Agent(model="claude-opus-4-8", system_prompt="You are a bot.")
+        agent.run(caller_input, tools={"lookup": self._lookup_tool()})
+
+        calls = [c.kwargs for c in mock_litellm.completion.call_args_list]
+        assert len(calls) == 2
+        assert [_markers(kwargs) for kwargs in calls] == [4, 4]
 
     @patch("agentic.agent.agent.litellm")
     def test_streaming_calls_carry_breakpoints(self, mock_litellm, monkeypatch):

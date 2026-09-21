@@ -120,6 +120,39 @@ def test_cache_creation_tokens_pydantic_shape():
     assert out["cache_creation_tokens"] == 30
 
 
+def test_cache_creation_tokens_without_cache_reads():
+    # Writes must not depend on reads being reported alongside them.
+    usage = {
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "total_tokens": 150,
+        "prompt_tokens_details": {"cached_tokens": None, "cache_creation_tokens": 30},
+    }
+    out = Agent._extract_usage(_resp(usage))
+    assert out["cache_creation_tokens"] == 30
+    assert "cached_tokens" not in out
+
+
+def test_real_litellm_anthropic_usage():
+    # Built by litellm's own Anthropic transform, so a litellm upgrade that
+    # changes where cache reads/writes live fails here instead of silently.
+    from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+    usage = AnthropicConfig().calculate_usage(
+        usage_object={
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "cache_creation_input_tokens": 30,
+            "cache_read_input_tokens": 60,
+        },
+        reasoning_content=None,
+    )
+    out = Agent._extract_usage(_resp(usage))
+    assert out["prompt_tokens"] == 100  # uncached + written + read
+    assert out["cached_tokens"] == 60
+    assert out["cache_creation_tokens"] == 30
+
+
 def test_missing_cache_creation_tokens_is_omitted():
     # Providers that cache automatically report reads only — the key must be
     # absent (not 0) so "not reported" stays distinguishable from "none".

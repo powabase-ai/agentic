@@ -108,6 +108,36 @@ def test_cache_creation_tokens_pydantic_shape():
     assert out["cache_creation_tokens"] == 30
 
 
+def test_cache_creation_tokens_without_cache_reads():
+    usage = {
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "total_tokens": 150,
+        "prompt_tokens_details": {"cached_tokens": None, "cache_creation_tokens": 30},
+    }
+    out = _extract_usage(usage)
+    assert out["cache_creation_tokens"] == 30
+    assert "cached_tokens" not in out
+
+
+def test_real_litellm_anthropic_usage():
+    from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+    usage = AnthropicConfig().calculate_usage(
+        usage_object={
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "cache_creation_input_tokens": 30,
+            "cache_read_input_tokens": 60,
+        },
+        reasoning_content=None,
+    )
+    out = _extract_usage(usage)
+    assert out["prompt_tokens"] == 100
+    assert out["cached_tokens"] == 60
+    assert out["cache_creation_tokens"] == 30
+
+
 def test_missing_cache_creation_tokens_is_omitted():
     usage = {
         "prompt_tokens": 100,
