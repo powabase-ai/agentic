@@ -257,11 +257,14 @@ def compact_messages(
     whole reason we feed compaction the un-pruned history. Anthropic-family
     models cache only up to explicit ``cache_control`` breakpoints, which the
     agent loop sets (``add_cache_breakpoints``) but this call deliberately does
-    not: the provider keys the cached prefix on the request's thinking and
-    effort settings as well as its content, and this call forwards neither (see
-    below), so on a reasoning-enabled agent it cannot read what the loop
-    cached and a breakpoint would only buy a cache write. ``tool_choice="none"``
-    keeps the model summarizing instead of trying to call one of them.
+    not. It could never read the loop's cached history: its ``tool_choice``
+    differs from the loop's calls, and the provider drops its cached messages
+    when that changes, on any model. And it can read the cached tools + system
+    prefix only on an agent without reasoning settings, because the provider
+    keys that prefix on the thinking and effort settings too and this call
+    forwards neither (see below). On a reasoning-enabled agent a breakpoint
+    here would only buy a cache write. ``tool_choice="none"`` keeps the model
+    summarizing instead of trying to call one of them.
 
     Messages are run through ``normalize_messages`` first: not every call site
     hands us already-normalized history, and non-standard bookkeeping keys

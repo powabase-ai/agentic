@@ -397,9 +397,11 @@ def _extract_usage(chunk_usage: Any) -> dict:
         cached = _get(details, "cached_tokens")
         if cached is not None:
             out["cached_tokens"] = cached
-            written = _get(details, "cache_creation_tokens")
-            if written is not None:
-                out["cache_creation_tokens"] = written
+            break
+    for details_key in ("prompt_tokens_details", "input_tokens_details"):
+        written = _get(_get(chunk_usage, details_key), "cache_creation_tokens")
+        if written is not None:
+            out["cache_creation_tokens"] = written
             break
 
     return out

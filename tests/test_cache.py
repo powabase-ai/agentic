@@ -261,7 +261,11 @@ class TestAddCacheBreakpoints:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": f"doc {i}", "cache_control": _EPHEMERAL}
+                        {
+                            "type": "text",
+                            "text": f"doc {i}",
+                            "cache_control": _EPHEMERAL,
+                        }
                     ],
                 },
             )

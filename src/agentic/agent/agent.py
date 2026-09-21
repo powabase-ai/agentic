@@ -555,12 +555,16 @@ class Agent:
                 # Claude caches only up to explicit breakpoints. They go on
                 # copies for this request: `normalized` and state.messages
                 # stay unmarked, or the markers would pile up step by step.
-                cached_messages, cached_tools = add_cache_breakpoints(
-                    routed_model, normalized, step_tools
-                )
-                call_kwargs["messages"] = cached_messages
-                if cached_tools:
-                    call_kwargs["tools"] = cached_tools
+                # A last step that withholds the agent's tools is skipped: tools
+                # open the cached prefix, so it can match no earlier entry, and
+                # the loop ends after it, so nothing would read what it wrote.
+                if step_tools or not tool_schemas:
+                    cached_messages, cached_tools = add_cache_breakpoints(
+                        routed_model, normalized, step_tools
+                    )
+                    call_kwargs["messages"] = cached_messages
+                    if cached_tools:
+                        call_kwargs["tools"] = cached_tools
 
                 # Streaming flag: read per-call, not module-level, so
                 # monkeypatch.setenv works in tests.
@@ -1793,7 +1797,11 @@ class Agent:
             cached = _get(details, "cached_tokens")
             if cached is not None:
                 usage["cached_tokens"] = cached
-                usage["cache_creation_tokens"] = _get(details, "cache_creation_tokens")
+                break
+        for details_key in ("prompt_tokens_details", "input_tokens_details"):
+            written = _get(_get(usage_obj, details_key), "cache_creation_tokens")
+            if written is not None:
+                usage["cache_creation_tokens"] = written
                 break
 
         # Drop any leftover None values so downstream code can treat keys as
