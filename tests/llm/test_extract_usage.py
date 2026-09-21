@@ -80,6 +80,46 @@ def test_chat_completions_pydantic_shape():
 
 
 # ---------------------------------------------------------------------------
+# Prompt-cache writes — same contract as Agent._extract_usage
+# ---------------------------------------------------------------------------
+
+
+def test_cache_creation_tokens_dict_shape():
+    usage = {
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "total_tokens": 150,
+        "prompt_tokens_details": {"cached_tokens": 60, "cache_creation_tokens": 30},
+    }
+    out = _extract_usage(usage)
+    assert out["cached_tokens"] == 60
+    assert out["cache_creation_tokens"] == 30
+
+
+def test_cache_creation_tokens_pydantic_shape():
+    prompt_details = types.SimpleNamespace(cached_tokens=60, cache_creation_tokens=30)
+    usage = types.SimpleNamespace(
+        prompt_tokens=100,
+        completion_tokens=50,
+        total_tokens=150,
+        prompt_tokens_details=prompt_details,
+    )
+    out = _extract_usage(usage)
+    assert out["cache_creation_tokens"] == 30
+
+
+def test_missing_cache_creation_tokens_is_omitted():
+    usage = {
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "total_tokens": 150,
+        "prompt_tokens_details": {"cached_tokens": 80},
+    }
+    out = _extract_usage(usage)
+    assert "cache_creation_tokens" not in out
+
+
+# ---------------------------------------------------------------------------
 # Responses API naming
 # ---------------------------------------------------------------------------
 

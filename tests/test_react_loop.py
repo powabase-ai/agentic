@@ -1,5 +1,6 @@
 """Tests for the Agent ReAct loop with tool calling."""
 
+import json
 import threading
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -588,3 +589,145 @@ class TestMidStreamErrorSyntheticEvents:
         assert synth_reasoning[0]["content"] == "just thinking"
         assert synth_reasoning[0]["source"] == "thinking"
         assert len(error_events) == 1
+
+
+def _with_cache_usage(response, cached: int, written: int):
+    """Attach prompt-cache usage in the shape litellm reports it."""
+    response.usage = SimpleNamespace(
+        prompt_tokens=100,
+        completion_tokens=5,
+        total_tokens=105,
+        prompt_tokens_details=SimpleNamespace(
+            cached_tokens=cached, cache_creation_tokens=written
+        ),
+    )
+    return response
+
+
+def _markers(kwargs: dict) -> int:
+    """Number of prompt-cache breakpoints one LLM call carries."""
+    return json.dumps(kwargs["messages"], default=str).count(
+        '"cache_control"'
+    ) + json.dumps(kwargs.get("tools") or []).count('"cache_control"')
+
+
+class TestPromptCacheBreakpoints:
+    """Anthropic-family models need explicit cache breakpoints on every call;
+    other providers cache automatically and must get none. The breakpoints
+    live on the outgoing request only — never in the stored history, where
+    they would pile up past the provider's limit of 4."""
+
+    _EPHEMERAL = {"type": "ephemeral"}
+
+    @staticmethod
+    def _lookup_tool():
+        return BuiltinTool(
+            name="lookup",
+            description="Look something up",
+            input_schema={"type": "object", "properties": {"q": {"type": "string"}}},
+            handler=lambda args, ctx: "found",
+        )
+
+    def _run_three_steps(self, mock_litellm, model):
+        mock_litellm.completion.side_effect = [
+            _mock_tool_call_response("lookup", '{"q": "a"}', call_id="call_1"),
+            _mock_tool_call_response("lookup", '{"q": "b"}', call_id="call_2"),
+            _mock_completion_response("done"),
+        ]
+        agent = Agent(model=model, system_prompt="You are a bot.")
+        output = agent.run("question", tools={"lookup": self._lookup_tool()})
+        calls = [c.kwargs for c in mock_litellm.completion.call_args_list]
+        return output, calls
+
+    @patch("agentic.agent.agent.litellm")
+    def test_claude_marks_tools_system_and_last_message_on_every_call(
+        self, mock_litellm, monkeypatch
+    ):
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "false")
+        output, calls = self._run_three_steps(mock_litellm, "claude-opus-4-8")
+
+        assert output.status.is_success()
+        assert len(calls) == 3
+        for kwargs in calls:
+            assert kwargs["tools"][-1]["cache_control"] == self._EPHEMERAL
+            assert kwargs["messages"][0]["role"] == "system"
+            assert kwargs["messages"][0]["cache_control"] == self._EPHEMERAL
+            assert kwargs["messages"][-1]["cache_control"] == self._EPHEMERAL
+            # Exactly 3 — the previous step's history breakpoint must not
+            # linger once the conversation has grown past it.
+            assert _markers(kwargs) == 3
+        # From step 2 on, the history breakpoint sits on the newest tool result.
+        assert calls[1]["messages"][-1]["role"] == "tool"
+        assert calls[2]["messages"][-1]["role"] == "tool"
+
+    @patch("agentic.agent.agent.litellm")
+    def test_history_never_carries_breakpoints(self, mock_litellm, monkeypatch):
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "false")
+        output, _ = self._run_three_steps(mock_litellm, "claude-opus-4-8")
+        assert output.messages
+        assert "cache_control" not in json.dumps(output.messages, default=str)
+
+    @patch("agentic.agent.agent.litellm")
+    def test_non_claude_model_gets_no_breakpoints(self, mock_litellm, monkeypatch):
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "false")
+        _, calls = self._run_three_steps(mock_litellm, "gpt-5.4")
+        assert len(calls) == 3
+        assert [_markers(kwargs) for kwargs in calls] == [0, 0, 0]
+
+    @patch("agentic.agent.agent.litellm")
+    def test_last_step_without_tools_still_marks_system_and_history(
+        self, mock_litellm, monkeypatch
+    ):
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "false")
+        mock_litellm.completion.return_value = _mock_completion_response("done")
+        agent = Agent(model="claude-opus-4-8", system_prompt="You are a bot.")
+        agent.run("question", tools={"lookup": self._lookup_tool()}, max_steps=1)
+
+        kwargs = mock_litellm.completion.call_args.kwargs
+        assert "tools" not in kwargs
+        assert kwargs["messages"][0]["cache_control"] == self._EPHEMERAL
+        assert kwargs["messages"][-1]["cache_control"] == self._EPHEMERAL
+        assert _markers(kwargs) == 2
+
+    @patch("agentic.agent.agent.litellm")
+    def test_streaming_calls_carry_breakpoints(self, mock_litellm, monkeypatch):
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "true")
+        mock_litellm.completion.side_effect = [
+            _mock_streaming_response(
+                tool_calls=[{"name": "lookup", "args": {"q": "a"}}],
+                finish_reason="tool_calls",
+            ),
+            _mock_streaming_response(content="done"),
+        ]
+        agent = Agent(model="claude-opus-4-8", system_prompt="You are a bot.")
+        output = agent.run("question", tools={"lookup": self._lookup_tool()})
+
+        assert output.status.is_success()
+        calls = [c.kwargs for c in mock_litellm.completion.call_args_list]
+        assert len(calls) == 2
+        assert all(kwargs["stream"] is True for kwargs in calls)
+        assert [_markers(kwargs) for kwargs in calls] == [3, 3]
+
+    @patch("agentic.agent.agent.litellm")
+    def test_cache_read_and_write_tokens_are_summed_across_steps(
+        self, mock_litellm, monkeypatch
+    ):
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "false")
+        mock_litellm.completion.side_effect = [
+            _with_cache_usage(
+                _mock_tool_call_response("lookup", '{"q": "a"}', call_id="call_1"),
+                cached=0,
+                written=50,
+            ),
+            _with_cache_usage(
+                _mock_tool_call_response("lookup", '{"q": "b"}', call_id="call_2"),
+                cached=50,
+                written=20,
+            ),
+            _with_cache_usage(_mock_completion_response("done"), cached=70, written=10),
+        ]
+        agent = Agent(model="claude-opus-4-8", system_prompt="You are a bot.")
+        output = agent.run("question", tools={"lookup": self._lookup_tool()})
+
+        assert output.usage["cached_tokens"] == 120
+        assert output.usage["cache_creation_tokens"] == 80

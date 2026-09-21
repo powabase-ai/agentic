@@ -91,6 +91,49 @@ def test_chat_completions_pydantic_shape():
 
 
 # ---------------------------------------------------------------------------
+# Prompt-cache writes (providers with explicit cache breakpoints report the
+# tokens written to the cache alongside the tokens read from it)
+# ---------------------------------------------------------------------------
+
+
+def test_cache_creation_tokens_dict_shape():
+    usage = {
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "total_tokens": 150,
+        "prompt_tokens_details": {"cached_tokens": 60, "cache_creation_tokens": 30},
+    }
+    out = Agent._extract_usage(_resp(usage))
+    assert out["cached_tokens"] == 60
+    assert out["cache_creation_tokens"] == 30
+
+
+def test_cache_creation_tokens_pydantic_shape():
+    prompt_details = types.SimpleNamespace(cached_tokens=60, cache_creation_tokens=30)
+    usage = types.SimpleNamespace(
+        prompt_tokens=100,
+        completion_tokens=50,
+        total_tokens=150,
+        prompt_tokens_details=prompt_details,
+    )
+    out = Agent._extract_usage(_resp(usage))
+    assert out["cache_creation_tokens"] == 30
+
+
+def test_missing_cache_creation_tokens_is_omitted():
+    # Providers that cache automatically report reads only — the key must be
+    # absent (not 0) so "not reported" stays distinguishable from "none".
+    usage = {
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "total_tokens": 150,
+        "prompt_tokens_details": {"cached_tokens": 80},
+    }
+    out = Agent._extract_usage(_resp(usage))
+    assert "cache_creation_tokens" not in out
+
+
+# ---------------------------------------------------------------------------
 # Responses API naming (OpenAI Responses; some Anthropic/Gemini bridges)
 # ---------------------------------------------------------------------------
 
