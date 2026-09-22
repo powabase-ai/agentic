@@ -1914,7 +1914,7 @@ class Agent:
         # Add session history if provided
         if session:
             history = session.get_messages(include_system=False)
-            messages.extend(history)
+            messages.extend(self._replayable_history(history))
 
         # Add current input
         if isinstance(input, str):
@@ -1923,6 +1923,37 @@ class Agent:
             messages.extend(input)
 
         return messages
+
+    def _replayable_history(
+        self, history: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Earlier runs' messages as this run may replay them.
+
+        Reasoning goes back only to the provider that produced it: another
+        provider cannot verify it, and LiteLLM turns some of it into malformed
+        input. OpenAI reasoning items never cross runs at all — the Responses
+        API discards reasoning from turns before the latest user message, and
+        encrypted content is bound to the organization that produced it, so
+        replaying one can only cost a rejected request. A provider LiteLLM
+        cannot resolve keeps everything else, as at a fallback.
+        """
+        target = _provider_of(self.model)
+        replayable = []
+        for message in history:
+            if message.get("role") == "assistant":
+                produced_by = (message.get("reasoning") or {}).get("provider")
+                if (
+                    target is not None
+                    and produced_by is not None
+                    and produced_by != target
+                ):
+                    message = drop_reasoning_replay_fields(message)
+                else:
+                    message = {
+                        k: v for k, v in message.items() if k != "reasoning_items"
+                    }
+            replayable.append(message)
+        return replayable
 
     def __repr__(self) -> str:
         """Return a string representation of the agent."""
