@@ -109,12 +109,15 @@ class Message(BaseModel):
     reasoning_requested: bool = False
 
     def to_litellm_input(self) -> dict:
-        """Produce the LiteLLM-bound shape for replay.
+        """Produce the LiteLLM-bound shape for replay across turns.
 
-        Provider-specific replay fields are emitted unconditionally per the
-        artifact's provider. The decision to *use* them (i.e., not strip on
-        cross-provider boundary) belongs to the caller (build_messages_for_llm
-        in services/session.py — see spec §5.5).
+        Anthropic thinking blocks and Gemini thought signatures are emitted
+        per the artifact's provider; the decision to *use* them (i.e., not
+        strip them at a cross-provider boundary) belongs to the caller.
+        OpenAI reasoning items are not emitted: the Responses API discards
+        reasoning from turns before the latest user message and binds
+        encrypted content to the organization that produced it, so replaying
+        one across turns can only cost a rejected request.
         """
         base: dict = {"role": self.role}
         if self.content is not None:
@@ -124,5 +127,7 @@ class Message(BaseModel):
         if self.tool_call_id:
             base["tool_call_id"] = self.tool_call_id
         if self.role == "assistant" and self.reasoning is not None:
-            base.update(reasoning_replay_fields(self.reasoning))
+            replay = reasoning_replay_fields(self.reasoning)
+            replay.pop("reasoning_items", None)
+            base.update(replay)
         return base
