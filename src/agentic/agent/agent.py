@@ -19,6 +19,7 @@ import litellm
 from agentic.agent.cache import add_cache_breakpoints, sort_tools_for_cache
 from agentic.agent.compaction import (
     compact_messages,
+    compaction_output_reserve,
     estimate_token_count,
     get_context_threshold,
     prune_messages,
@@ -274,6 +275,17 @@ class Agent:
             self._resolved_effort_for(model), self._compaction_model_for(model)
         )
 
+    def _threshold_for(self, model: str) -> int:
+        """The loop's compaction threshold for ``model``. With reasoning on it
+        reserves the compaction call's reasoning budget (see
+        ``compaction_output_reserve``)."""
+        return get_context_threshold(
+            model,
+            compaction_output_reserve(
+                self.max_tokens, self._resolved_effort_for(model) is not None
+            ),
+        )
+
     def _fall_back(
         self,
         state: LoopState,
@@ -501,7 +513,7 @@ class Agent:
 
                 # Proactive context management — prune/compact before LLM call if near threshold
                 token_estimate = estimate_token_count(normalized)
-                threshold = get_context_threshold(state.current_model, self.max_tokens)
+                threshold = self._threshold_for(state.current_model)
                 if token_estimate > threshold:
                     # Pruning is free, so try it first and use it for the
                     # threshold decision: if it alone gets us under, we never
@@ -725,10 +737,7 @@ class Agent:
                                 # Both matter because we persist its result and
                                 # have no recovery left after this.
                                 target = int(
-                                    get_context_threshold(
-                                        state.current_model, self.max_tokens
-                                    )
-                                    * 0.5
+                                    self._threshold_for(state.current_model) * 0.5
                                 )
                                 truncated = truncate_messages(compacted, target)
                                 before_tokens = estimate_token_count(compacted)
@@ -1165,7 +1174,7 @@ class Agent:
                 # Compaction check: summarize history if context is growing large
                 over_threshold = estimate_token_count(
                     working_messages
-                ) > get_context_threshold(state.current_model, self.max_tokens)
+                ) > self._threshold_for(state.current_model)
                 if over_threshold and state.compact_failure_count < 3:
                     context.emit_event(
                         {

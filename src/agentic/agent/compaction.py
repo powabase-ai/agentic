@@ -250,15 +250,34 @@ def _summary_max_tokens(
 
     With reasoning on, thinking and the summary share ``max_tokens``, so the
     call asks for more — but only as much as fits under the safety margin the
-    proactive threshold keeps (``_compact_buffer``), so the extra room can
-    never turn a compaction into a ``prompt_too_long``. Never less than the
-    plain budget.
+    proactive threshold keeps (``_compact_buffer``). The estimate leaves out
+    tool schemas and replayed reasoning, so that is a margin, not a guarantee
+    against ``prompt_too_long``. Never less than the plain budget.
+
+    The window is resolved on the unrouted name: the model registry knows
+    ``openai/gpt-5.4``, not the ``openai/responses/gpt-5.4`` route the call
+    goes out under.
     """
     if not reasoning_kwargs:
         return _SUMMARY_MAX_TOKENS
-    window = resolve_context_window(model)
+    window = resolve_context_window(model.replace("/responses/", "/", 1))
     room = window - _compact_buffer(window) - estimate_token_count(request)
     return max(_SUMMARY_MAX_TOKENS, min(_SUMMARY_WITH_REASONING_MAX_TOKENS, room))
+
+
+def compaction_output_reserve(
+    max_output_tokens: int | None, reasoning: bool
+) -> int | None:
+    """The output budget ``get_context_threshold`` should reserve for a run.
+
+    With reasoning on, a compaction's thinking and summary share up to
+    ``_SUMMARY_WITH_REASONING_MAX_TOKENS``; reserving at least that much makes
+    compaction fire while that room still exists. Without reasoning the
+    caller's own ``max_tokens`` is reserved, as before.
+    """
+    if not reasoning:
+        return max_output_tokens
+    return max(max_output_tokens or 0, _SUMMARY_WITH_REASONING_MAX_TOKENS)
 
 
 def compact_messages(
