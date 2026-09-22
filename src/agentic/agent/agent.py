@@ -265,6 +265,15 @@ class Agent:
         """
         return maybe_route_through_responses(model, self._resolved_effort_for(model))
 
+    def _compaction_reasoning_kwargs(self, model: str) -> dict[str, Any]:
+        """The reasoning kwargs the real call sends for ``model``, for its
+        compaction call. Claude keys its cached prefix on thinking and effort,
+        so a compaction under other settings could never read what the loop
+        cached."""
+        return loop_reasoning_call_kwargs(
+            self._resolved_effort_for(model), self._compaction_model_for(model)
+        )
+
     def _fall_back(
         self,
         state: LoopState,
@@ -514,6 +523,9 @@ class Agent:
                                     ),
                                     api_key=self.api_key,
                                     tools=step_tools,
+                                    reasoning_kwargs=self._compaction_reasoning_kwargs(
+                                        state.current_model
+                                    ),
                                 )
                             except Exception:
                                 logger.warning(
@@ -676,6 +688,9 @@ class Agent:
                                 model=self._compaction_model_for(state.current_model),
                                 api_key=self.api_key,
                                 tools=step_tools,
+                                reasoning_kwargs=self._compaction_reasoning_kwargs(
+                                    state.current_model
+                                ),
                             )
                             # Measure work done, not list identity. Identity is
                             # only a *sufficient* no-progress signal (see the
@@ -1172,6 +1187,9 @@ class Agent:
                             model=self._compaction_model_for(state.current_model),
                             api_key=self.api_key,
                             tools=step_tools,
+                            reasoning_kwargs=self._compaction_reasoning_kwargs(
+                                state.current_model
+                            ),
                         )
                     except Exception:
                         logger.warning("Phase 5 compaction failed", exc_info=True)
