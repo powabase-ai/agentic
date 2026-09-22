@@ -128,6 +128,9 @@ class Message:
     tool_calls: list[_ToolCall] = field(default_factory=list)
     thinking_blocks: list[dict] = field(default_factory=list)
     provider_specific_fields: dict = field(default_factory=dict)
+    # OpenAI Responses reasoning items, replayed on the next step (see
+    # agentic.agent.message.reasoning_replay_fields).
+    reasoning_items: list = field(default_factory=list)
 
 
 # ===== Accumulator =====
@@ -144,20 +147,32 @@ def _combine_thinking_blocks(blocks: list[dict]) -> list[dict]:
     Local implementation rather than coupling to LiteLLM internals — equivalent
     algorithm, fewer cross-version surprises (verified at litellm/main.py for
     processor.get_combined_thinking_content).
+
+    A ``redacted_thinking`` block is opaque — its payload is ``data`` — so it
+    keeps ``data`` and gets no ``thinking`` key, which would make it malformed
+    on replay.
     """
     by_index: dict[int, dict] = {}
     for block in blocks:
         idx = block.get("index", 0)
-        existing = by_index.setdefault(
-            idx, {"type": block.get("type", "thinking"), "thinking": ""}
-        )
-        if "thinking" in block and block["thinking"]:
-            existing["thinking"] += block["thinking"]
-        if "signature" in block and block["signature"]:
-            existing["signature"] = block["signature"]
+        existing = by_index.setdefault(idx, {"type": block.get("type", "thinking")})
         if block.get("type"):
             existing["type"] = block["type"]
-    return [by_index[i] for i in sorted(by_index)]
+        if block.get("thinking"):
+            existing["thinking"] = existing.get("thinking", "") + block["thinking"]
+        if block.get("signature"):
+            existing["signature"] = block["signature"]
+        if block.get("data"):
+            existing["data"] = existing.get("data", "") + block["data"]
+    combined = []
+    for i in sorted(by_index):
+        block = by_index[i]
+        if block["type"] == "redacted_thinking":
+            block.pop("thinking", None)
+        else:
+            block.setdefault("thinking", "")
+        combined.append(block)
+    return combined
 
 
 def accumulate_stream(
@@ -190,6 +205,7 @@ def accumulate_stream(
     tool_calls_acc: dict[int, dict[str, Any]] = {}
     thinking_blocks_acc: list[dict] = []
     psf_acc: dict[str, Any] = {}
+    reasoning_items_acc: list = []
     finish_reason: str | None = None
     usage: dict | None = None
 
@@ -270,6 +286,12 @@ def accumulate_stream(
                     psf_acc.setdefault(k, []).extend(v)
                 else:
                     psf_acc[k] = v
+
+            # OpenAI Responses reasoning items. LiteLLM's bridge puts every
+            # item of the response on one delta; stream_chunk_builder drops
+            # them, so this is the only place they survive a stream.
+            chunk_items = getattr(delta, "reasoning_items", None) or []
+            reasoning_items_acc.extend(chunk_items)
     except (AbortedError, StreamPartialError):
         # Already wrapped — propagate as-is
         raise
@@ -342,6 +364,7 @@ def accumulate_stream(
             tool_calls=tool_calls,
             thinking_blocks=_combine_thinking_blocks(thinking_blocks_acc),
             provider_specific_fields=psf_acc,
+            reasoning_items=reasoning_items_acc,
         ),
         finish_reason,
         usage,
