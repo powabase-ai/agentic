@@ -31,7 +31,12 @@ def test_openai_reasoning_serialization_round_trip():
     artifact = OpenAIReasoning(
         response_id="resp_xyz",
         reasoning_items=[
-            {"id": "rs_1", "type": "reasoning", "encrypted_content": "...", "summary": []}
+            {
+                "id": "rs_1",
+                "type": "reasoning",
+                "encrypted_content": "...",
+                "summary": [],
+            }
         ],
         summary_text="summary",
         requested_effort="high",

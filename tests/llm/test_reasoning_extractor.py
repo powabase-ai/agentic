@@ -128,7 +128,13 @@ def test_openai_reasoning_item_objects_become_plain_dicts():
 
     msg = _msg(
         reasoning_items=[
-            _Item(id="rs_1", type="reasoning", encrypted_content="e", summary=[], status=None)
+            _Item(
+                id="rs_1",
+                type="reasoning",
+                encrypted_content="e",
+                summary=[],
+                status=None,
+            )
         ]
     )
     with patch(
