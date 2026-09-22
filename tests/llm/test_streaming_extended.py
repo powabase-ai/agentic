@@ -70,7 +70,7 @@ def test_captures_thinking_blocks_across_chunks():
 
 
 def test_captures_provider_specific_fields_lists_concat():
-    """OpenAI Responses encrypted_content_items accumulate as a list."""
+    """List-valued provider_specific_fields concatenate across chunks."""
     chunks = [
         _chunk(
             delta=_delta(

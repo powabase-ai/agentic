@@ -82,6 +82,8 @@ def _extract_inner(
     if provider == "openai":
         # LiteLLM's Responses bridge surfaces reasoning as a top-level
         # `reasoning_items` (streaming: collected by accumulate_stream).
+        # Its non-streaming path keeps only a response's last reasoning item;
+        # streaming carries all of them.
         items = [
             _plain_item(i)
             for i in (getattr(assembled_message, "reasoning_items", None) or [])
