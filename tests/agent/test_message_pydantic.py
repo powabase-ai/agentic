@@ -116,8 +116,9 @@ def test_message_to_litellm_input_anthropic_emits_thinking_blocks():
     ]
 
 
-def test_message_to_litellm_input_openai_emits_reasoning_items():
-    """LiteLLM's Responses bridge reads a top-level `reasoning_items`."""
+def test_message_to_litellm_input_omits_openai_reasoning_items():
+    """Host session history is rebuilt through this, and an OpenAI reasoning
+    item from an earlier turn can only cost a rejected request."""
     item = {"id": "rs_1", "type": "reasoning", "encrypted_content": "e", "summary": []}
     msg = Message(
         role="assistant",
@@ -125,8 +126,9 @@ def test_message_to_litellm_input_openai_emits_reasoning_items():
         reasoning=OpenAIReasoning(reasoning_items=[item]),
     )
     out = msg.to_litellm_input()
-    assert out["reasoning_items"] == [item]
+    assert "reasoning_items" not in out
     assert "provider_specific_fields" not in out
+    assert out == {"role": "assistant", "content": "answer"}
 
 
 def test_message_to_litellm_input_gemini_emits_thought_signatures():
