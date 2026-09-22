@@ -525,21 +525,37 @@ class TestCompactMessagesTools:
 
 
 class TestCompactMessagesCacheBreakpoints:
-    """Compaction sends no explicit cache breakpoints, on any model. On
-    Anthropic-family models the cached prefix is keyed on the request's
-    thinking and effort settings too, and this call forwards neither, so on a
-    reasoning-enabled agent it cannot read what the agent loop cached — a
-    breakpoint would only buy a cache write."""
+    """On Claude, compaction reads the tools + system prefix the loop cached.
+    It marks the system message and the last tool, never its own trailing
+    instruction (nothing reads that back), and no marker reaches the
+    compacted history."""
 
     @patch("agentic.agent.compaction.litellm")
-    def test_claude_gets_no_breakpoints(self, mock_litellm):
+    def test_claude_marks_system_and_last_tool_only(self, mock_litellm):
         mock_litellm.completion.return_value = _mock_response("<summary>s</summary>")
         compact_messages(
             _BASE, model="claude-opus-4-8", tools=TestCompactMessagesTools._TOOLS
         )
         kwargs = mock_litellm.completion.call_args.kwargs
+        assert kwargs["messages"][0]["cache_control"] == {"type": "ephemeral"}
+        assert all("cache_control" not in json.dumps(m) for m in kwargs["messages"][1:])
+        assert kwargs["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+
+    @patch("agentic.agent.compaction.litellm")
+    def test_non_claude_gets_no_breakpoints(self, mock_litellm):
+        mock_litellm.completion.return_value = _mock_response("<summary>s</summary>")
+        compact_messages(_BASE, model="gpt-5.4", tools=TestCompactMessagesTools._TOOLS)
+        kwargs = mock_litellm.completion.call_args.kwargs
         assert "cache_control" not in json.dumps(kwargs["messages"])
         assert kwargs["tools"] == TestCompactMessagesTools._TOOLS
+
+    @patch("agentic.agent.compaction.litellm")
+    def test_compacted_history_carries_no_markers(self, mock_litellm):
+        mock_litellm.completion.return_value = _mock_response("<summary>s</summary>")
+        result = compact_messages(
+            _BASE, model="claude-opus-4-8", tools=TestCompactMessagesTools._TOOLS
+        )
+        assert "cache_control" not in json.dumps(result)
 
 
 class TestCompactionInstructionContent:
@@ -1331,8 +1347,82 @@ class TestCompactionCallResilience:
         assert 0 < timeout <= 900
 
 
-class TestCompactMessagesDocumentsReasoningKwargs:
-    def test_docstring_notes_reasoning_kwargs_are_not_forwarded(self):
+class TestCompactMessagesReasoningKwargs:
+    """Compaction runs under the loop's exact reasoning settings: Claude keys
+    its cached prefix on thinking and effort."""
+
+    _CLAUDE_RK = {
+        "thinking": {"type": "adaptive", "display": "summarized"},
+        "output_config": {"effort": "high"},
+    }
+
+    @patch("agentic.agent.compaction.litellm")
+    def test_reasoning_kwargs_forwarded(self, mock_litellm):
+        mock_litellm.completion.return_value = _mock_response("<summary>s</summary>")
+        compact_messages(
+            list(_BASE), model="claude-opus-4-8", reasoning_kwargs=self._CLAUDE_RK
+        )
+        kwargs = mock_litellm.completion.call_args.kwargs
+        assert kwargs["thinking"] == self._CLAUDE_RK["thinking"]
+        assert kwargs["output_config"] == self._CLAUDE_RK["output_config"]
+
+    @patch("agentic.agent.compaction.litellm")
+    def test_responses_extra_body_forwarded(self, mock_litellm):
+        mock_litellm.completion.return_value = _mock_response("<summary>s</summary>")
+        rk = {
+            "extra_body": {
+                "reasoning": {"effort": "medium"},
+                "include": ["reasoning.encrypted_content"],
+            }
+        }
+        compact_messages(
+            list(_BASE), model="openai/responses/gpt-5.4", reasoning_kwargs=rk
+        )
+        assert (
+            mock_litellm.completion.call_args.kwargs["extra_body"] == rk["extra_body"]
+        )
+
+    @patch("agentic.agent.compaction.litellm")
+    def test_plain_budget_without_reasoning(self, mock_litellm):
+        mock_litellm.completion.return_value = _mock_response("<summary>s</summary>")
+        compact_messages(list(_BASE), model="claude-opus-4-8")
+        assert mock_litellm.completion.call_args.kwargs["max_tokens"] == 8000
+
+    @patch("agentic.agent.compaction.resolve_context_window", return_value=1_000_000)
+    @patch("agentic.agent.compaction.litellm")
+    def test_reasoning_budget_on_a_roomy_window(self, mock_litellm, _window):
+        mock_litellm.completion.return_value = _mock_response("<summary>s</summary>")
+        compact_messages(
+            list(_BASE), model="claude-opus-4-8", reasoning_kwargs=self._CLAUDE_RK
+        )
+        assert mock_litellm.completion.call_args.kwargs["max_tokens"] == 16000
+
+    @patch("agentic.agent.compaction.estimate_token_count", return_value=170_000)
+    @patch("agentic.agent.compaction.resolve_context_window", return_value=200_000)
+    @patch("agentic.agent.compaction.litellm")
+    def test_reasoning_budget_stays_inside_the_window_margin(
+        self, mock_litellm, _window, _estimate
+    ):
+        # 200k window - 16k buffer (8%) - 170k input = 14k of room.
+        mock_litellm.completion.return_value = _mock_response("<summary>s</summary>")
+        compact_messages(
+            list(_BASE), model="claude-opus-4-8", reasoning_kwargs=self._CLAUDE_RK
+        )
+        assert mock_litellm.completion.call_args.kwargs["max_tokens"] == 14000
+
+    @patch("agentic.agent.compaction.estimate_token_count", return_value=190_000)
+    @patch("agentic.agent.compaction.resolve_context_window", return_value=200_000)
+    @patch("agentic.agent.compaction.litellm")
+    def test_reasoning_budget_never_below_the_plain_one(
+        self, mock_litellm, _window, _estimate
+    ):
+        mock_litellm.completion.return_value = _mock_response("<summary>s</summary>")
+        compact_messages(
+            list(_BASE), model="claude-opus-4-8", reasoning_kwargs=self._CLAUDE_RK
+        )
+        assert mock_litellm.completion.call_args.kwargs["max_tokens"] == 8000
+
+    def test_docstring_documents_the_mirrored_settings(self):
         doc = compact_messages.__doc__ or ""
-        assert "extra_body" in doc
-        assert "reasoning" in doc
+        assert "reasoning_kwargs" in doc
+        assert "NOT forwarded" not in doc
