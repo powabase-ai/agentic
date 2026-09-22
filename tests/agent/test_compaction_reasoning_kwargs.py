@@ -117,3 +117,60 @@ def test_reactive_compaction_gets_the_loops_kwargs(model):
     assert captured
     for kwargs in captured:
         assert kwargs["reasoning_kwargs"] == _EXPECTED[model]
+
+
+def _threshold_reserves(reasoning_effort):
+    """The output reserve every threshold the loop computes is given, over a
+    run that reaches all three sites: proactive (each attempt), the reactive
+    truncate target (compaction makes no progress) and phase 5 (after tools)."""
+    reserves: list = []
+    events: list[dict] = []
+
+    def fake_threshold(model, *args, **kwargs):
+        reserves.append(args[0] if args else kwargs.get("max_output_tokens"))
+        return 10_000_000
+
+    responses = [
+        Exception("prompt is too long: 200000 tokens > 100000 maximum"),
+        _tool_step(),
+        _answer_step(),
+    ]
+    with (
+        patch("litellm.supports_reasoning", return_value=True),
+        patch("agentic.agent.agent.litellm.completion", side_effect=responses),
+        patch(
+            "agentic.agent.agent.compact_messages",
+            side_effect=lambda messages, **kwargs: messages,
+        ),
+        patch("agentic.agent.agent.get_context_threshold", side_effect=fake_threshold),
+        patch.dict(
+            "os.environ",
+            {"AGENT_LLM_STREAMING_ENABLED": "false", "OPENAI_REASONING_SUMMARY": ""},
+        ),
+    ):
+        agent = Agent(
+            model="anthropic/claude-opus-4-8", reasoning_effort=reasoning_effort
+        )
+        agent.run(
+            "hi",
+            context=ExecutionContext(on_event=events.append),
+            tools={"probe": _probe_tool()},
+        )
+    assert any(e.get("type") == "reactive_truncate" for e in events)
+    return reserves
+
+
+def test_threshold_reserves_the_compaction_reasoning_budget():
+    """Compaction fires only once the estimate passes the threshold, so the
+    room it gets is below whatever the threshold reserved. With reasoning on,
+    the threshold reserves the summary call's reasoning budget, or the
+    thinking and the summary would share the plain one."""
+    reserves = _threshold_reserves("high")
+    assert len(reserves) >= 4
+    assert reserves == [16000] * len(reserves)
+
+
+def test_threshold_reserves_max_tokens_without_reasoning():
+    reserves = _threshold_reserves(None)
+    assert len(reserves) >= 4
+    assert reserves == [None] * len(reserves)

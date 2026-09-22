@@ -1426,3 +1426,64 @@ class TestCompactMessagesReasoningKwargs:
         doc = compact_messages.__doc__ or ""
         assert "reasoning_kwargs" in doc
         assert "NOT forwarded" not in doc
+
+    @patch("agentic.agent.compaction.resolve_context_window", return_value=1_000_000)
+    @patch("agentic.agent.compaction.litellm")
+    def test_reasoning_budget_resolves_the_window_on_the_unrouted_name(
+        self, mock_litellm, window
+    ):
+        # The model registry knows `openai/gpt-5.4`, not the Responses route
+        # the call goes out under; the routed name falls back to a default.
+        mock_litellm.completion.return_value = _mock_response("<summary>s</summary>")
+        rk = {
+            "extra_body": {
+                "reasoning": {"effort": "high"},
+                "include": ["reasoning.encrypted_content"],
+            }
+        }
+        compact_messages(
+            list(_BASE), model="openai/responses/gpt-5.4", reasoning_kwargs=rk
+        )
+        window.assert_called_once_with("openai/gpt-5.4")
+        assert mock_litellm.completion.call_args.kwargs["max_tokens"] == 16000
+
+    def test_full_reasoning_budget_at_the_in_loop_threshold(self):
+        """In the loop, compaction fires once the estimate passes the threshold.
+        Reserving the reasoning budget in that threshold leaves the summary
+        call its full budget at that point, instead of the plain one."""
+        with patch.object(compaction, "resolve_context_window", return_value=200_000):
+            at_threshold = compaction.get_context_threshold(
+                "claude-opus-4-8", compaction.compaction_output_reserve(None, True)
+            )
+            with (
+                patch.object(
+                    compaction, "estimate_token_count", return_value=at_threshold
+                ),
+                patch.object(compaction, "litellm") as mock_litellm,
+            ):
+                mock_litellm.completion.return_value = _mock_response(
+                    "<summary>s</summary>"
+                )
+                compact_messages(
+                    list(_BASE),
+                    model="claude-opus-4-8",
+                    reasoning_kwargs=self._CLAUDE_RK,
+                )
+        assert mock_litellm.completion.call_args.kwargs["max_tokens"] == 16000
+
+
+class TestCompactionOutputReserve:
+    """The output budget the loop's compaction threshold reserves: with
+    reasoning on, at least the summary call's reasoning budget."""
+
+    @pytest.mark.parametrize(
+        "max_tokens,reasoning,expected",
+        [
+            (None, False, None),
+            (4000, False, 4000),
+            (None, True, 16000),
+            (32000, True, 32000),
+        ],
+    )
+    def test_reserve(self, max_tokens, reasoning, expected):
+        assert compaction.compaction_output_reserve(max_tokens, reasoning) == expected
