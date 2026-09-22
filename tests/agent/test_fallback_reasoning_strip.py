@@ -110,7 +110,12 @@ def test_cross_provider_fallback_strips_every_assistant_message():
     assert fallback_call.kwargs["model"] == "openai/responses/gpt-5.4"
     for message in fallback_call.kwargs["messages"]:
         assert "thinking_blocks" not in message
-    assert dropped == [
+    # emit_event always adds "seq"/"ts" bookkeeping (see
+    # ExecutionContext.emit_event); compare the business fields only, the
+    # same way the sibling model_fallback/step_reset events are asserted.
+    assert [
+        {k: v for k, v in e.items() if k not in ("seq", "ts")} for e in dropped
+    ] == [
         {
             "type": _EVENT,
             "step": 2,
