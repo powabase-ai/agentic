@@ -3,7 +3,10 @@
 import os
 from unittest.mock import patch
 
+import pytest
+
 from agentic.llm.routing import (
+    loop_reasoning_call_kwargs,
     maybe_route_through_responses,
     reasoning_call_kwargs,
 )
@@ -230,3 +233,47 @@ def test_call_kwargs_does_not_set_top_level_effort_on_responses_path():
     distinguishes the Responses path from the non-Responses path."""
     kwargs = reasoning_call_kwargs("medium", "openai/responses/gpt-5.4")
     assert "reasoning_effort" not in kwargs
+
+
+# ===== loop_reasoning_call_kwargs =====
+
+
+def test_loop_kwargs_request_encrypted_reasoning_on_responses_route(monkeypatch):
+    monkeypatch.delenv("OPENAI_REASONING_SUMMARY", raising=False)
+    assert loop_reasoning_call_kwargs("medium", "openai/responses/gpt-5.4") == {
+        "extra_body": {
+            "reasoning": {"effort": "medium"},
+            "include": ["reasoning.encrypted_content"],
+        }
+    }
+
+
+def test_loop_kwargs_keep_the_summary_opt_in(monkeypatch):
+    monkeypatch.setenv("OPENAI_REASONING_SUMMARY", "1")
+    assert loop_reasoning_call_kwargs("high", "openai/responses/gpt-5.4") == {
+        "extra_body": {
+            "reasoning": {"effort": "high", "summary": "detailed"},
+            "include": ["reasoning.encrypted_content"],
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["claude-opus-4-8", "claude-opus-4-5", "gemini/gemini-2.5-pro", "gpt-4o"],
+)
+def test_loop_kwargs_match_reasoning_kwargs_off_responses_routes(model):
+    assert loop_reasoning_call_kwargs("high", model) == reasoning_call_kwargs(
+        "high", model
+    )
+
+
+def test_loop_kwargs_empty_without_effort():
+    assert loop_reasoning_call_kwargs(None, "openai/responses/gpt-5.4") == {}
+
+
+def test_other_callers_keep_todays_responses_request(monkeypatch):
+    monkeypatch.delenv("OPENAI_REASONING_SUMMARY", raising=False)
+    assert reasoning_call_kwargs("medium", "openai/responses/gpt-5.4") == {
+        "extra_body": {"reasoning": {"effort": "medium"}}
+    }
