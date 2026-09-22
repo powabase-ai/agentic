@@ -26,7 +26,7 @@ from agentic.agent.compaction import (
 )
 from agentic.agent.errors import classify_error, classify_finish_reason
 from agentic.agent.loop_state import LoopState
-from agentic.agent.message import reasoning_replay_fields
+from agentic.agent.message import drop_reasoning_replay_fields, reasoning_replay_fields
 from agentic.agent.normalization import normalize_messages
 from agentic.agent.output import AgentOutput, ToolCallRecord
 from agentic.agent.session import AgentSession
@@ -144,6 +144,14 @@ def _build_tool_message(tc_id: str, result) -> tuple[dict, dict | None]:
         }, None
 
 
+def _provider_of(model: str) -> str | None:
+    """The LiteLLM provider ``model`` routes to, or None when it cannot tell."""
+    try:
+        return litellm.get_llm_provider(model)[1]
+    except Exception:
+        return None
+
+
 class Agent:
     """
     A single LLM-powered agent.
@@ -256,6 +264,44 @@ class Agent:
         un-pruned (larger, costlier) history.
         """
         return maybe_route_through_responses(model, self._resolved_effort_for(model))
+
+    def _fall_back(
+        self,
+        state: LoopState,
+        fallback_model: str,
+        step: int,
+        context: ExecutionContext,
+    ) -> LoopState:
+        """Move the run onto ``fallback_model``.
+
+        Reasoning replayed to a different provider is at best unreadable and at
+        worst turned into malformed input — LiteLLM converts Claude thinking
+        blocks into Gemini thought parts — so on a provider change every
+        assistant message loses its replay fields, session history included.
+        The ``reasoning`` record stays. The same provider, or a model LiteLLM
+        cannot resolve, keeps everything: the rule the host applies to session
+        history.
+        """
+        from_provider = _provider_of(state.current_model)
+        to_provider = _provider_of(fallback_model)
+        state = state.with_fallback_model(fallback_model)
+        if from_provider is None or to_provider is None or from_provider == to_provider:
+            return state
+        messages = [
+            drop_reasoning_replay_fields(m) if m.get("role") == "assistant" else m
+            for m in state.messages
+        ]
+        if messages == list(state.messages):
+            return state
+        context.emit_event(
+            {
+                "type": "reasoning_dropped_at_provider_switch",
+                "step": step,
+                "from_provider": from_provider,
+                "to_provider": to_provider,
+            }
+        )
+        return state.recover(messages=messages, reason="model_fallback")
 
     def run(
         self,
@@ -606,7 +652,7 @@ class Agent:
                                 "reason": "rate_limit",
                             }
                         )
-                        state = state.with_fallback_model(fallback_model)
+                        state = self._fall_back(state, fallback_model, step, context)
                         continue
 
                     # Recovery: reactive compact on prompt too long
@@ -747,7 +793,7 @@ class Agent:
                                 "reason": "model_error",
                             }
                         )
-                        state = state.with_fallback_model(fallback_model)
+                        state = self._fall_back(state, fallback_model, step, context)
                         continue
 
                     # Unrecoverable — re-raise to outer exception handler
