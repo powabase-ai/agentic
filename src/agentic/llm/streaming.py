@@ -137,41 +137,46 @@ class Message:
 
 
 def _combine_thinking_blocks(blocks: list[dict]) -> list[dict]:
-    """Combine streamed thinking-block deltas into final form, grouping by index.
+    """Combine streamed thinking-block deltas into final blocks, by sequence.
 
-    Anthropic emits content_block_start (type=thinking), content_block_delta
-    (type=thinking_delta) chunks of partial thinking text, then signature_delta,
-    then content_block_stop. LiteLLM normalizes to delta.thinking_blocks per
-    chunk that share an `index` per logical block.
-
-    Local implementation rather than coupling to LiteLLM internals — equivalent
-    algorithm, fewer cross-version surprises (verified at litellm/main.py for
-    processor.get_combined_thinking_content).
+    LiteLLM's Anthropic stream parser puts no ``index`` on thinking deltas: a
+    text delta is ``{type: thinking, thinking: <text>, signature: ""}``, the
+    signature arrives on a delta of its own with empty text, and a redacted
+    block arrives whole. Grouping by ``index`` therefore merged every block of
+    a response into one, which the provider rejects on replay. The deltas are
+    walked in order instead, as LiteLLM's own combiner does
+    (``get_combined_thinking_content``), and ``index`` is ignored: text appends
+    to the open block, and a signature signs and closes it. A block still open
+    at the end is kept, without a ``signature`` key if none arrived.
 
     A ``redacted_thinking`` block is opaque — its payload is ``data`` — so it
-    keeps ``data`` and gets no ``thinking`` key, which would make it malformed
-    on replay.
+    keeps ``data`` only, with no ``thinking`` key, which would make it
+    malformed on replay. LiteLLM emits one delta per redacted block, so each is
+    a block of its own, and it closes any open thinking block.
     """
-    by_index: dict[int, dict] = {}
+    combined: list[dict] = []
+    open_block: dict | None = None
     for block in blocks:
-        idx = block.get("index", 0)
-        existing = by_index.setdefault(idx, {"type": block.get("type", "thinking")})
-        if block.get("type"):
-            existing["type"] = block["type"]
-        if block.get("thinking"):
-            existing["thinking"] = existing.get("thinking", "") + block["thinking"]
-        if block.get("signature"):
-            existing["signature"] = block["signature"]
-        if block.get("data"):
-            existing["data"] = existing.get("data", "") + block["data"]
-    combined = []
-    for i in sorted(by_index):
-        block = by_index[i]
-        if block["type"] == "redacted_thinking":
-            block.pop("thinking", None)
-        else:
-            block.setdefault("thinking", "")
-        combined.append(block)
+        if block.get("type") == "redacted_thinking":
+            if open_block is not None:
+                combined.append(open_block)
+                open_block = None
+            combined.append({"type": "redacted_thinking", "data": block.get("data")})
+            continue
+        text = block.get("thinking")
+        if text:
+            if open_block is None:
+                open_block = {"type": "thinking", "thinking": ""}
+            open_block["thinking"] += text
+        signature = block.get("signature")
+        if signature:
+            if open_block is None:
+                open_block = {"type": "thinking", "thinking": ""}
+            open_block["signature"] = signature
+            combined.append(open_block)
+            open_block = None
+    if open_block is not None:
+        combined.append(open_block)
     return combined
 
 
