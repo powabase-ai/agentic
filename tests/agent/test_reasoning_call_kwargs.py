@@ -78,7 +78,12 @@ def test_openai_routes_through_responses_with_packed_extra_body():
 
     call_kwargs = mock_completion.call_args.kwargs
     assert call_kwargs["model"] == "openai/responses/gpt-5.4"
-    assert call_kwargs["extra_body"] == {"reasoning": {"effort": "medium"}}
+    assert call_kwargs["extra_body"] == {
+        "reasoning": {"effort": "medium"},
+        # The loop replays reasoning items on the next step, which needs
+        # their encrypted content.
+        "include": ["reasoning.encrypted_content"],
+    }
     # Critical: NO top-level reasoning_effort on the Responses path
     assert "reasoning_effort" not in call_kwargs
 
@@ -101,7 +106,8 @@ def test_openai_responses_includes_summary_when_opted_in():
 
     call_kwargs = mock_completion.call_args.kwargs
     assert call_kwargs["extra_body"] == {
-        "reasoning": {"effort": "medium", "summary": "detailed"}
+        "reasoning": {"effort": "medium", "summary": "detailed"},
+        "include": ["reasoning.encrypted_content"],
     }
 
 

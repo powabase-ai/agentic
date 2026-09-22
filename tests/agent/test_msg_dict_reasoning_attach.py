@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from agentic.agent.agent import Agent
+from agentic.agent.tools import BuiltinTool
 from agentic.execution.context import ExecutionContext
 
 
@@ -85,3 +86,146 @@ def test_no_artifact_means_no_reasoning_key():
 
     assistant_msgs = [m for m in output.messages if m.get("role") == "assistant"]
     assert "reasoning" not in assistant_msgs[0]
+
+
+_BLOCKS = [{"type": "thinking", "thinking": "I should probe.", "signature": "sig1"}]
+_ITEM = {"id": "rs_1", "type": "reasoning", "encrypted_content": "ENC", "summary": []}
+
+
+def _probe_tool():
+    return BuiltinTool(
+        name="probe",
+        description="probe",
+        input_schema={"type": "object", "properties": {}},
+        handler=lambda args, ctx: "ok",
+    )
+
+
+def _tool_step(*, thinking_blocks=None, reasoning_items=None, psf=None, summary=None):
+    msg = SimpleNamespace(
+        content=None,
+        role="assistant",
+        reasoning_content=summary,
+        tool_calls=[
+            SimpleNamespace(
+                id="call_1",
+                type="function",
+                function=SimpleNamespace(name="probe", arguments="{}"),
+            )
+        ],
+        thinking_blocks=thinking_blocks,
+        provider_specific_fields=psf,
+    )
+    if reasoning_items is not None:
+        msg.reasoning_items = reasoning_items
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=msg, finish_reason="tool_calls")],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=20, total_tokens=30),
+        id="resp_1",
+    )
+
+
+def _answer_step():
+    msg = SimpleNamespace(
+        content="done",
+        role="assistant",
+        reasoning_content=None,
+        tool_calls=None,
+        thinking_blocks=None,
+        provider_specific_fields=None,
+    )
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=msg, finish_reason="stop")],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        id="resp_2",
+    )
+
+
+def _run_two_steps(model, first_step):
+    with (
+        patch("litellm.supports_reasoning", return_value=True),
+        patch(
+            "agentic.agent.agent.litellm.completion",
+            side_effect=[first_step, _answer_step()],
+        ) as completion,
+        patch.dict(
+            "os.environ",
+            {"AGENT_LLM_STREAMING_ENABLED": "false", "OPENAI_REASONING_SUMMARY": ""},
+        ),
+    ):
+        agent = Agent(model=model, reasoning_effort="high")
+        output = agent.run(
+            "hi", context=ExecutionContext(), tools={"probe": _probe_tool()}
+        )
+    assert output.status.is_success()
+    assert completion.call_count == 2
+    return completion.call_args_list
+
+
+def _prior_assistant(call):
+    return [m for m in call.kwargs["messages"] if m.get("role") == "assistant"][-1]
+
+
+def test_anthropic_thinking_blocks_replayed_on_the_next_step():
+    calls = _run_two_steps(
+        "anthropic/claude-opus-4-8",
+        _tool_step(thinking_blocks=_BLOCKS, summary="I should probe."),
+    )
+    assert _prior_assistant(calls[1])["thinking_blocks"] == _BLOCKS
+
+
+def test_replayed_blocks_keep_litellm_from_dropping_thinking(monkeypatch):
+    """The regression itself: with no thinking blocks on any assistant turn,
+    LiteLLM (modify_params) pops `thinking` from the request."""
+    import litellm
+    from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+    monkeypatch.setattr(litellm, "modify_params", True)
+    calls = _run_two_steps(
+        "anthropic/claude-opus-4-8",
+        _tool_step(thinking_blocks=_BLOCKS, summary="I should probe."),
+    )
+    second = calls[1].kwargs
+    body = AnthropicConfig().transform_request(
+        model="claude-opus-4-8",
+        messages=second["messages"],
+        optional_params={"thinking": second["thinking"], "max_tokens": 4000},
+        litellm_params={},
+        headers={},
+    )
+    assert body.get("thinking") == second["thinking"]
+
+
+def test_openai_reasoning_items_replayed_and_encrypted_content_requested():
+    calls = _run_two_steps("openai/gpt-5.4", _tool_step(reasoning_items=[_ITEM]))
+    for call in calls:
+        assert call.kwargs["model"] == "openai/responses/gpt-5.4"
+        assert call.kwargs["extra_body"]["include"] == ["reasoning.encrypted_content"]
+    assert _prior_assistant(calls[1])["reasoning_items"] == [_ITEM]
+
+
+def test_replayed_items_reach_the_responses_input_before_their_call():
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        LiteLLMResponsesTransformationHandler,
+    )
+
+    calls = _run_two_steps("openai/gpt-5.4", _tool_step(reasoning_items=[_ITEM]))
+    items, _ = (
+        LiteLLMResponsesTransformationHandler().convert_chat_completion_messages_to_responses_api(
+            calls[1].kwargs["messages"]
+        )
+    )
+    kinds = [i["type"] for i in items]
+    reasoning = items[kinds.index("reasoning")]
+    assert kinds.index("reasoning") < kinds.index("function_call")
+    assert reasoning["id"] == "rs_1"
+    assert reasoning["encrypted_content"] == "ENC"
+
+
+def test_gemini_thought_signatures_replayed():
+    calls = _run_two_steps(
+        "gemini/gemini-2.5-pro", _tool_step(psf={"thought_signatures": ["gsig"]})
+    )
+    assert _prior_assistant(calls[1])["provider_specific_fields"] == {
+        "thought_signatures": ["gsig"]
+    }
