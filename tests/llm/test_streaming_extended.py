@@ -198,3 +198,61 @@ def test_combine_thinking_blocks_handles_no_index():
     ]
     msg, _, _ = accumulate_stream(iter(chunks))
     assert msg.thinking_blocks == [{"type": "thinking", "thinking": "xy"}]
+
+
+def _bare_delta(**kwargs):
+    fields = dict(
+        content=None,
+        reasoning_content=None,
+        tool_calls=None,
+        thinking_blocks=None,
+        provider_specific_fields=None,
+    )
+    fields.update(kwargs)
+    return _delta(**fields)
+
+
+def test_captures_reasoning_items_from_delta():
+    """LiteLLM's Responses bridge emits every reasoning item of a response on
+    one delta; stream_chunk_builder drops them, so the accumulator must."""
+    item_a = {"id": "rs_a", "type": "reasoning", "encrypted_content": "A", "summary": []}
+    item_b = {"id": "rs_b", "type": "reasoning", "encrypted_content": "B", "summary": []}
+    chunks = [
+        _chunk(delta=_bare_delta(content="hi")),
+        _chunk(delta=_bare_delta(content="", reasoning_items=[item_a, item_b])),
+        _chunk(delta=_bare_delta(), finish_reason="stop"),
+    ]
+    msg, _, _ = accumulate_stream(iter(chunks))
+    assert msg.reasoning_items == [item_a, item_b]
+    assert msg.content == "hi"
+
+
+def test_reasoning_items_default_to_empty():
+    msg, _, _ = accumulate_stream(iter([]))
+    assert msg.reasoning_items == []
+
+
+def test_redacted_thinking_block_keeps_its_data():
+    """A redacted block is opaque: its whole payload is `data`. Rebuilding it
+    as {type, thinking, signature} would make it malformed on replay."""
+    chunks = [
+        _chunk(
+            delta=_bare_delta(
+                thinking_blocks=[{"index": 0, "type": "thinking", "thinking": "plan"}]
+            )
+        ),
+        _chunk(delta=_bare_delta(thinking_blocks=[{"index": 0, "signature": "s0"}])),
+        _chunk(
+            delta=_bare_delta(
+                thinking_blocks=[
+                    {"index": 1, "type": "redacted_thinking", "data": "OPAQUE"}
+                ]
+            )
+        ),
+        _chunk(delta=_bare_delta(content="answer"), finish_reason="stop"),
+    ]
+    msg, _, _ = accumulate_stream(iter(chunks))
+    assert msg.thinking_blocks == [
+        {"type": "thinking", "thinking": "plan", "signature": "s0"},
+        {"type": "redacted_thinking", "data": "OPAQUE"},
+    ]
