@@ -26,6 +26,7 @@ from agentic.agent.compaction import (
 )
 from agentic.agent.errors import classify_error, classify_finish_reason
 from agentic.agent.loop_state import LoopState
+from agentic.agent.message import reasoning_replay_fields
 from agentic.agent.normalization import normalize_messages
 from agentic.agent.output import AgentOutput, ToolCallRecord
 from agentic.agent.session import AgentSession
@@ -35,6 +36,7 @@ from agentic.execution.status import ExecutionStatus
 from agentic.knowledge.model_config import AGENT_DEFAULT_MODEL
 from agentic.llm.reasoning_extractor import extract_reasoning_artifact
 from agentic.llm.routing import (
+    loop_reasoning_call_kwargs,
     maybe_route_through_responses,
     reasoning_call_kwargs,
 )
@@ -542,14 +544,16 @@ class Agent:
                 # and merge in the matching kwargs (top-level reasoning_effort
                 # for non-Responses paths; effort+summary packed into extra_body
                 # for Responses paths — see agentic/llm/routing.py for the
-                # bug-avoidance rationale).
+                # bug-avoidance rationale). ``loop_reasoning_call_kwargs`` also
+                # asks a Responses route for encrypted reasoning, which the
+                # next step replays.
                 effective_effort = self._resolved_effort_for(state.current_model)
                 routed_model = maybe_route_through_responses(
                     state.current_model, effective_effort
                 )
                 call_kwargs["model"] = routed_model
                 call_kwargs.update(
-                    reasoning_call_kwargs(effective_effort, routed_model)
+                    loop_reasoning_call_kwargs(effective_effort, routed_model)
                 )
 
                 # Claude caches only up to explicit breakpoints. They go on
@@ -899,9 +903,13 @@ class Agent:
                         for tc in assistant_msg.tool_calls
                     ]
 
-                # Attach reasoning artifact for intra-run replay (Phase B).
-                # Required for Anthropic+thinking+tools to survive the next
-                # tool-result LLM call without 400-ing.
+                # The artifact goes on the message twice. `reasoning` is the
+                # host-facing record (normalize_messages strips it); the replay
+                # fields are what the provider reads on the next step. Without
+                # them Claude stops thinking after the first tool step — with no
+                # thinking blocks anywhere in the history, LiteLLM
+                # (modify_params) drops `thinking` from the request — and
+                # OpenAI loses its reasoning items.
                 artifact = extract_reasoning_artifact(
                     model=state.current_model,
                     assembled_message=assistant_msg,
@@ -910,6 +918,7 @@ class Agent:
                 )
                 if artifact is not None:
                     msg_dict["reasoning"] = artifact.model_dump(exclude_none=True)
+                    msg_dict.update(reasoning_replay_fields(artifact))
                     last_artifact = artifact
 
                 working_messages = list(state.messages) + [msg_dict]

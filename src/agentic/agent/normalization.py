@@ -11,6 +11,7 @@ _STANDARD_FIELDS = {
     "tool_call_id",
     "name",
     "thinking_blocks",  # Anthropic reasoning replay
+    "reasoning_items",  # OpenAI Responses reasoning replay
     "provider_specific_fields",  # OpenAI/Gemini reasoning replay
 }
 
