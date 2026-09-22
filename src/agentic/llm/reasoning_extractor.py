@@ -18,6 +18,18 @@ from agentic.agent.message import (
 logger = logging.getLogger(__name__)
 
 
+def _plain_item(item: Any) -> dict:
+    """A reasoning item as a plain dict. Streamed items can arrive as LiteLLM
+    objects; the artifact is persisted as JSON and replayed through LiteLLM,
+    which reads items with ``.get``."""
+    if isinstance(item, dict):
+        return dict(item)
+    dump = getattr(item, "model_dump", None)
+    if callable(dump):
+        return dump(exclude_none=True)
+    return dict(item)
+
+
 def extract_reasoning_artifact(
     *,
     model: str,
@@ -68,17 +80,22 @@ def _extract_inner(
         )
 
     if provider == "openai":
-        encrypted = psf.get("encrypted_content_items", []) or []
+        # LiteLLM's Responses bridge surfaces reasoning as a top-level
+        # `reasoning_items` (streaming: collected by accumulate_stream).
+        items = [
+            _plain_item(i)
+            for i in (getattr(assembled_message, "reasoning_items", None) or [])
+        ]
         reasoning_count = None
         if usage is not None:
             details = getattr(usage, "completion_tokens_details", None)
             if details is not None:
                 reasoning_count = getattr(details, "reasoning_tokens", None)
-        if not encrypted and not summary and not reasoning_count:
+        if not items and not summary and not reasoning_count:
             return None
         return OpenAIReasoning(
             response_id=getattr(final_response, "id", None),
-            encrypted_content_items=encrypted,
+            reasoning_items=items,
             summary_text=summary,
             requested_effort=requested_effort,
             reasoning_token_count=reasoning_count,
