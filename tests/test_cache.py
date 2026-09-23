@@ -329,3 +329,21 @@ class TestAddCacheBreakpoints:
         assert messages == [
             {"role": "system", "content": "s", "cache_control": _EPHEMERAL}
         ]
+
+    def test_skipping_the_last_message_marks_system_and_last_tool_only(self):
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "question"},
+            {"role": "user", "content": "summarize"},
+        ]
+        tools = [
+            {"type": "function", "function": {"name": "a", "parameters": {}}},
+            {"type": "function", "function": {"name": "b", "parameters": {}}},
+        ]
+        marked, marked_tools = add_cache_breakpoints(
+            "claude-opus-4-8", messages, tools, mark_last_message=False
+        )
+        assert marked[0]["cache_control"] == {"type": "ephemeral"}
+        assert all("cache_control" not in m for m in marked[1:])
+        assert marked_tools[-1]["cache_control"] == {"type": "ephemeral"}
+        assert "cache_control" not in marked_tools[0]

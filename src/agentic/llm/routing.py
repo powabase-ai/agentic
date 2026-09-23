@@ -165,3 +165,26 @@ def reasoning_call_kwargs(reasoning_effort: str | None, model: str) -> dict:
             "output_config": {"effort": reasoning_effort},
         }
     return {"reasoning_effort": reasoning_effort}
+
+
+def loop_reasoning_call_kwargs(reasoning_effort: str | None, model: str) -> dict:
+    """``reasoning_call_kwargs`` plus what replaying reasoning between steps needs.
+
+    On a Responses route the reply's reasoning items come back with their
+    encrypted content only when asked for. With it, the items can be handed
+    back on the next step whether or not the provider stores responses — the
+    only form that works for a zero-data-retention organization. Only the
+    OpenAI Responses route asks: reasoning items are extracted and replayed
+    for the ``openai`` provider alone, so another Responses route (Azure)
+    would fetch the payload for nothing. Every other route already returns
+    what replay needs, so its kwargs are unchanged.
+
+    For the agent loop and its compaction call; one-shot callers, which have
+    nothing to replay, keep using ``reasoning_call_kwargs``.
+    """
+    kwargs = reasoning_call_kwargs(reasoning_effort, model)
+    if reasoning_effort is not None and model.startswith("openai/responses/"):
+        extra_body = dict(kwargs.get("extra_body") or {})
+        extra_body["include"] = ["reasoning.encrypted_content"]
+        kwargs["extra_body"] = extra_body
+    return kwargs

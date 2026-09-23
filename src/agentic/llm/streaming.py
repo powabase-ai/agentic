@@ -128,36 +128,61 @@ class Message:
     tool_calls: list[_ToolCall] = field(default_factory=list)
     thinking_blocks: list[dict] = field(default_factory=list)
     provider_specific_fields: dict = field(default_factory=dict)
+    # OpenAI Responses reasoning items, replayed on the next step (see
+    # agentic.agent.message.reasoning_replay_fields).
+    reasoning_items: list = field(default_factory=list)
 
 
 # ===== Accumulator =====
 
 
 def _combine_thinking_blocks(blocks: list[dict]) -> list[dict]:
-    """Combine streamed thinking-block deltas into final form, grouping by index.
+    """Combine streamed thinking-block deltas into final blocks, by sequence.
 
-    Anthropic emits content_block_start (type=thinking), content_block_delta
-    (type=thinking_delta) chunks of partial thinking text, then signature_delta,
-    then content_block_stop. LiteLLM normalizes to delta.thinking_blocks per
-    chunk that share an `index` per logical block.
+    LiteLLM's Anthropic stream parser puts no ``index`` on thinking deltas: a
+    text delta is ``{type: thinking, thinking: <text>, signature: ""}``, the
+    signature arrives on a delta of its own with empty text, and a redacted
+    block arrives whole. Grouping by ``index`` therefore merged every block of
+    a response into one, which the provider rejects on replay. The deltas are
+    walked in order instead, and ``index`` is ignored: text appends to the open
+    block, and a signature signs and closes it.
 
-    Local implementation rather than coupling to LiteLLM internals — equivalent
-    algorithm, fewer cross-version surprises (verified at litellm/main.py for
-    processor.get_combined_thinking_content).
+    Unlike LiteLLM's own combiner (``get_combined_thinking_content``), which
+    drops a block that never received a signature, a block still open at the
+    end — a response cut off mid-thinking — is kept, without a ``signature``
+    key, so the record holds all the reasoning that streamed. The provider
+    rejects such a block on replay, so ``reasoning_replay_fields`` filters it
+    out.
+
+    A ``redacted_thinking`` block is opaque — its payload is ``data`` — so it
+    keeps ``data`` only, with no ``thinking`` key, which would make it
+    malformed on replay. LiteLLM emits one delta per redacted block, so each is
+    a block of its own, and it closes any open thinking block.
     """
-    by_index: dict[int, dict] = {}
+    combined: list[dict] = []
+    open_block: dict | None = None
     for block in blocks:
-        idx = block.get("index", 0)
-        existing = by_index.setdefault(
-            idx, {"type": block.get("type", "thinking"), "thinking": ""}
-        )
-        if "thinking" in block and block["thinking"]:
-            existing["thinking"] += block["thinking"]
-        if "signature" in block and block["signature"]:
-            existing["signature"] = block["signature"]
-        if block.get("type"):
-            existing["type"] = block["type"]
-    return [by_index[i] for i in sorted(by_index)]
+        if block.get("type") == "redacted_thinking":
+            if open_block is not None:
+                combined.append(open_block)
+                open_block = None
+            combined.append({"type": "redacted_thinking", "data": block.get("data")})
+            continue
+        text = block.get("thinking")
+        if text:
+            if open_block is None:
+                open_block = {"type": "thinking", "thinking": ""}
+            open_block["thinking"] += text
+        signature = block.get("signature")
+        if signature:
+            if open_block is None:
+                open_block = {"type": "thinking", "thinking": ""}
+            open_block["signature"] = signature
+            combined.append(open_block)
+            open_block = None
+    if open_block is not None:
+        combined.append(open_block)
+    return combined
 
 
 def accumulate_stream(
@@ -190,6 +215,7 @@ def accumulate_stream(
     tool_calls_acc: dict[int, dict[str, Any]] = {}
     thinking_blocks_acc: list[dict] = []
     psf_acc: dict[str, Any] = {}
+    reasoning_items_acc: list = []
     finish_reason: str | None = None
     usage: dict | None = None
 
@@ -257,7 +283,8 @@ def accumulate_stream(
 
             # Anthropic thinking_blocks delta capture (verified at
             # litellm/main.py:6350-6361). Each chunk's delta.thinking_blocks
-            # is a list of partial blocks identified by index.
+            # is a list of block fragments; they carry no reliable index, so
+            # _combine_thinking_blocks assembles them by sequence.
             chunk_thinking = getattr(delta, "thinking_blocks", None) or []
             for block in chunk_thinking:
                 thinking_blocks_acc.append(block)
@@ -270,6 +297,12 @@ def accumulate_stream(
                     psf_acc.setdefault(k, []).extend(v)
                 else:
                     psf_acc[k] = v
+
+            # OpenAI Responses reasoning items. LiteLLM's bridge puts every
+            # item of the response on one delta; stream_chunk_builder drops
+            # them, so this is the only place they survive a stream.
+            chunk_items = getattr(delta, "reasoning_items", None) or []
+            reasoning_items_acc.extend(chunk_items)
     except (AbortedError, StreamPartialError):
         # Already wrapped — propagate as-is
         raise
@@ -342,6 +375,7 @@ def accumulate_stream(
             tool_calls=tool_calls,
             thinking_blocks=_combine_thinking_blocks(thinking_blocks_acc),
             provider_specific_fields=psf_acc,
+            reasoning_items=reasoning_items_acc,
         ),
         finish_reason,
         usage,

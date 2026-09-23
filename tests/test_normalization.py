@@ -164,3 +164,11 @@ class TestSystemContextTagging:
         ]
         result = normalize_messages(messages)
         assert "<system-context>" not in result[0]["content"]
+
+
+def test_reasoning_items_survive_normalization():
+    item = {"id": "rs_1", "type": "reasoning", "encrypted_content": "e", "summary": []}
+    out = normalize_messages(
+        [{"role": "assistant", "content": None, "reasoning_items": [item]}]
+    )
+    assert out[0]["reasoning_items"] == [item]

@@ -9,6 +9,7 @@ in-memory shape.
 
 from __future__ import annotations
 
+import copy
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
@@ -25,10 +26,19 @@ class AnthropicReasoning(BaseModel):
 class OpenAIReasoning(BaseModel):
     provider: Literal["openai"] = "openai"
     response_id: str | None = None
-    encrypted_content_items: list[dict] = Field(default_factory=list)
+    # Responses API reasoning items ({id, type, encrypted_content, summary}).
+    # Rows persisted before this field existed carry `encrypted_content_items`
+    # instead (always empty); the default `extra="ignore"` drops it on load.
+    reasoning_items: list[dict] = Field(default_factory=list)
     summary_text: str | None = None
     requested_effort: str | None = None
     reasoning_token_count: int | None = None
+
+    @property
+    def encrypted_content_items(self) -> list[dict]:
+        """Deprecated: always empty. Replaced by ``reasoning_items``; kept so
+        attribute access from older callers does not break."""
+        return []
 
 
 class GeminiReasoning(BaseModel):
@@ -44,6 +54,70 @@ ReasoningArtifact = Annotated[
     Field(discriminator="provider"),
 ]
 
+# provider_specific_fields entries that carry reasoning replay. The second is
+# the pre-rename OpenAI key, which old session history may still hold.
+_REPLAY_PSF_KEYS = ("thought_signatures", "encrypted_content_items")
+
+
+def reasoning_replay_fields(reasoning: ReasoningArtifact) -> dict:
+    """The LiteLLM message keys that hand ``reasoning`` back to its provider.
+
+    Anthropic reads ``thinking_blocks``; LiteLLM's OpenAI Responses bridge
+    reads a top-level ``reasoning_items``; Gemini reads
+    ``provider_specific_fields.thought_signatures``. Empty when the artifact
+    carries nothing to replay.
+
+    Only signed thinking blocks and redacted ones are replayed: a block with
+    no signature — a response cut off mid-thinking — is rejected by the
+    provider. The artifact keeps it for the record.
+
+    The structures are deep copies, so a request built from them cannot reach
+    back into the artifact the host persists.
+    """
+    if isinstance(reasoning, AnthropicReasoning):
+        blocks = [
+            b
+            for b in reasoning.thinking_blocks
+            if b.get("type") == "redacted_thinking"
+            or (b.get("type") == "thinking" and b.get("signature"))
+        ]
+        if blocks:
+            return {"thinking_blocks": copy.deepcopy(blocks)}
+    elif isinstance(reasoning, OpenAIReasoning):
+        if reasoning.reasoning_items:
+            return {"reasoning_items": copy.deepcopy(reasoning.reasoning_items)}
+    elif isinstance(reasoning, GeminiReasoning):
+        if reasoning.thought_signatures:
+            return {
+                "provider_specific_fields": {
+                    "thought_signatures": list(reasoning.thought_signatures)
+                }
+            }
+    return {}
+
+
+def drop_reasoning_replay_fields(message: dict) -> dict:
+    """Copy of ``message`` without any provider's reasoning replay keys.
+
+    For a request going to a different provider than the one that reasoned:
+    it cannot verify the reasoning, and LiteLLM converts some of it into
+    malformed input (Claude thinking blocks become Gemini thought parts).
+    ``reasoning``, the host-facing record, is kept.
+    """
+    out = {
+        k: v
+        for k, v in message.items()
+        if k not in ("thinking_blocks", "reasoning_items")
+    }
+    psf = out.get("provider_specific_fields")
+    if isinstance(psf, dict):
+        kept = {k: v for k, v in psf.items() if k not in _REPLAY_PSF_KEYS}
+        if kept:
+            out["provider_specific_fields"] = kept
+        else:
+            del out["provider_specific_fields"]
+    return out
+
 
 class Message(BaseModel):
     role: Literal["system", "user", "assistant", "tool"]
@@ -54,12 +128,15 @@ class Message(BaseModel):
     reasoning_requested: bool = False
 
     def to_litellm_input(self) -> dict:
-        """Produce the LiteLLM-bound shape for replay.
+        """Produce the LiteLLM-bound shape for replay across turns.
 
-        Provider-specific replay fields are emitted unconditionally per the
-        artifact's provider. The decision to *use* them (i.e., not strip on
-        cross-provider boundary) belongs to the caller (build_messages_for_llm
-        in services/session.py — see spec §5.5).
+        Anthropic thinking blocks and Gemini thought signatures are emitted
+        per the artifact's provider; the decision to *use* them (i.e., not
+        strip them at a cross-provider boundary) belongs to the caller.
+        OpenAI reasoning items are not emitted: the Responses API discards
+        reasoning from turns before the latest user message and binds
+        encrypted content to the organization that produced it, so replaying
+        one across turns can only cost a rejected request.
         """
         base: dict = {"role": self.role}
         if self.content is not None:
@@ -69,18 +146,7 @@ class Message(BaseModel):
         if self.tool_call_id:
             base["tool_call_id"] = self.tool_call_id
         if self.role == "assistant" and self.reasoning is not None:
-            r = self.reasoning
-            if isinstance(r, AnthropicReasoning):
-                if r.thinking_blocks:
-                    base["thinking_blocks"] = r.thinking_blocks
-            elif isinstance(r, OpenAIReasoning):
-                if r.encrypted_content_items:
-                    base["provider_specific_fields"] = {
-                        "encrypted_content_items": r.encrypted_content_items
-                    }
-            elif isinstance(r, GeminiReasoning):
-                if r.thought_signatures:
-                    base["provider_specific_fields"] = {
-                        "thought_signatures": r.thought_signatures
-                    }
+            replay = reasoning_replay_fields(self.reasoning)
+            replay.pop("reasoning_items", None)
+            base.update(replay)
         return base

@@ -63,6 +63,8 @@ def add_cache_breakpoints(
     model: str,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None,
+    *,
+    mark_last_message: bool = True,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
     """Return copies of ``messages`` and ``tools`` carrying cache breakpoints.
 
@@ -78,6 +80,9 @@ def add_cache_breakpoints(
     3. the last tool definition — tools open the prefix, though a read at the
        system breakpoint already covers them.
 
+    ``mark_last_message=False`` skips (1), for a request whose tail nothing
+    reads back — compaction's summary instruction.
+
     A spot that already carries a breakpoint keeps it, TTL included, at no
     cost. The inputs are never mutated: a breakpoint belongs to one request,
     and left in stored history it would still be there next step. Models
@@ -89,7 +94,7 @@ def add_cache_breakpoints(
     budget = _MAX_BREAKPOINTS - _count_breakpoints(messages, tools)
     marked = list(messages)
     targets = []
-    if marked:
+    if marked and mark_last_message:
         targets.append(len(marked) - 1)
     if len(marked) > 1 and marked[0].get("role") == "system":
         targets.append(0)

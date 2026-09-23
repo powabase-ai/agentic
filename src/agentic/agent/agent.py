@@ -19,13 +19,16 @@ import litellm
 from agentic.agent.cache import add_cache_breakpoints, sort_tools_for_cache
 from agentic.agent.compaction import (
     compact_messages,
+    compaction_output_reserve,
     estimate_token_count,
     get_context_threshold,
     prune_messages,
+    thinking_budget,
     truncate_messages,
 )
 from agentic.agent.errors import classify_error, classify_finish_reason
 from agentic.agent.loop_state import LoopState
+from agentic.agent.message import drop_reasoning_replay_fields, reasoning_replay_fields
 from agentic.agent.normalization import normalize_messages
 from agentic.agent.output import AgentOutput, ToolCallRecord
 from agentic.agent.session import AgentSession
@@ -35,6 +38,7 @@ from agentic.execution.status import ExecutionStatus
 from agentic.knowledge.model_config import AGENT_DEFAULT_MODEL
 from agentic.llm.reasoning_extractor import extract_reasoning_artifact
 from agentic.llm.routing import (
+    loop_reasoning_call_kwargs,
     maybe_route_through_responses,
     reasoning_call_kwargs,
 )
@@ -140,6 +144,57 @@ def _build_tool_message(tc_id: str, result) -> tuple[dict, dict | None]:
             "tool_call_id": tc_id,
             "content": result,
         }, None
+
+
+def _provider_of(model: str) -> str | None:
+    """The LiteLLM provider ``model`` routes to, or None when it cannot tell."""
+    try:
+        return litellm.get_llm_provider(model)[1]
+    except Exception:
+        return None
+
+
+def _provider_view(message: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        message.get("role"),
+        message.get("content"),
+        message.get("tool_calls"),
+        message.get("tool_call_id"),
+    )
+
+
+def _without_blocks_after_edit(
+    before: list[dict[str, Any]], after: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Drop Claude thinking blocks from every assistant message at or after the
+    first message an edit changed.
+
+    A thinking block's signature binds everything before it, so a block that
+    follows a rewritten message is rejected; blocks before the edit stay valid
+    (and keep thinking on). Messages are compared on what the provider sees —
+    role, content, tool calls, tool-call id — so bookkeeping keys and message
+    removals both count conservatively.
+    """
+    edit_at = len(after)
+    for i, message in enumerate(after):
+        if i >= len(before) or _provider_view(before[i]) != _provider_view(message):
+            edit_at = i
+            break
+    return [
+        {k: v for k, v in m.items() if k != "thinking_blocks"}
+        if i >= edit_at and m.get("role") == "assistant" and "thinking_blocks" in m
+        else m
+        for i, m in enumerate(after)
+    ]
+
+
+def _without_thinking_blocks(messages: Any) -> list[dict[str, Any]]:
+    return [
+        {k: v for k, v in m.items() if k != "thinking_blocks"}
+        if m.get("role") == "assistant"
+        else m
+        for m in messages
+    ]
 
 
 class Agent:
@@ -254,6 +309,70 @@ class Agent:
         un-pruned (larger, costlier) history.
         """
         return maybe_route_through_responses(model, self._resolved_effort_for(model))
+
+    def _compaction_reasoning_kwargs(self, model: str) -> dict[str, Any]:
+        """The reasoning kwargs the real call sends for ``model``, for its
+        compaction call. Claude keys its cached prefix on thinking and effort,
+        so a compaction under other settings could never read what the loop
+        cached."""
+        return loop_reasoning_call_kwargs(
+            self._resolved_effort_for(model), self._compaction_model_for(model)
+        )
+
+    def _threshold_for(self, model: str) -> int:
+        """The loop's compaction threshold for ``model``. With reasoning on it
+        reserves the compaction call's reasoning budget, including a
+        budget-based Claude model's thinking budget (see
+        ``compaction_output_reserve``)."""
+        return get_context_threshold(
+            model,
+            compaction_output_reserve(
+                self.max_tokens,
+                self._resolved_effort_for(model) is not None,
+                thinking_budget(
+                    self._compaction_model_for(model),
+                    self._compaction_reasoning_kwargs(model),
+                ),
+            ),
+        )
+
+    def _fall_back(
+        self,
+        state: LoopState,
+        fallback_model: str,
+        step: int,
+        context: ExecutionContext,
+    ) -> LoopState:
+        """Move the run onto ``fallback_model``.
+
+        Reasoning replayed to a different provider is at best unreadable and at
+        worst turned into malformed input — LiteLLM converts Claude thinking
+        blocks into Gemini thought parts — so on a provider change every
+        assistant message loses its replay fields, session history included.
+        The ``reasoning`` record stays. The same provider, or a model LiteLLM
+        cannot resolve, keeps everything: the rule the host applies to session
+        history.
+        """
+        from_provider = _provider_of(state.current_model)
+        to_provider = _provider_of(fallback_model)
+        state = state.with_fallback_model(fallback_model)
+        if from_provider is None or to_provider is None or from_provider == to_provider:
+            return state
+        messages = [
+            drop_reasoning_replay_fields(m) if m.get("role") == "assistant" else m
+            for m in state.messages
+        ]
+        if messages == list(state.messages):
+            return state
+        context.emit_event(
+            {
+                "type": "reasoning_dropped_at_provider_switch",
+                "step": step,
+                "from_provider": from_provider,
+                "to_provider": to_provider,
+            }
+        )
+        return state.recover(messages=messages, reason="model_fallback")
 
     def run(
         self,
@@ -405,6 +524,9 @@ class Agent:
             }
             # For doom loop detection: list of (tool_name, arguments_str) tuples
             recent_calls: list[tuple[str, str]] = []
+            # One free retry per run when the provider rejects a replayed
+            # thinking block's signature (see the LLM-call `except`).
+            thinking_backstop_used = False
 
             while True:
                 # The "step" as seen by events/output is turn_count + 1
@@ -430,12 +552,29 @@ class Agent:
 
                 is_last_step = step >= max_steps or state.budget_exhausted
 
-                # On last step, don't pass tools to force a text-only response.
+                # On the last step, force a text-only response. On the
+                # Anthropic route the tools stay and tool_choice="none" forbids
+                # them: a thinking block's signature binds the tool set, so
+                # dropping the tools would invalidate every block the step
+                # replays. Other routes withhold the tools, as not every
+                # provider accepts tool_choice="none". Skipped when
+                # response_format is set: LiteLLM implements it on Claude as a
+                # forced json_tool_call, which keeping tools + tool_choice="none"
+                # would override — response_format wins, falling back to
+                # withholding the tools instead.
                 # Resolved here (not just before the call) so the compaction
                 # sites below can send the same value: tool definitions sit at
                 # the front of the cached prefix, so compacting with tools the
                 # real call will not send breaks the match at the first block.
-                step_tools = None if is_last_step else tool_schemas
+                forbid_tool_use = (
+                    is_last_step
+                    and bool(tool_schemas)
+                    and response_format is None
+                    and _provider_of(state.current_model) == "anthropic"
+                )
+                step_tools = (
+                    None if is_last_step and not forbid_tool_use else tool_schemas
+                )
 
                 # Normalize messages before LLM call
                 normalized = normalize_messages(
@@ -444,13 +583,17 @@ class Agent:
 
                 # Proactive context management — prune/compact before LLM call if near threshold
                 token_estimate = estimate_token_count(normalized)
-                threshold = get_context_threshold(state.current_model, self.max_tokens)
+                threshold = self._threshold_for(state.current_model)
                 if token_estimate > threshold:
                     # Pruning is free, so try it first and use it for the
                     # threshold decision: if it alone gets us under, we never
                     # pay for a compaction call.
                     compact_succeeded = False
-                    pruned = prune_messages(normalized)
+                    # Pruning rewrites old tool results, so thinking blocks
+                    # after the first rewrite would be rejected on replay.
+                    pruned = _without_blocks_after_edit(
+                        normalized, prune_messages(normalized)
+                    )
                     if estimate_token_count(pruned) > threshold:
                         if state.compact_failure_count < 3:
                             # Compact the UN-pruned list: compact_messages
@@ -466,6 +609,10 @@ class Agent:
                                     ),
                                     api_key=self.api_key,
                                     tools=step_tools,
+                                    reasoning_kwargs=self._compaction_reasoning_kwargs(
+                                        state.current_model
+                                    ),
+                                    context_model=state.current_model,
                                 )
                             except Exception:
                                 logger.warning(
@@ -531,6 +678,8 @@ class Agent:
                     call_kwargs["max_tokens"] = self.max_tokens
                 if step_tools:
                     call_kwargs["tools"] = step_tools
+                    if forbid_tool_use:
+                        call_kwargs["tool_choice"] = "none"
                 if response_format is not None:
                     call_kwargs["response_format"] = response_format
                 if self.api_key is not None:
@@ -542,22 +691,27 @@ class Agent:
                 # and merge in the matching kwargs (top-level reasoning_effort
                 # for non-Responses paths; effort+summary packed into extra_body
                 # for Responses paths — see agentic/llm/routing.py for the
-                # bug-avoidance rationale).
+                # bug-avoidance rationale). ``loop_reasoning_call_kwargs`` also
+                # asks a Responses route for encrypted reasoning, which the
+                # next step replays.
                 effective_effort = self._resolved_effort_for(state.current_model)
                 routed_model = maybe_route_through_responses(
                     state.current_model, effective_effort
                 )
                 call_kwargs["model"] = routed_model
                 call_kwargs.update(
-                    reasoning_call_kwargs(effective_effort, routed_model)
+                    loop_reasoning_call_kwargs(effective_effort, routed_model)
                 )
 
                 # Claude caches only up to explicit breakpoints. They go on
                 # copies for this request: `normalized` and state.messages
                 # stay unmarked, or the markers would pile up step by step.
-                # A last step that withholds the agent's tools is skipped: tools
-                # open the cached prefix, so it can match no earlier entry, and
-                # the loop ends after it, so nothing would read what it wrote.
+                # A last step that withholds the agent's tools (every route but
+                # Anthropic's, which keeps them) is skipped: tools open the
+                # cached prefix, so it can match no earlier entry, and the loop
+                # ends after it, so nothing would read what it wrote. The
+                # Anthropic last step sends the same tools, so it is marked and
+                # reads the prefix the earlier steps cached.
                 if step_tools or not tool_schemas:
                     cached_messages, cached_tools = add_cache_breakpoints(
                         routed_model, normalized, step_tools
@@ -579,6 +733,30 @@ class Agent:
                 try:
                     response = litellm.completion(**call_kwargs)
                 except Exception as llm_error:
+                    # Backstop: a thinking block's signature binds the system
+                    # prompt, the tools and every message before it. Should a
+                    # history edit the loop does not guard slip through, the
+                    # provider rejects the block; replaying no blocks at all is
+                    # always accepted. Once per run — a second rejection means
+                    # something else is wrong, and is handled as before.
+                    if (
+                        not thinking_backstop_used
+                        and "bound to a different conversation" in str(llm_error)
+                    ):
+                        thinking_backstop_used = True
+                        context.emit_event(
+                            {
+                                "type": "step_reset",
+                                "step": step,
+                                "reason": "thinking_signature_rejected",
+                            }
+                        )
+                        state = state.recover(
+                            messages=_without_thinking_blocks(state.messages),
+                            reason="thinking_signature_rejected",
+                        )
+                        continue
+
                     error_type = classify_error(llm_error)
 
                     # Recovery: model fallback on rate limit
@@ -602,7 +780,7 @@ class Agent:
                                 "reason": "rate_limit",
                             }
                         )
-                        state = state.with_fallback_model(fallback_model)
+                        state = self._fall_back(state, fallback_model, step, context)
                         continue
 
                     # Recovery: reactive compact on prompt too long
@@ -620,12 +798,19 @@ class Agent:
                             }
                         )
                         try:
-                            pruned = prune_messages(list(state.messages))
+                            current = list(state.messages)
+                            pruned = _without_blocks_after_edit(
+                                current, prune_messages(current)
+                            )
                             compacted = compact_messages(
                                 pruned,
                                 model=self._compaction_model_for(state.current_model),
                                 api_key=self.api_key,
                                 tools=step_tools,
+                                reasoning_kwargs=self._compaction_reasoning_kwargs(
+                                    state.current_model
+                                ),
+                                context_model=state.current_model,
                             )
                             # Measure work done, not list identity. Identity is
                             # only a *sufficient* no-progress signal (see the
@@ -660,12 +845,11 @@ class Agent:
                                 # Both matter because we persist its result and
                                 # have no recovery left after this.
                                 target = int(
-                                    get_context_threshold(
-                                        state.current_model, self.max_tokens
-                                    )
-                                    * 0.5
+                                    self._threshold_for(state.current_model) * 0.5
                                 )
-                                truncated = truncate_messages(compacted, target)
+                                truncated = _without_blocks_after_edit(
+                                    compacted, truncate_messages(compacted, target)
+                                )
                                 before_tokens = estimate_token_count(compacted)
                                 after_tokens = estimate_token_count(truncated)
                                 # Measure work done, not list identity:
@@ -743,7 +927,7 @@ class Agent:
                                 "reason": "model_error",
                             }
                         )
-                        state = state.with_fallback_model(fallback_model)
+                        state = self._fall_back(state, fallback_model, step, context)
                         continue
 
                     # Unrecoverable — re-raise to outer exception handler
@@ -834,27 +1018,47 @@ class Agent:
                     for k in total_usage:
                         total_usage[k] += step_usage.get(k, 0)
 
-                # Budget enforcement: consume tokens and check limits
+                # Budget enforcement: consume tokens and check limits. The
+                # warning is appended after this step's tool results (Phase 5).
+                # On the anthropic route it goes in as a user message,
+                # pre-wrapped in the same <system-context> marker
+                # normalize_messages puts on injected system messages: a
+                # Claude thinking block's signature binds every message before
+                # it and the top-level system prompt, and a real system
+                # message mid-run is folded into that prompt by LiteLLM,
+                # which would invalidate the blocks the next step replays.
+                # Elsewhere a system message costs nothing extra and keeps the
+                # warning's framing — a plain user message there would also
+                # cost context: on the OpenAI Responses route it becomes the
+                # "latest user message", after which the API discards earlier
+                # reasoning.
+                budget_msg: dict[str, Any] | None = None
                 if context.budget and step_usage:
                     context.budget.consume(step_usage.get("total_tokens", 0))
                     if context.budget.exceeded:
                         state = state.with_budget_exhausted()
                     elif context.budget.remaining < (context.budget.max_tokens * 0.15):
-                        budget_msg = {
-                            "role": "system",
-                            "content": (
-                                f"BUDGET WARNING: You have approximately "
-                                f"{context.budget.remaining} tokens remaining. "
-                                "Wrap up your work efficiently. Avoid unnecessary "
-                                "tool calls."
-                            ),
-                            "_injected": True,
-                        }
-                        # Add to working messages (will be picked up via next_turn)
-                        working_budget = list(state.messages) + [budget_msg]
-                        state = state.recover(
-                            messages=working_budget, reason="budget_warning"
+                        warning_text = (
+                            f"BUDGET WARNING: You have approximately "
+                            f"{context.budget.remaining} tokens remaining. "
+                            "Wrap up your work efficiently. Avoid unnecessary "
+                            "tool calls."
                         )
+                        if _provider_of(state.current_model) == "anthropic":
+                            budget_msg = {
+                                "role": "user",
+                                "content": (
+                                    f"<system-context>\n{warning_text}\n"
+                                    "</system-context>"
+                                ),
+                                "_injected": True,
+                            }
+                        else:
+                            budget_msg = {
+                                "role": "system",
+                                "content": warning_text,
+                                "_injected": True,
+                            }
 
                 # Check abort after (potentially slow) LLM call
                 if context.is_aborted:
@@ -899,9 +1103,13 @@ class Agent:
                         for tc in assistant_msg.tool_calls
                     ]
 
-                # Attach reasoning artifact for intra-run replay (Phase B).
-                # Required for Anthropic+thinking+tools to survive the next
-                # tool-result LLM call without 400-ing.
+                # The artifact goes on the message twice. `reasoning` is the
+                # host-facing record (normalize_messages strips it); the replay
+                # fields are what the provider reads on the next step. Without
+                # them Claude stops thinking after the first tool step — with no
+                # thinking blocks anywhere in the history, LiteLLM
+                # (modify_params) drops `thinking` from the request — and
+                # OpenAI loses its reasoning items.
                 artifact = extract_reasoning_artifact(
                     model=state.current_model,
                     assembled_message=assistant_msg,
@@ -910,6 +1118,7 @@ class Agent:
                 )
                 if artifact is not None:
                     msg_dict["reasoning"] = artifact.model_dump(exclude_none=True)
+                    msg_dict.update(reasoning_replay_fields(artifact))
                     last_artifact = artifact
 
                 working_messages = list(state.messages) + [msg_dict]
@@ -1095,7 +1304,7 @@ class Agent:
                 # Compaction check: summarize history if context is growing large
                 over_threshold = estimate_token_count(
                     working_messages
-                ) > get_context_threshold(state.current_model, self.max_tokens)
+                ) > self._threshold_for(state.current_model)
                 if over_threshold and state.compact_failure_count < 3:
                     context.emit_event(
                         {
@@ -1117,6 +1326,10 @@ class Agent:
                             model=self._compaction_model_for(state.current_model),
                             api_key=self.api_key,
                             tools=step_tools,
+                            reasoning_kwargs=self._compaction_reasoning_kwargs(
+                                state.current_model
+                            ),
+                            context_model=state.current_model,
                         )
                     except Exception:
                         logger.warning("Phase 5 compaction failed", exc_info=True)
@@ -1154,6 +1367,8 @@ class Agent:
                         )
 
                 # ===== PHASE 5: CONTINUATION =====
+                if budget_msg is not None:
+                    working_messages.append(budget_msg)
                 state = state.next_turn(messages=working_messages)
 
             # Build final output
@@ -1832,15 +2047,48 @@ class Agent:
         # Add session history if provided
         if session:
             history = session.get_messages(include_system=False)
-            messages.extend(history)
+            messages.extend(self._replayable_history(history))
 
         # Add current input
         if isinstance(input, str):
             messages.append({"role": "user", "content": input})
         elif isinstance(input, list):
-            messages.extend(input)
+            messages.extend(self._replayable_history(input))
 
         return messages
+
+    def _replayable_history(
+        self, history: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Earlier runs' messages as this run may replay them, whether they
+        come from a session or are passed in as list input (a caller chaining
+        one run's ``AgentOutput.messages`` into the next).
+
+        Reasoning goes back only to the provider that produced it: another
+        provider cannot verify it, and LiteLLM turns some of it into malformed
+        input. OpenAI reasoning items never cross runs at all — the Responses
+        API discards reasoning from turns before the latest user message, and
+        encrypted content is bound to the organization that produced it, so
+        replaying one can only cost a rejected request. A provider LiteLLM
+        cannot resolve keeps everything else, as at a fallback.
+        """
+        target = _provider_of(self.model)
+        replayable = []
+        for message in history:
+            if message.get("role") == "assistant":
+                produced_by = (message.get("reasoning") or {}).get("provider")
+                if (
+                    target is not None
+                    and produced_by is not None
+                    and produced_by != target
+                ):
+                    message = drop_reasoning_replay_fields(message)
+                else:
+                    message = {
+                        k: v for k, v in message.items() if k != "reasoning_items"
+                    }
+            replayable.append(message)
+        return replayable
 
     def __repr__(self) -> str:
         """Return a string representation of the agent."""

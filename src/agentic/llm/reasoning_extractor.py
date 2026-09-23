@@ -4,6 +4,7 @@ are logged and swallowed (extraction must never fail the run)."""
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import Any
 
 import litellm
@@ -16,6 +17,40 @@ from agentic.agent.message import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _plain_item(item: Any) -> dict:
+    """A reasoning item as a plain dict. Streamed items can arrive as LiteLLM
+    objects; the artifact is persisted as JSON and replayed through LiteLLM,
+    which reads items with ``.get``."""
+    if isinstance(item, dict):
+        return dict(item)
+    dump = getattr(item, "model_dump", None)
+    if callable(dump):
+        return dump(exclude_none=True)
+    return dict(item)
+
+
+def _replayable_items(items: Iterable[dict]) -> list[dict]:
+    """The reasoning items worth keeping for replay, first occurrence of each id.
+
+    An item without ``encrypted_content`` replays only while the provider
+    stores responses, and is rejected for an organization that does not
+    (``store=false``, zero data retention), so it is not kept. Items without
+    an id cannot be told apart and are all kept.
+    """
+    kept: list[dict] = []
+    seen: set[str] = set()
+    for item in items:
+        if not item.get("encrypted_content"):
+            continue
+        item_id = item.get("id")
+        if item_id:
+            if item_id in seen:
+                continue
+            seen.add(item_id)
+        kept.append(item)
+    return kept
 
 
 def extract_reasoning_artifact(
@@ -68,17 +103,24 @@ def _extract_inner(
         )
 
     if provider == "openai":
-        encrypted = psf.get("encrypted_content_items", []) or []
+        # LiteLLM's Responses bridge surfaces reasoning as a top-level
+        # `reasoning_items` (streaming: collected by accumulate_stream).
+        # Its non-streaming path keeps only a response's last reasoning item;
+        # streaming carries all of them.
+        items = _replayable_items(
+            _plain_item(i)
+            for i in (getattr(assembled_message, "reasoning_items", None) or [])
+        )
         reasoning_count = None
         if usage is not None:
             details = getattr(usage, "completion_tokens_details", None)
             if details is not None:
                 reasoning_count = getattr(details, "reasoning_tokens", None)
-        if not encrypted and not summary and not reasoning_count:
+        if not items and not summary and not reasoning_count:
             return None
         return OpenAIReasoning(
             response_id=getattr(final_response, "id", None),
-            encrypted_content_items=encrypted,
+            reasoning_items=items,
             summary_text=summary,
             requested_effort=requested_effort,
             reasoning_token_count=reasoning_count,

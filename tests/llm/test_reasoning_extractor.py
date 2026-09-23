@@ -63,13 +63,9 @@ def test_anthropic_returns_none_when_no_blocks_no_summary():
     assert artifact is None
 
 
-def test_openai_extracts_encrypted_items_and_summary():
-    msg = _msg(
-        provider_specific_fields={
-            "encrypted_content_items": [{"type": "reasoning", "encrypted_content": "e"}]
-        },
-        reasoning_content="openai summary",
-    )
+def test_openai_extracts_reasoning_items_and_summary():
+    item = {"id": "rs_1", "type": "reasoning", "encrypted_content": "e", "summary": []}
+    msg = _msg(reasoning_items=[item], reasoning_content="openai summary")
     final = _final_response(
         usage=SimpleNamespace(
             completion_tokens_details=SimpleNamespace(reasoning_tokens=300)
@@ -88,9 +84,7 @@ def test_openai_extracts_encrypted_items_and_summary():
         )
     assert isinstance(artifact, OpenAIReasoning)
     assert artifact.response_id == "resp_id"
-    assert artifact.encrypted_content_items == [
-        {"type": "reasoning", "encrypted_content": "e"}
-    ]
+    assert artifact.reasoning_items == [item]
     assert artifact.summary_text == "openai summary"
     assert artifact.requested_effort == "high"
     assert artifact.reasoning_token_count == 300
@@ -115,6 +109,125 @@ def test_gemini_extracts_signatures_and_count():
     assert isinstance(artifact, GeminiReasoning)
     assert artifact.thought_signatures == ["sig1", "sig2"]
     assert artifact.thoughts_token_count == 150
+
+
+def test_openai_reasoning_item_objects_become_plain_dicts():
+    """Streamed items can arrive as LiteLLM objects; the artifact is persisted
+    as JSON and replayed through LiteLLM, which reads items with `.get`."""
+
+    class _Item:
+        def __init__(self, **fields):
+            self._fields = fields
+
+        def model_dump(self, exclude_none=False):
+            return {
+                k: v
+                for k, v in self._fields.items()
+                if not (exclude_none and v is None)
+            }
+
+    msg = _msg(
+        reasoning_items=[
+            _Item(
+                id="rs_1",
+                type="reasoning",
+                encrypted_content="e",
+                summary=[],
+                status=None,
+            )
+        ]
+    )
+    with patch(
+        "agentic.llm.reasoning_extractor.litellm.get_llm_provider",
+        return_value=("gpt-5.4", "openai", None, None),
+    ):
+        artifact = extract_reasoning_artifact(
+            model="openai/responses/gpt-5.4",
+            assembled_message=msg,
+            final_response=_final_response(usage=None, id="resp"),
+            requested_effort="high",
+        )
+    assert artifact.reasoning_items == [
+        {"id": "rs_1", "type": "reasoning", "encrypted_content": "e", "summary": []}
+    ]
+
+
+def test_openai_reads_a_non_streaming_litellm_message():
+    from litellm.types.utils import Message as LiteLLMMessage
+
+    item = {"id": "rs_1", "type": "reasoning", "encrypted_content": "e", "summary": []}
+    with patch(
+        "agentic.llm.reasoning_extractor.litellm.get_llm_provider",
+        return_value=("gpt-5.4", "openai", None, None),
+    ):
+        artifact = extract_reasoning_artifact(
+            model="openai/responses/gpt-5.4",
+            assembled_message=LiteLLMMessage(content="x", reasoning_items=[item]),
+            final_response=_final_response(usage=None, id="resp"),
+            requested_effort="high",
+        )
+    assert artifact.reasoning_items == [item]
+
+
+def _openai_artifact(items, **msg_kwargs):
+    with patch(
+        "agentic.llm.reasoning_extractor.litellm.get_llm_provider",
+        return_value=("gpt-5.4", "openai", None, None),
+    ):
+        return extract_reasoning_artifact(
+            model="openai/responses/gpt-5.4",
+            assembled_message=_msg(reasoning_items=items, **msg_kwargs),
+            final_response=_final_response(usage=None, id="resp"),
+            requested_effort="high",
+        )
+
+
+def test_openai_keeps_only_items_with_encrypted_content():
+    """An item without its encrypted payload replays only while the provider
+    stores responses, and fails for an organization that does not."""
+    kept = {"id": "rs_1", "type": "reasoning", "encrypted_content": "e", "summary": []}
+    artifact = _openai_artifact(
+        [
+            {"id": "rs_0", "type": "reasoning", "summary": []},
+            kept,
+            {"id": "rs_2", "type": "reasoning", "encrypted_content": "", "summary": []},
+            {"id": "rs_3", "type": "reasoning", "encrypted_content": None},
+        ]
+    )
+    assert artifact.reasoning_items == [kept]
+
+
+def test_openai_with_only_id_items_and_nothing_else_has_no_artifact():
+    assert _openai_artifact([{"id": "rs_0", "type": "reasoning", "summary": []}]) is (
+        None
+    )
+
+
+def test_openai_deduplicates_items_by_id_keeping_the_first():
+    first = {"id": "rs_1", "type": "reasoning", "encrypted_content": "a", "summary": []}
+    again = {"id": "rs_1", "type": "reasoning", "encrypted_content": "b", "summary": []}
+    no_id_1 = {"type": "reasoning", "encrypted_content": "c"}
+    no_id_2 = {"type": "reasoning", "encrypted_content": "c"}
+    other = {"id": "rs_2", "type": "reasoning", "encrypted_content": "d"}
+    artifact = _openai_artifact([first, no_id_1, again, other, no_id_2])
+    assert artifact.reasoning_items == [first, no_id_1, other, no_id_2]
+
+
+def test_openai_ignores_the_legacy_provider_specific_key():
+    """LiteLLM never fills provider_specific_fields['encrypted_content_items'];
+    reading it only ever produced empty artifacts."""
+    msg = _msg(provider_specific_fields={"encrypted_content_items": [{"id": "x"}]})
+    with patch(
+        "agentic.llm.reasoning_extractor.litellm.get_llm_provider",
+        return_value=("gpt-5.4", "openai", None, None),
+    ):
+        artifact = extract_reasoning_artifact(
+            model="openai/responses/gpt-5.4",
+            assembled_message=msg,
+            final_response=_final_response(usage=None, id="resp"),
+            requested_effort="high",
+        )
+    assert artifact is None
 
 
 def test_unknown_provider_returns_none():

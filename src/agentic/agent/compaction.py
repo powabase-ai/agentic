@@ -7,7 +7,10 @@ import re
 from typing import Any
 
 import litellm
+from litellm import get_llm_provider, get_model_info
+from litellm.llms.anthropic.chat.transformation import AnthropicConfig
 
+from agentic.agent.cache import add_cache_breakpoints
 from agentic.agent.model_registry import resolve_context_window
 from agentic.agent.normalization import normalize_messages
 
@@ -16,6 +19,11 @@ logger = logging.getLogger(__name__)
 CHARS_PER_TOKEN = 4
 
 _SUMMARY_MAX_TOKENS = 8000
+
+# With reasoning on, thinking shares `max_tokens` with the summary, so the
+# call asks for up to this much — never past the window's safety margin (see
+# `_summary_max_tokens`).
+_SUMMARY_WITH_REASONING_MAX_TOKENS = 16000
 
 # Compaction is a normal provider call on the same model as the real one, so it
 # gets the same retry budget (see `Agent._run` — `num_retries: 3`). Without it a
@@ -235,11 +243,126 @@ def estimate_token_count(messages: list[dict[str, Any]]) -> int:
     return total_chars // CHARS_PER_TOKEN
 
 
+def thinking_budget(model: str, reasoning_kwargs: dict[str, Any] | None) -> int:
+    """Tokens a budget-based Claude model may spend thinking under these kwargs.
+
+    LiteLLM maps ``reasoning_effort`` on pre-adaptive Claude to a fixed
+    ``budget_tokens``, and the provider requires ``max_tokens`` above it. 0 for
+    adaptive thinking, other providers, or no reasoning.
+    """
+    effort = (reasoning_kwargs or {}).get("reasoning_effort")
+    if not effort:
+        return 0
+    try:
+        provider = get_llm_provider(model)[1]
+        if provider != "anthropic" and not (
+            provider in ("vertex_ai", "bedrock") and "claude" in model.lower()
+        ):
+            return 0
+        mapped = AnthropicConfig._map_reasoning_effort(effort, model)
+        if mapped and mapped.get("type") == "enabled":
+            return int(mapped["budget_tokens"])
+    except Exception:
+        return 0
+    return 0
+
+
+def _instruction_tokens() -> int:
+    """Estimated size of the instruction a compaction call appends."""
+    return estimate_token_count([{"role": "user", "content": COMPACTION_INSTRUCTION}])
+
+
+def _model_output_ceiling(model: str) -> int | None:
+    """The model's real output-token ceiling, or None when it isn't known.
+
+    Backed by LiteLLM's model map. Any lookup failure (unmapped model) or a
+    missing value means the caller applies no cap — this is a safety
+    reduction, not a source of truth to fail loudly over.
+    """
+    try:
+        info = get_model_info(model)
+    except Exception:
+        return None
+    ceiling = info.get("max_output_tokens") or info.get("max_tokens")
+    return int(ceiling) if ceiling else None
+
+
+def _summary_max_tokens(
+    model: str,
+    request: list[dict[str, Any]],
+    reasoning_kwargs: dict[str, Any] | None,
+    context_model: str | None = None,
+) -> int:
+    """Output budget for the summary call.
+
+    With reasoning on, thinking and the summary share ``max_tokens``, so the
+    call asks for more — but only as much as fits under the safety margin the
+    proactive threshold keeps (``_compact_buffer``). The estimate leaves out
+    tool schemas and replayed reasoning, so that is a margin, not a guarantee
+    against ``prompt_too_long``. Never less than the plain budget.
+
+    A budget-based Claude model thinks within a fixed ``thinking_budget``
+    that ``max_tokens`` must exceed, so that budget is added on top of the
+    summary's share, which is sized on the room left after it.
+
+    The window is resolved on ``context_model`` — the name the loop's
+    threshold resolves — when given; the registry can answer differently for
+    ``gpt-5`` and ``openai/gpt-5``. Otherwise on the unrouted name: the model
+    registry knows ``openai/gpt-5.4``, not the ``openai/responses/gpt-5.4``
+    route the call goes out under. The same resolved name is used to look up
+    the model's output ceiling below.
+
+    On a budget-based Claude model at high effort, ``thinking_budget`` plus
+    the summary's own share can exceed the model's real output ceiling (e.g.
+    16384 + 16000 = 32384 against a 32000 ceiling) — the provider rejects a
+    ``max_tokens`` above its output limit, and the broad ``except`` around the
+    call would swallow that as a silent no-op. When the ceiling is known, the
+    result is capped at it (kept above ``budget`` so the call still asks for
+    more than thinking alone needs).
+    """
+    if not reasoning_kwargs:
+        return _SUMMARY_MAX_TOKENS
+    budget = thinking_budget(model, reasoning_kwargs)
+    resolved_model = context_model or model.replace("/responses/", "/", 1)
+    window = resolve_context_window(resolved_model)
+    room = window - _compact_buffer(window) - estimate_token_count(request)
+    summary_part = max(
+        _SUMMARY_MAX_TOKENS, min(_SUMMARY_WITH_REASONING_MAX_TOKENS, room - budget)
+    )
+    max_tokens = budget + summary_part
+    ceiling = _model_output_ceiling(resolved_model)
+    if ceiling is not None and max_tokens > ceiling:
+        max_tokens = max(budget + 1, ceiling)
+    return max_tokens
+
+
+def compaction_output_reserve(
+    max_output_tokens: int | None, reasoning: bool, thinking_budget: int = 0
+) -> int | None:
+    """The output budget ``get_context_threshold`` should reserve for a run.
+
+    With reasoning on, a compaction's thinking and summary share up to
+    ``_SUMMARY_WITH_REASONING_MAX_TOKENS``, plus a budget-based Claude
+    model's ``thinking_budget``, and the call appends its instruction to the
+    history; reserving all of it makes compaction fire while that room still
+    exists. Without reasoning the caller's own ``max_tokens`` is reserved, as
+    before.
+    """
+    if not reasoning:
+        return max_output_tokens
+    return max(
+        max_output_tokens or 0,
+        _SUMMARY_WITH_REASONING_MAX_TOKENS + thinking_budget + _instruction_tokens(),
+    )
+
+
 def compact_messages(
     messages: list[dict[str, Any]],
     model: str,
     api_key: str | None = None,
     tools: list[dict[str, Any]] | None = None,
+    reasoning_kwargs: dict[str, Any] | None = None,
+    context_model: str | None = None,
 ) -> list[dict[str, Any]]:
     """Summarize the conversation in-context on ``model`` and rebuild a short history.
 
@@ -248,34 +371,34 @@ def compact_messages(
     returns ``[system?, {user: summary}, {user: CONTINUATION_NUDGE}]``.
 
     ``model`` must be the same model string the real agent call routes to (see
-    ``Agent._compaction_model_for``) and ``tools`` the same tool schemas it
-    sends. The caching this relies on is the *automatic* prefix caching offered
-    by the OpenAI-family, DeepSeek and OpenRouter endpoints, which matches on
-    an exact leading prefix of the serialized request — tool definitions come
-    first, so omitting or altering them breaks the match at the very first
-    block and makes this (full-context) call entirely cache-cold, defeating the
-    whole reason we feed compaction the un-pruned history. Anthropic-family
-    models cache only up to explicit ``cache_control`` breakpoints, which the
-    agent loop sets (``add_cache_breakpoints``) but this call deliberately does
-    not. It could never read the loop's cached history: its ``tool_choice``
-    differs from the loop's calls, and the provider drops its cached messages
-    when that changes, on any model. And it can read the cached tools + system
-    prefix only on an agent without reasoning settings, because the provider
-    keys that prefix on the thinking and effort settings too and this call
-    forwards neither (see below). On a reasoning-enabled agent a breakpoint
-    here would only buy a cache write. ``tool_choice="none"`` keeps the model
-    summarizing instead of trying to call one of them.
+    ``Agent._compaction_model_for``), ``tools`` the same tool schemas it sends,
+    and ``reasoning_kwargs`` the reasoning settings it sends (thinking and
+    effort, or ``extra_body`` reasoning and ``include``; see
+    ``Agent._compaction_reasoning_kwargs``). Providers key their prompt cache
+    on all of it. The OpenAI-family, DeepSeek and OpenRouter endpoints cache an
+    exact leading prefix automatically — tool definitions come first, so
+    omitting or altering them makes this full-context call entirely
+    cache-cold, defeating the reason we feed compaction the un-pruned history.
+    Claude caches only up to explicit breakpoints and keys the prefix on
+    thinking and effort too. On explicit-breakpoint routes this call therefore
+    marks the leading system message and the last tool: the tools + system
+    prefix the loop wrote at its system breakpoint. It never marks its own
+    trailing instruction: its ``tool_choice`` differs from the loop's calls,
+    which drops the provider's cached messages on any model, and the compacted
+    history replaces this one, so a write there would never be read.
+    ``tool_choice="none"`` keeps the model summarizing instead of trying to
+    call a tool.
+
+    With reasoning on, thinking and the summary share ``max_tokens``; see
+    ``_summary_max_tokens``. ``context_model`` is the model name the loop's
+    compaction threshold resolves its window on (``Agent._threshold_for``),
+    so the output budget is sized against that same window.
 
     Messages are run through ``normalize_messages`` first: not every call site
     hands us already-normalized history, and non-standard bookkeeping keys
     (e.g. ``_injected``) or orphan ``tool`` messages make OpenAI-compatible
     endpoints reject the request with a 400 — which the broad ``except`` below
     would swallow, silently turning compaction into a no-op.
-
-    Reasoning kwargs are NOT forwarded: the agent's ``extra_body`` /
-    ``reasoning_effort`` settings do not reach this call, so compaction always
-    runs at the provider's default reasoning effort regardless of how the agent
-    is configured. That is current behavior, documented rather than changed.
 
     On any failure the original ``messages`` list object is returned unchanged;
     callers detect "no progress" with an identity check (``result is messages``).
@@ -298,19 +421,28 @@ def compact_messages(
     summarize_request = sanitized + [
         {"role": "user", "content": COMPACTION_INSTRUCTION}
     ]
+    # Breakpoints go on copies: `system_msg` above stays unmarked, so no
+    # marker reaches the compacted history.
+    request_messages, request_tools = add_cache_breakpoints(
+        model, summarize_request, tools, mark_last_message=False
+    )
     call_kwargs: dict[str, Any] = {
         "model": model,
-        "messages": summarize_request,
+        "messages": request_messages,
         "stream": False,
-        "max_tokens": _SUMMARY_MAX_TOKENS,
+        "max_tokens": _summary_max_tokens(
+            model, summarize_request, reasoning_kwargs, context_model
+        ),
         "num_retries": _COMPACTION_NUM_RETRIES,
         "timeout": _COMPACTION_TIMEOUT_SECONDS,
     }
     if api_key is not None:
         call_kwargs["api_key"] = api_key
     if tools:
-        call_kwargs["tools"] = tools
+        call_kwargs["tools"] = request_tools
         call_kwargs["tool_choice"] = "none"
+    if reasoning_kwargs:
+        call_kwargs.update(reasoning_kwargs)
 
     try:
         response = litellm.completion(**call_kwargs)
