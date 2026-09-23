@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/powabase-ai/agentic/compare/v0.5.1...v0.5.2) (2026-09-23)
+
+
+### Bug Fixes
+
+* **llm:** register claude-opus-5-5 with litellm and request summarized thinking ([#35](https://github.com/powabase-ai/agentic/issues/35)) ([de3c5f9](https://github.com/powabase-ai/agentic/commit/de3c5f9a1702169828edba992a8069f23862d5f7))
+
 ## [0.5.1](https://github.com/powabase-ai/agentic/compare/v0.5.0...v0.5.1) (2026-09-23)
 
 
