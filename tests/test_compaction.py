@@ -1447,6 +1447,29 @@ class TestCompactMessagesReasoningKwargs:
         window.assert_called_once_with("openai/gpt-5.4")
         assert mock_litellm.completion.call_args.kwargs["max_tokens"] == 16000
 
+    @patch("agentic.agent.compaction.resolve_context_window", return_value=1_000_000)
+    @patch("agentic.agent.compaction.litellm")
+    def test_reasoning_budget_resolves_the_window_on_the_context_model(
+        self, mock_litellm, window
+    ):
+        # The registry resolves `gpt-5` and `openai/gpt-5` to different
+        # windows; the loop's threshold resolves the name the agent runs
+        # under, so compaction must size itself on that same name.
+        mock_litellm.completion.return_value = _mock_response("<summary>s</summary>")
+        rk = {
+            "extra_body": {
+                "reasoning": {"effort": "high"},
+                "include": ["reasoning.encrypted_content"],
+            }
+        }
+        compact_messages(
+            list(_BASE),
+            model="openai/responses/gpt-5",
+            context_model="gpt-5",
+            reasoning_kwargs=rk,
+        )
+        window.assert_called_once_with("gpt-5")
+
     @pytest.mark.parametrize(
         "model,reasoning_kwargs,expected",
         [

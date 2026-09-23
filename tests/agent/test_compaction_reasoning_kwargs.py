@@ -124,6 +124,35 @@ def test_reactive_compaction_gets_the_loops_kwargs(model):
         assert kwargs["reasoning_kwargs"] == _EXPECTED[model]
 
 
+@pytest.mark.parametrize("model", ["gpt-5", "anthropic/claude-opus-4-8"])
+def test_every_compaction_site_sizes_on_the_threshold_model(model):
+    """Compaction sizes its output on the window of ``context_model``; the
+    loop must pass the same name its threshold resolves, not the routed one."""
+    threshold_models: list[str] = []
+
+    def fake_threshold(m, *args, **kwargs):
+        threshold_models.append(m)
+        return 0
+
+    with (
+        patch("agentic.agent.agent.estimate_token_count", return_value=10_000_000),
+        patch("agentic.agent.agent.get_context_threshold", side_effect=fake_threshold),
+    ):
+        captured = _run(
+            model,
+            [
+                Exception("prompt is too long: 200000 tokens > 100000 maximum"),
+                _tool_step(),
+                _answer_step(),
+            ],
+        )
+    assert len(captured) >= 3  # reactive, proactive (each step), phase 5
+    assert set(threshold_models) == {model}
+    assert [kwargs.get("context_model") for kwargs in captured] == [model] * len(
+        captured
+    )
+
+
 def _threshold_reserves(reasoning_effort, model="anthropic/claude-opus-4-8"):
     """The output reserve every threshold the loop computes is given, over a
     run that reaches all three sites: proactive (each attempt), the reactive
