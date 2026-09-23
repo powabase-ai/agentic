@@ -149,6 +149,19 @@ def test_call_kwargs_for_anthropic_adaptive_model_requests_summarized():
         }, model
 
 
+def test_call_kwargs_for_claude_opus_5_5_requests_summarized():
+    """claude-opus-5-5 (Opus 5.5) also defaults its thinking `display` to
+    "omitted", same as the rest of the opus-5 family, so it needs the same
+    explicit adaptive+summarized request. Matched via the "opus-5" family
+    entry, which must catch claude-opus-5-5 without over-matching pre-adaptive
+    or pre-5.5 models (see test_call_kwargs_for_older_anthropic_uses_top_level_effort)."""
+    for model in ("claude-opus-5-5", "anthropic/claude-opus-5-5"):
+        assert reasoning_call_kwargs("high", model) == {
+            "thinking": {"type": "adaptive", "display": "summarized"},
+            "output_config": {"effort": "high"},
+        }, model
+
+
 def test_call_kwargs_anthropic_summarized_passes_xhigh_effort_through():
     """xhigh / max are Anthropic-only effort levels that bare reasoning_effort
     can't express; they flow straight into output_config.effort."""
@@ -286,3 +299,69 @@ def test_other_callers_keep_todays_responses_request(monkeypatch):
     assert reasoning_call_kwargs("medium", "openai/responses/gpt-5.4") == {
         "extra_body": {"reasoning": {"effort": "medium"}}
     }
+
+
+# ===== claude-opus-5-5 outgoing request shape (offline, no network) =====
+
+
+def _capture_request_body(**call_kwargs):
+    """Run litellm.completion with the HTTP layer mocked to raise the
+    outgoing JSON body instead of sending it, and return that body. Mirrors
+    the technique used to gather the evidence for this fix — never calls a
+    real API.
+
+    litellm re-wraps whatever the mocked `post` raises into its own
+    exception hierarchy, so the original is recovered by walking
+    __cause__/__context__ rather than by catching it directly."""
+
+    class _Captured(Exception):
+        pass
+
+    def fake_post(self, url, data=None, json=None, headers=None, **kw):
+        body = json if json is not None else __import__("json").loads(data)
+        raise _Captured(body)
+
+    with patch(
+        "litellm.llms.custom_httpx.http_handler.HTTPHandler.post",
+        fake_post,
+    ):
+        import litellm
+
+        try:
+            litellm.completion(
+                messages=[{"role": "user", "content": "hi"}],
+                api_key="sk-ant-test",
+                num_retries=0,
+                **call_kwargs,
+            )
+        except Exception as e:
+            cause = e
+            seen = set()
+            while cause is not None and id(cause) not in seen:
+                seen.add(id(cause))
+                if isinstance(cause, _Captured):
+                    return cause.args[0]
+                cause = cause.__cause__ or cause.__context__
+            raise AssertionError(
+                f"request body not found in exception chain: {e!r}"
+            ) from e
+    raise AssertionError("no request was captured")
+
+
+def test_claude_opus_5_5_request_uses_adaptive_thinking_without_budget_tokens():
+    """The actual request agentic builds for claude-opus-5-5 at
+    reasoning_effort="high" — thinking+output_config from
+    reasoning_call_kwargs, sent through litellm.completion — must carry
+    thinking.type=="adaptive" and must NOT carry budget_tokens. Registering
+    the model without supports_adaptive_thinking=True (setup.py's bug if that
+    flag were dropped) makes litellm map effort to
+    thinking={"type": "enabled", "budget_tokens": N} instead, which this
+    model rejects with HTTP 400."""
+    model = "claude-opus-5-5"
+    kwargs = reasoning_call_kwargs("high", model)
+    assert kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
+
+    body = _capture_request_body(model=model, **kwargs)
+
+    assert body["thinking"]["type"] == "adaptive"
+    assert "budget_tokens" not in body["thinking"]
