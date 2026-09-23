@@ -105,6 +105,12 @@ def _text(message: dict) -> str:
 
 
 def test_budget_warning_is_a_user_message_after_the_steps_tool_results():
+    # On the anthropic route the warning is a user message — a mid-run system
+    # message would be hoisted into the top-level system prompt, invalidating
+    # every replayed thinking block's signature — pre-wrapped in the same
+    # <system-context> marker normalize_messages puts on injected system
+    # messages, so it still reads as a system notice rather than the user's
+    # own words.
     budget = TokenBudget(max_tokens=1000)
     _, calls = _run(
         [
@@ -117,7 +123,14 @@ def test_budget_warning_is_a_user_message_after_the_steps_tool_results():
     sent = calls[1]["messages"]
     assert [m["role"] for m in sent] == ["system", "user", "assistant", "tool", "user"]
     assert sent[2]["thinking_blocks"] == [_block("s1")]
-    assert _text(sent[-1]).startswith("BUDGET WARNING")
+    # 900 of the 1000-token budget consumed by step 1 leaves 100 remaining —
+    # the value baked into this message; `budget.remaining` itself has since
+    # moved on past step 2's own consumption.
+    assert _text(sent[-1]) == (
+        "<system-context>\nBUDGET WARNING: You have approximately "
+        "100 tokens remaining. Wrap up your work efficiently. "
+        "Avoid unnecessary tool calls.\n</system-context>"
+    )
     assert [m["role"] for m in sent[1:]].count("system") == 0
 
 
@@ -130,6 +143,50 @@ def test_budget_warning_is_not_added_when_the_step_ends_the_run():
     assert len(calls) == 1
     assert output.status.is_success()
     assert not any("BUDGET WARNING" in _text(m) for m in output.messages)
+
+
+def test_budget_warning_is_a_system_message_on_a_non_anthropic_route():
+    # Off the anthropic route there is no thinking-block signature to protect,
+    # so a mid-run system message costs nothing extra — and it is the
+    # cheaper choice too: on the OpenAI Responses route a mid-run *user*
+    # message becomes the "latest user message", after which the API
+    # discards earlier reasoning, and either way a user role loses the
+    # warning's system framing.
+    budget = TokenBudget(max_tokens=1000)
+    with (
+        patch(
+            "agentic.agent.agent.litellm.completion",
+            side_effect=[
+                _response(content=None, tool_call_id="c1", total_tokens=900),
+                _response(content="done"),
+            ],
+        ) as completion,
+        patch.dict("os.environ", {"AGENT_LLM_STREAMING_ENABLED": "false"}),
+    ):
+        agent = Agent(model="openai/gpt-5.4", system_prompt="You are a bot.")
+        agent.run(
+            "question",
+            context=ExecutionContext(budget=budget),
+            tools={"probe": _probe_tool()},
+            max_steps=10,
+        )
+
+    sent = completion.call_args_list[-1].kwargs["messages"]
+    assert [m["role"] for m in sent] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+        "system",
+    ]
+    # 900 of the 1000-token budget consumed by step 1 leaves 100 remaining —
+    # the value baked into this message; `budget.remaining` itself has since
+    # moved on past step 2's own consumption.
+    assert sent[-1]["content"] == (
+        "BUDGET WARNING: You have approximately "
+        "100 tokens remaining. Wrap up your work efficiently. "
+        "Avoid unnecessary tool calls."
+    )
 
 
 # ------------------------------------------------- _without_blocks_after_edit
