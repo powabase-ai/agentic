@@ -50,9 +50,15 @@ logger = logging.getLogger(__name__)
 # client abort both set `abort_signal`, which is only read between stream
 # chunks and so cannot end a call still waiting for its first one. On a
 # streaming call the timeout bounds each read (time to first byte, then the
-# gap between chunks), not the whole generation. Same default as compaction's
-# `_COMPACTION_TIMEOUT_SECONDS`.
-_DEFAULT_LLM_TIMEOUT_SECONDS = 600.0
+# gap between chunks), not the whole generation.
+#
+# It is per ATTEMPT: with `num_retries: 3` plus the provider SDK's own retries,
+# a provider that never answers costs up to ~7x this before the run fails. The
+# retries are also the recovery path — an intermittently stuck upstream usually
+# answers the next request — so the bound is kept short enough for a retry to
+# happen within minutes, and long enough to clear a slow first token on a large
+# context.
+_DEFAULT_LLM_TIMEOUT_SECONDS = 300.0
 
 
 def _llm_timeout_kwargs() -> dict[str, float]:

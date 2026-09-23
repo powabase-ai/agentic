@@ -93,7 +93,7 @@ CALL_SITES = [_run, _stream, _arun, _astream]
 def test_every_agent_call_is_bounded_by_default(call, monkeypatch):
     monkeypatch.delenv("AGENT_LLM_TIMEOUT_SECONDS", raising=False)
     seen = call(Agent(model="openai/gpt-4o-mini"))
-    assert seen["timeout"] == 600.0
+    assert seen["timeout"] == 300.0
 
 
 @pytest.mark.parametrize("call", CALL_SITES, ids=lambda f: f.__name__.strip("_"))
