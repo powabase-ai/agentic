@@ -5,6 +5,8 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import litellm
+
 from agentic import Agent
 from agentic.agent.tools import BuiltinTool
 from agentic.execution.context import ExecutionContext
@@ -296,9 +298,9 @@ class TestStreamingKillSwitch:
         # litellm was called in non-streaming mode.
         mock_litellm.completion.assert_called_once()
         call_kwargs = mock_litellm.completion.call_args.kwargs
-        assert not call_kwargs.get(
-            "stream"
-        ), "kill-switch off must not pass stream=True"
+        assert not call_kwargs.get("stream"), (
+            "kill-switch off must not pass stream=True"
+        )
 
         # No streaming-specific events were emitted.
         emitted_types = [e["type"] for e in events]
@@ -358,9 +360,9 @@ class TestStreamingContentDeltaEmission:
         # (step 2's "done" deltas also flow, so check that step 1's prose is a
         # contiguous substring of the concatenation, OR sum to the full string.)
         joined = "".join(e["delta"] for e in content_deltas)
-        assert (
-            "thinking out loud" in joined
-        ), f"expected step-1 prose in joined deltas, got: {joined!r}"
+        assert "thinking out loud" in joined, (
+            f"expected step-1 prose in joined deltas, got: {joined!r}"
+        )
 
         # 3. No reasoning event WITHOUT a "source" field (line ~563 must not fire
         # when streaming is on). The reasoning emit at line ~552 (with
@@ -431,9 +433,9 @@ class TestStreamingContentDeltaEmission:
         bare_reasoning_events = [
             e for e in events if e.get("type") == "reasoning" and "source" not in e
         ]
-        assert (
-            len(bare_reasoning_events) == 1
-        ), f"expected exactly one bare reasoning event, got: {bare_reasoning_events}"
+        assert len(bare_reasoning_events) == 1, (
+            f"expected exactly one bare reasoning event, got: {bare_reasoning_events}"
+        )
         assert bare_reasoning_events[0]["content"] == "let me search for that"
 
 
@@ -490,15 +492,15 @@ class TestMidStreamErrorSyntheticEvents:
         ]
         error_events = [e for e in events if e.get("type") == "error"]
 
-        assert (
-            len(synth_chunk) == 1
-        ), f"expected exactly 1 synthetic chunk event, got: {synth_chunk}"
-        assert (
-            len(synth_reasoning) == 1
-        ), f"expected exactly 1 synthetic reasoning event, got: {synth_reasoning}"
-        assert (
-            len(error_events) == 1
-        ), f"expected exactly 1 error event, got: {error_events}"
+        assert len(synth_chunk) == 1, (
+            f"expected exactly 1 synthetic chunk event, got: {synth_chunk}"
+        )
+        assert len(synth_reasoning) == 1, (
+            f"expected exactly 1 synthetic reasoning event, got: {synth_reasoning}"
+        )
+        assert len(error_events) == 1, (
+            f"expected exactly 1 error event, got: {error_events}"
+        )
 
         # Synthetic chunk content == joined content fragments
         assert synth_chunk[0]["content"] == "partial answer"
@@ -547,9 +549,9 @@ class TestMidStreamErrorSyntheticEvents:
 
         assert len(synth_chunk) == 1, f"expected synthetic chunk, got: {synth_chunk}"
         assert synth_chunk[0]["content"] == "hello world"
-        assert (
-            synth_reasoning == []
-        ), f"expected NO synthetic reasoning, got: {synth_reasoning}"
+        assert synth_reasoning == [], (
+            f"expected NO synthetic reasoning, got: {synth_reasoning}"
+        )
         assert len(error_events) == 1
 
     @patch("agentic.agent.agent.litellm")
@@ -583,9 +585,9 @@ class TestMidStreamErrorSyntheticEvents:
         error_events = [e for e in events if e.get("type") == "error"]
 
         assert synth_chunk == [], f"expected NO synthetic chunk, got: {synth_chunk}"
-        assert (
-            len(synth_reasoning) == 1
-        ), f"expected synthetic reasoning, got: {synth_reasoning}"
+        assert len(synth_reasoning) == 1, (
+            f"expected synthetic reasoning, got: {synth_reasoning}"
+        )
         assert synth_reasoning[0]["content"] == "just thinking"
         assert synth_reasoning[0]["source"] == "thinking"
         assert len(error_events) == 1
@@ -675,20 +677,39 @@ class TestPromptCacheBreakpoints:
         assert [_markers(kwargs) for kwargs in calls] == [0, 0, 0]
 
     @patch("agentic.agent.agent.litellm")
-    def test_last_step_that_withholds_tools_gets_no_breakpoints(
+    def test_claude_last_step_keeps_tools_with_tool_choice_none(
         self, mock_litellm, monkeypatch
     ):
-        # Tools open the cached prefix, so a call that drops them matches no
-        # earlier entry; and the loop ends after it, so an entry it wrote would
-        # never be read. Breakpoints there would only buy a cache write.
+        # A Claude thinking block's signature binds the tool set of every later
+        # request, so the last step cannot drop the tools without invalidating
+        # the blocks it replays. It keeps them, forbids their use with
+        # tool_choice="none", and — its prefix now matching the earlier
+        # steps' — carries breakpoints to read the cached prefix.
         monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "false")
+        mock_litellm.get_llm_provider.side_effect = litellm.get_llm_provider
         mock_litellm.completion.return_value = _mock_completion_response("done")
         agent = Agent(model="claude-opus-4-8", system_prompt="You are a bot.")
         agent.run("question", tools={"lookup": self._lookup_tool()}, max_steps=1)
 
         kwargs = mock_litellm.completion.call_args.kwargs
+        assert [t["function"]["name"] for t in kwargs["tools"]] == ["lookup"]
+        assert kwargs["tool_choice"] == "none"
+        assert kwargs["tools"][-1]["cache_control"] == self._EPHEMERAL
+        assert _markers(kwargs) == 3
+
+    @patch("agentic.agent.agent.litellm")
+    def test_non_claude_last_step_still_withholds_tools(
+        self, mock_litellm, monkeypatch
+    ):
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "false")
+        mock_litellm.get_llm_provider.side_effect = litellm.get_llm_provider
+        mock_litellm.completion.return_value = _mock_completion_response("done")
+        agent = Agent(model="gpt-5.4", system_prompt="You are a bot.")
+        agent.run("question", tools={"lookup": self._lookup_tool()}, max_steps=1)
+
+        kwargs = mock_litellm.completion.call_args.kwargs
         assert "tools" not in kwargs
-        assert _markers(kwargs) == 0
+        assert "tool_choice" not in kwargs
 
     @patch("agentic.agent.agent.litellm")
     def test_agent_without_tools_marks_system_and_history(
@@ -719,14 +740,22 @@ class TestPromptCacheBreakpoints:
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "doc one", "cache_control": self._EPHEMERAL}
+                    {
+                        "type": "text",
+                        "text": "doc one",
+                        "cache_control": self._EPHEMERAL,
+                    }
                 ],
             },
             {"role": "assistant", "content": "noted"},
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "doc two", "cache_control": self._EPHEMERAL}
+                    {
+                        "type": "text",
+                        "text": "doc two",
+                        "cache_control": self._EPHEMERAL,
+                    }
                 ],
             },
         ]
