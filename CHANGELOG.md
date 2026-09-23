@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/powabase-ai/agentic/compare/v0.5.0...v0.5.1) (2026-09-23)
+
+
+### Bug Fixes
+
+* **agent:** replay provider reasoning within a run ([#33](https://github.com/powabase-ai/agentic/issues/33)) ([a854ec4](https://github.com/powabase-ai/agentic/commit/a854ec4272eee2fc85bd7f68bbb6195acb9dca05))
+
 ## [0.5.0](https://github.com/powabase-ai/agentic/compare/v0.4.0...v0.5.0) (2026-09-21)
 
 
