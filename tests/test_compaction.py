@@ -1447,43 +1447,135 @@ class TestCompactMessagesReasoningKwargs:
         window.assert_called_once_with("openai/gpt-5.4")
         assert mock_litellm.completion.call_args.kwargs["max_tokens"] == 16000
 
-    def test_full_reasoning_budget_at_the_in_loop_threshold(self):
+    @pytest.mark.parametrize(
+        "model,reasoning_kwargs,expected",
+        [
+            ("claude-opus-4-8", _CLAUDE_RK, 16000),
+            ("claude-sonnet-4-5", {"reasoning_effort": "max"}, 16384 + 16000),
+        ],
+    )
+    def test_full_reasoning_budget_at_the_in_loop_threshold(
+        self, model, reasoning_kwargs, expected
+    ):
         """In the loop, compaction fires once the estimate passes the threshold.
-        Reserving the reasoning budget in that threshold leaves the summary
-        call its full budget at that point, instead of the plain one."""
+        The threshold reserves the summary call's reasoning budget, its
+        thinking budget and the instruction it appends, so a history sitting
+        exactly at the threshold leaves the summary call its full budget.
+        Only the window is patched: the estimate is the real one, over the
+        real request, instruction included."""
         with patch.object(compaction, "resolve_context_window", return_value=200_000):
             at_threshold = compaction.get_context_threshold(
-                "claude-opus-4-8", compaction.compaction_output_reserve(None, True)
-            )
-            with (
-                patch.object(
-                    compaction, "estimate_token_count", return_value=at_threshold
+                model,
+                compaction.compaction_output_reserve(
+                    None, True, compaction.thinking_budget(model, reasoning_kwargs)
                 ),
-                patch.object(compaction, "litellm") as mock_litellm,
-            ):
+            )
+            history = list(_BASE)
+            short = at_threshold - compaction.estimate_token_count(history)
+            history.append({"role": "user", "content": "x" * (short * 4)})
+            assert compaction.estimate_token_count(history) == at_threshold
+            with patch.object(compaction, "litellm") as mock_litellm:
                 mock_litellm.completion.return_value = _mock_response(
                     "<summary>s</summary>"
                 )
                 compact_messages(
-                    list(_BASE),
-                    model="claude-opus-4-8",
-                    reasoning_kwargs=self._CLAUDE_RK,
+                    history, model=model, reasoning_kwargs=reasoning_kwargs
                 )
-        assert mock_litellm.completion.call_args.kwargs["max_tokens"] == 16000
+        assert mock_litellm.completion.call_args.kwargs["max_tokens"] == expected
+
+
+_INSTRUCTION_TOKENS = compaction.estimate_token_count(
+    [{"role": "user", "content": compaction.COMPACTION_INSTRUCTION}]
+)
 
 
 class TestCompactionOutputReserve:
     """The output budget the loop's compaction threshold reserves: with
-    reasoning on, at least the summary call's reasoning budget."""
+    reasoning on, at least the summary call's reasoning budget, its thinking
+    budget and the instruction it appends."""
 
     @pytest.mark.parametrize(
         "max_tokens,reasoning,expected",
         [
             (None, False, None),
             (4000, False, 4000),
-            (None, True, 16000),
+            (None, True, 16000 + _INSTRUCTION_TOKENS),
             (32000, True, 32000),
         ],
     )
     def test_reserve(self, max_tokens, reasoning, expected):
         assert compaction.compaction_output_reserve(max_tokens, reasoning) == expected
+
+    def test_reserve_includes_the_thinking_budget(self):
+        assert (
+            compaction.compaction_output_reserve(None, True, 16384)
+            == 16000 + 16384 + _INSTRUCTION_TOKENS
+        )
+
+    def test_thinking_budget_is_ignored_without_reasoning(self):
+        assert compaction.compaction_output_reserve(4000, False, 16384) == 4000
+
+
+class TestThinkingBudget:
+    """LiteLLM maps ``reasoning_effort`` on pre-adaptive Claude to a fixed
+    thinking budget, which the provider requires ``max_tokens`` to exceed."""
+
+    @pytest.mark.parametrize(
+        "effort,expected", [("high", 4096), ("xhigh", 8192), ("max", 16384)]
+    )
+    def test_budget_based_claude(self, effort, expected):
+        assert (
+            compaction.thinking_budget(
+                "claude-sonnet-4-5", {"reasoning_effort": effort}
+            )
+            == expected
+        )
+
+    def test_adaptive_claude(self):
+        assert (
+            compaction.thinking_budget("claude-opus-4-8", {"reasoning_effort": "max"})
+            == 0
+        )
+
+    def test_adaptive_claude_under_explicit_thinking_kwargs(self):
+        assert (
+            compaction.thinking_budget(
+                "claude-opus-4-8", TestCompactMessagesReasoningKwargs._CLAUDE_RK
+            )
+            == 0
+        )
+
+    def test_other_provider(self):
+        assert compaction.thinking_budget("gpt-5.4", {"reasoning_effort": "max"}) == 0
+
+    def test_no_reasoning(self):
+        assert compaction.thinking_budget("claude-sonnet-4-5", None) == 0
+        assert compaction.thinking_budget("claude-sonnet-4-5", {}) == 0
+
+
+class TestCompactionMaxTokensAboveThinkingBudget:
+    """Budget-based Claude: the summary call's ``max_tokens`` covers the
+    thinking budget plus the summary room."""
+
+    _MAX = {"reasoning_effort": "max"}
+
+    @patch("agentic.agent.compaction.resolve_context_window", return_value=1_000_000)
+    @patch("agentic.agent.compaction.litellm")
+    def test_roomy_window(self, mock_litellm, _window):
+        mock_litellm.completion.return_value = _mock_response("<summary>s</summary>")
+        compact_messages(
+            list(_BASE), model="claude-sonnet-4-5", reasoning_kwargs=self._MAX
+        )
+        assert mock_litellm.completion.call_args.kwargs["max_tokens"] == 16384 + 16000
+
+    @patch("agentic.agent.compaction.estimate_token_count", return_value=170_000)
+    @patch("agentic.agent.compaction.resolve_context_window", return_value=200_000)
+    @patch("agentic.agent.compaction.litellm")
+    def test_tight_window(self, mock_litellm, _window, _estimate):
+        # 200k window - 16k buffer - 170k input = 14k of room, less the 16384
+        # thinking budget: below the plain summary budget, which is the floor.
+        mock_litellm.completion.return_value = _mock_response("<summary>s</summary>")
+        compact_messages(
+            list(_BASE), model="claude-sonnet-4-5", reasoning_kwargs=self._MAX
+        )
+        assert mock_litellm.completion.call_args.kwargs["max_tokens"] == 16384 + 8000

@@ -7,9 +7,14 @@ from unittest.mock import patch
 
 import pytest
 
+from agentic.agent import compaction
 from agentic.agent.agent import Agent
 from agentic.agent.tools import BuiltinTool
 from agentic.execution.context import ExecutionContext
+
+_INSTRUCTION_TOKENS = compaction.estimate_token_count(
+    [{"role": "user", "content": compaction.COMPACTION_INSTRUCTION}]
+)
 
 _EXPECTED = {
     "anthropic/claude-opus-4-8": {
@@ -119,7 +124,7 @@ def test_reactive_compaction_gets_the_loops_kwargs(model):
         assert kwargs["reasoning_kwargs"] == _EXPECTED[model]
 
 
-def _threshold_reserves(reasoning_effort):
+def _threshold_reserves(reasoning_effort, model="anthropic/claude-opus-4-8"):
     """The output reserve every threshold the loop computes is given, over a
     run that reaches all three sites: proactive (each attempt), the reactive
     truncate target (compaction makes no progress) and phase 5 (after tools)."""
@@ -148,9 +153,7 @@ def _threshold_reserves(reasoning_effort):
             {"AGENT_LLM_STREAMING_ENABLED": "false", "OPENAI_REASONING_SUMMARY": ""},
         ),
     ):
-        agent = Agent(
-            model="anthropic/claude-opus-4-8", reasoning_effort=reasoning_effort
-        )
+        agent = Agent(model=model, reasoning_effort=reasoning_effort)
         agent.run(
             "hi",
             context=ExecutionContext(on_event=events.append),
@@ -164,10 +167,19 @@ def test_threshold_reserves_the_compaction_reasoning_budget():
     """Compaction fires only once the estimate passes the threshold, so the
     room it gets is below whatever the threshold reserved. With reasoning on,
     the threshold reserves the summary call's reasoning budget, or the
-    thinking and the summary would share the plain one."""
+    thinking and the summary would share the plain one. It also reserves the
+    instruction the compaction call appends to the history."""
     reserves = _threshold_reserves("high")
     assert len(reserves) >= 4
-    assert reserves == [16000] * len(reserves)
+    assert reserves == [16000 + _INSTRUCTION_TOKENS] * len(reserves)
+
+
+def test_threshold_reserves_the_thinking_budget_of_budget_based_claude():
+    """Pre-adaptive Claude thinks within a fixed budget that the compaction
+    call's max_tokens must exceed, so the threshold reserves it too."""
+    reserves = _threshold_reserves("max", model="anthropic/claude-sonnet-4-5")
+    assert len(reserves) >= 4
+    assert reserves == [16000 + 16384 + _INSTRUCTION_TOKENS] * len(reserves)
 
 
 def test_threshold_reserves_max_tokens_without_reasoning():
