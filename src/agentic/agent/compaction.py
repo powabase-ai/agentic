@@ -7,6 +7,8 @@ import re
 from typing import Any
 
 import litellm
+from litellm import get_llm_provider
+from litellm.llms.anthropic.chat.transformation import AnthropicConfig
 
 from agentic.agent.cache import add_cache_breakpoints
 from agentic.agent.model_registry import resolve_context_window
@@ -241,6 +243,35 @@ def estimate_token_count(messages: list[dict[str, Any]]) -> int:
     return total_chars // CHARS_PER_TOKEN
 
 
+def thinking_budget(model: str, reasoning_kwargs: dict[str, Any] | None) -> int:
+    """Tokens a budget-based Claude model may spend thinking under these kwargs.
+
+    LiteLLM maps ``reasoning_effort`` on pre-adaptive Claude to a fixed
+    ``budget_tokens``, and the provider requires ``max_tokens`` above it. 0 for
+    adaptive thinking, other providers, or no reasoning.
+    """
+    effort = (reasoning_kwargs or {}).get("reasoning_effort")
+    if not effort:
+        return 0
+    try:
+        provider = get_llm_provider(model)[1]
+        if provider != "anthropic" and not (
+            provider in ("vertex_ai", "bedrock") and "claude" in model.lower()
+        ):
+            return 0
+        mapped = AnthropicConfig._map_reasoning_effort(effort, model)
+        if mapped and mapped.get("type") == "enabled":
+            return int(mapped["budget_tokens"])
+    except Exception:
+        return 0
+    return 0
+
+
+def _instruction_tokens() -> int:
+    """Estimated size of the instruction a compaction call appends."""
+    return estimate_token_count([{"role": "user", "content": COMPACTION_INSTRUCTION}])
+
+
 def _summary_max_tokens(
     model: str,
     request: list[dict[str, Any]],
@@ -254,30 +285,43 @@ def _summary_max_tokens(
     tool schemas and replayed reasoning, so that is a margin, not a guarantee
     against ``prompt_too_long``. Never less than the plain budget.
 
+    A budget-based Claude model thinks within a fixed ``thinking_budget``
+    that ``max_tokens`` must exceed, so that budget is added on top of the
+    summary's share, which is sized on the room left after it.
+
     The window is resolved on the unrouted name: the model registry knows
     ``openai/gpt-5.4``, not the ``openai/responses/gpt-5.4`` route the call
     goes out under.
     """
     if not reasoning_kwargs:
         return _SUMMARY_MAX_TOKENS
+    budget = thinking_budget(model, reasoning_kwargs)
     window = resolve_context_window(model.replace("/responses/", "/", 1))
     room = window - _compact_buffer(window) - estimate_token_count(request)
-    return max(_SUMMARY_MAX_TOKENS, min(_SUMMARY_WITH_REASONING_MAX_TOKENS, room))
+    summary_part = max(
+        _SUMMARY_MAX_TOKENS, min(_SUMMARY_WITH_REASONING_MAX_TOKENS, room - budget)
+    )
+    return budget + summary_part
 
 
 def compaction_output_reserve(
-    max_output_tokens: int | None, reasoning: bool
+    max_output_tokens: int | None, reasoning: bool, thinking_budget: int = 0
 ) -> int | None:
     """The output budget ``get_context_threshold`` should reserve for a run.
 
     With reasoning on, a compaction's thinking and summary share up to
-    ``_SUMMARY_WITH_REASONING_MAX_TOKENS``; reserving at least that much makes
-    compaction fire while that room still exists. Without reasoning the
-    caller's own ``max_tokens`` is reserved, as before.
+    ``_SUMMARY_WITH_REASONING_MAX_TOKENS``, plus a budget-based Claude
+    model's ``thinking_budget``, and the call appends its instruction to the
+    history; reserving all of it makes compaction fire while that room still
+    exists. Without reasoning the caller's own ``max_tokens`` is reserved, as
+    before.
     """
     if not reasoning:
         return max_output_tokens
-    return max(max_output_tokens or 0, _SUMMARY_WITH_REASONING_MAX_TOKENS)
+    return max(
+        max_output_tokens or 0,
+        _SUMMARY_WITH_REASONING_MAX_TOKENS + thinking_budget + _instruction_tokens(),
+    )
 
 
 def compact_messages(

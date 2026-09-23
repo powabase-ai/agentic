@@ -23,6 +23,7 @@ from agentic.agent.compaction import (
     estimate_token_count,
     get_context_threshold,
     prune_messages,
+    thinking_budget,
     truncate_messages,
 )
 from agentic.agent.errors import classify_error, classify_finish_reason
@@ -320,12 +321,18 @@ class Agent:
 
     def _threshold_for(self, model: str) -> int:
         """The loop's compaction threshold for ``model``. With reasoning on it
-        reserves the compaction call's reasoning budget (see
+        reserves the compaction call's reasoning budget, including a
+        budget-based Claude model's thinking budget (see
         ``compaction_output_reserve``)."""
         return get_context_threshold(
             model,
             compaction_output_reserve(
-                self.max_tokens, self._resolved_effort_for(model) is not None
+                self.max_tokens,
+                self._resolved_effort_for(model) is not None,
+                thinking_budget(
+                    self._compaction_model_for(model),
+                    self._compaction_reasoning_kwargs(model),
+                ),
             ),
         )
 
