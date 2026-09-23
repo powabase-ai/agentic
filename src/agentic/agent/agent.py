@@ -45,6 +45,28 @@ from agentic.llm.routing import (
 
 logger = logging.getLogger(__name__)
 
+# litellm's `request_timeout` default is 6000.0s, so a provider that accepts a
+# call and never answers holds the run for 100 minutes: `timeout_seconds` and a
+# client abort both set `abort_signal`, which is only read between stream
+# chunks and so cannot end a call still waiting for its first one. On a
+# streaming call the timeout bounds each read (time to first byte, then the
+# gap between chunks), not the whole generation. Same default as compaction's
+# `_COMPACTION_TIMEOUT_SECONDS`.
+_DEFAULT_LLM_TIMEOUT_SECONDS = 600.0
+
+
+def _llm_timeout_kwargs() -> dict[str, float]:
+    """``{"timeout": s}`` for an agent model call; ``{}`` when disabled.
+
+    Read per call, not at import, so ``monkeypatch.setenv`` works in tests
+    (same as ``AGENT_LLM_STREAMING_ENABLED``). ``AGENT_LLM_TIMEOUT_SECONDS=0``
+    leaves the call to litellm's own default.
+    """
+    seconds = float(
+        os.getenv("AGENT_LLM_TIMEOUT_SECONDS", str(_DEFAULT_LLM_TIMEOUT_SECONDS))
+    )
+    return {"timeout": seconds} if seconds > 0 else {}
+
 
 def _usage_stub(usage: dict[str, int]):
     """Wrap a usage dict so it satisfies extract_reasoning_artifact's
@@ -728,6 +750,7 @@ class Agent:
                 call_kwargs["stream"] = streaming_enabled
                 if streaming_enabled:
                     call_kwargs["stream_options"] = {"include_usage": True}
+                call_kwargs.update(_llm_timeout_kwargs())
 
                 # Call LLM
                 try:
@@ -1478,6 +1501,7 @@ class Agent:
                 model=self.model,
                 messages=messages,
                 num_retries=3,
+                **_llm_timeout_kwargs(),
                 **(
                     {"temperature": self.temperature}
                     if self.temperature is not None
@@ -1570,6 +1594,7 @@ class Agent:
                 "stream": True,
                 "stream_options": {"include_usage": True},
                 "num_retries": 3,
+                **_llm_timeout_kwargs(),
             }
             if self.temperature is not None:
                 call_kwargs["temperature"] = self.temperature
@@ -1717,6 +1742,7 @@ class Agent:
             messages=messages,
             stream=True,
             num_retries=3,
+            **_llm_timeout_kwargs(),
             **(
                 {"temperature": self.temperature}
                 if self.temperature is not None
