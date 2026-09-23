@@ -83,11 +83,11 @@ def maybe_route_through_responses(model: str, reasoning_effort: str | None) -> s
 
 
 # Anthropic models whose adaptive-thinking `display` defaults to "omitted":
-# opus 4.7/4.8, sonnet 5, fable 5, mythos 5/preview. On these, thinking fires
-# but the reasoning summary text AND the reasoning token count are suppressed
-# unless we ask for `display: "summarized"` explicitly (a silent change from
-# opus 4.6, where "summarized" was the default). We opt in so reasoning is
-# visible for eval debugging and the reasoning-display UI.
+# opus 4.7/4.8, opus 5.5, sonnet 5, fable 5, mythos 5/preview. On these,
+# thinking fires but the reasoning summary text AND the reasoning token count
+# are suppressed unless we ask for `display: "summarized"` explicitly (a
+# silent change from opus 4.6, where "summarized" was the default). We opt in
+# so reasoning is visible for eval debugging and the reasoning-display UI.
 #
 # Deliberately NOT matched: opus-4-6 / sonnet-4-6 (already default to
 # "summarized", so litellm's reasoning_effort path surfaces reasoning fine) and
@@ -98,6 +98,7 @@ def maybe_route_through_responses(model: str, reasoning_effort: str | None) -> s
 _ANTHROPIC_OMITTED_DISPLAY_FAMILIES = (
     "opus-4-7",
     "opus-4-8",
+    "opus-5",
     "sonnet-5",
     "fable-5",
     "mythos-5",
