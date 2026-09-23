@@ -154,8 +154,17 @@ def test_call_kwargs_for_claude_opus_5_5_requests_summarized():
     "omitted", same as the rest of the opus-5 family, so it needs the same
     explicit adaptive+summarized request. Matched via the "opus-5" family
     entry, which must catch claude-opus-5-5 without over-matching pre-adaptive
-    or pre-5.5 models (see test_call_kwargs_for_older_anthropic_uses_top_level_effort)."""
-    for model in ("claude-opus-5-5", "anthropic/claude-opus-5-5"):
+    models (opus-4-5, sonnet-4-5, claude-3-*; see
+    test_call_kwargs_for_older_anthropic_uses_top_level_effort below). The
+    "opus-5" substring also matches bare `claude-opus-5` (Opus 5, not just
+    5.5) -- intentionally: Opus 5's thinking display defaults to omitted too,
+    so it needs the same explicit request."""
+    for model in (
+        "claude-opus-5-5",
+        "anthropic/claude-opus-5-5",
+        "claude-opus-5",
+        "anthropic/claude-opus-5",
+    ):
         assert reasoning_call_kwargs("high", model) == {
             "thinking": {"type": "adaptive", "display": "summarized"},
             "output_config": {"effort": "high"},
@@ -352,11 +361,16 @@ def test_claude_opus_5_5_request_uses_adaptive_thinking_without_budget_tokens():
     """The actual request agentic builds for claude-opus-5-5 at
     reasoning_effort="high" — thinking+output_config from
     reasoning_call_kwargs, sent through litellm.completion — must carry
-    thinking.type=="adaptive" and must NOT carry budget_tokens. Registering
-    the model without supports_adaptive_thinking=True (setup.py's bug if that
-    flag were dropped) makes litellm map effort to
-    thinking={"type": "enabled", "budget_tokens": N} instead, which this
-    model rejects with HTTP 400."""
+    thinking.type=="adaptive" and must NOT carry budget_tokens.
+
+    This test sends the explicit thinking={"type": "adaptive", ...} /
+    output_config kwargs that reasoning_call_kwargs already builds, which
+    litellm forwards to the wire as-is regardless of whether the registered
+    entry declares supports_adaptive_thinking. It does NOT exercise -- and
+    would NOT catch a regression in -- the flag itself: that guard is
+    test_claude_opus_5_5_reasoning_effort_kwarg_uses_adaptive_thinking below,
+    which goes through the bare reasoning_effort= kwarg instead and is the
+    one that fails if supports_adaptive_thinking is dropped from setup.py."""
     model = "claude-opus-5-5"
     kwargs = reasoning_call_kwargs("high", model)
     assert kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
@@ -365,3 +379,55 @@ def test_claude_opus_5_5_request_uses_adaptive_thinking_without_budget_tokens():
 
     assert body["thinking"]["type"] == "adaptive"
     assert "budget_tokens" not in body["thinking"]
+
+
+def test_claude_opus_5_5_reasoning_effort_kwarg_uses_adaptive_thinking(
+    force_registered_opus_5_5,
+):
+    """Guards the supports_adaptive_thinking flag itself, unlike the test
+    above. litellm's own reasoning_effort= path (not agentic's explicit
+    thinking=/output_config= kwargs) only emits thinking={"type": "adaptive"}
+    when the registered entry says supports_adaptive_thinking=True; otherwise
+    it emits the pre-adaptive thinking={"type": "enabled", "budget_tokens": N}
+    shape, which this model rejects with HTTP 400. Deleting
+    supports_adaptive_thinking from setup.py's registered entry must make
+    this test fail (verified manually while addressing PR review).
+
+    The flag is read from litellm.model_cost directly (not from
+    litellm.get_model_info()): litellm 1.90.1's get_model_info() doesn't
+    surface supports_adaptive_thinking as an output field at all -- even for
+    an already-well-known model like claude-opus-4-8 -- while the request-
+    building code (AnthropicModelInfo._get_model_capability) reads
+    litellm.model_cost directly, which is what actually governs the request
+    shape asserted below.
+
+    force_registered_opus_5_5 forces setup.py's own entry into place, so this
+    doesn't pass vacuously against a live-downloaded map in a
+    network-connected environment."""
+    import litellm
+
+    model = "claude-opus-5-5"
+    assert litellm.model_cost[model]["supports_adaptive_thinking"] is True
+
+    body = _capture_request_body(model=model, reasoning_effort="high")
+
+    assert body["thinking"]["type"] == "adaptive"
+    assert "budget_tokens" not in body["thinking"]
+
+
+def test_claude_opus_5_5_drops_temperature_with_drop_params(
+    force_registered_opus_5_5,
+):
+    """claude-opus-5-5 removed sampling params (temperature/top_p/top_k),
+    same as opus-4-7/4-8. Without supports_sampling_params: False in the
+    registered entry, litellm's name-based fallback (which only recognizes
+    "fable"/"opus-4-7"/"opus-4-8") treats claude-opus-5-5 as still accepting
+    them, forwarding temperature to a model that rejects it with HTTP 400.
+    With the flag set and drop_params=True, litellm drops the param instead
+    of sending it. force_registered_opus_5_5 forces setup.py's own entry into
+    place (see the previous test's docstring for why)."""
+    body = _capture_request_body(
+        model="claude-opus-5-5", temperature=0, drop_params=True
+    )
+
+    assert "temperature" not in body

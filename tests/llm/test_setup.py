@@ -58,7 +58,9 @@ def test_setup_runs_via_fresh_agentic_import():
     ), f"Subprocess failed:\nstdout={result.stdout}\nstderr={result.stderr}"
 
 
-def test_registers_claude_opus_5_5_when_absent_from_model_cost():
+def test_registers_claude_opus_5_5_when_absent_from_model_cost(
+    restore_opus_5_5_model_cost,
+):
     """setup.py registers claude-opus-5-5 with litellm when the installed
     litellm's cost map doesn't already know the model (e.g. the bundled map
     hasn't caught up yet, or the runtime download of the live map didn't
@@ -101,7 +103,9 @@ def test_registers_claude_opus_5_5_against_a_genuinely_bundled_map():
     ), f"Subprocess failed:\nstdout={result.stdout}\nstderr={result.stderr}"
 
 
-def test_does_not_overwrite_an_existing_model_cost_entry():
+def test_does_not_overwrite_an_existing_model_cost_entry(
+    restore_opus_5_5_model_cost,
+):
     """Never override an entry litellm already has — including a future
     litellm release that ships its own claude-opus-5-5 entry, or one filled in
     by a successful runtime download of the live cost map."""
@@ -116,7 +120,9 @@ def test_does_not_overwrite_an_existing_model_cost_entry():
     assert litellm.model_cost["claude-opus-5-5"] == sentinel
 
 
-def test_bare_registration_also_resolves_the_anthropic_prefixed_form():
+def test_bare_registration_also_resolves_the_anthropic_prefixed_form(
+    restore_opus_5_5_model_cost,
+):
     """litellm strips the `anthropic/` prefix when looking up a model whose
     provider is anthropic, so registering only the bare `claude-opus-5-5` key
     (matching how litellm keys its own `claude-opus-4-8` entry) is enough to
@@ -131,3 +137,17 @@ def test_bare_registration_also_resolves_the_anthropic_prefixed_form():
     info = litellm.get_model_info("anthropic/claude-opus-5-5")
     assert info["supports_reasoning"] is True
     assert info["max_output_tokens"] == 128000
+
+
+def test_registered_entry_supports_response_schema(force_registered_opus_5_5):
+    """claude-opus-5-5 supports strict structured output, same as
+    claude-opus-4-8. Without `supports_response_schema: True` in the
+    registered entry, `doc2json.py` falls back from strict `json_schema` to
+    the looser `json_object` for this model.
+
+    force_registered_opus_5_5 forces setup.py's own entry into place, so this
+    doesn't pass vacuously against a live-downloaded map in a
+    network-connected environment (see conftest.py)."""
+    import litellm
+
+    assert litellm.supports_response_schema("claude-opus-5-5") is True
