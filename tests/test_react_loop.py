@@ -712,6 +712,29 @@ class TestPromptCacheBreakpoints:
         assert "tool_choice" not in kwargs
 
     @patch("agentic.agent.agent.litellm")
+    def test_claude_last_step_with_response_format_withholds_tools(
+        self, mock_litellm, monkeypatch
+    ):
+        # LiteLLM implements `response_format` on Claude as a forced
+        # json_tool_call. Keeping tools + tool_choice="none" for the last-step
+        # rule would override that forcing, so response_format wins: fall back
+        # to today's behavior on that step (tools withheld, no tool_choice).
+        monkeypatch.setenv("AGENT_LLM_STREAMING_ENABLED", "false")
+        mock_litellm.get_llm_provider.side_effect = litellm.get_llm_provider
+        mock_litellm.completion.return_value = _mock_completion_response("done")
+        agent = Agent(model="anthropic/claude-opus-4-8", system_prompt="You are a bot.")
+        agent.run(
+            "question",
+            tools={"lookup": self._lookup_tool()},
+            max_steps=1,
+            response_format={"type": "json_object"},
+        )
+
+        kwargs = mock_litellm.completion.call_args.kwargs
+        assert "tools" not in kwargs
+        assert "tool_choice" not in kwargs
+
+    @patch("agentic.agent.agent.litellm")
     def test_agent_without_tools_marks_system_and_history(
         self, mock_litellm, monkeypatch
     ):
