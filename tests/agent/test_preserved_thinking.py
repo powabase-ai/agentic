@@ -181,11 +181,14 @@ def test_budget_warning_is_a_system_message_on_a_non_anthropic_route():
     ]
     # 900 of the 1000-token budget consumed by step 1 leaves 100 remaining —
     # the value baked into this message; `budget.remaining` itself has since
-    # moved on past step 2's own consumption.
+    # moved on past step 2's own consumption. normalize_messages wraps any
+    # injected system message in <system-context> tags on its own, so — unlike
+    # the anthropic route's user message above — the sender doesn't wrap it by
+    # hand.
     assert sent[-1]["content"] == (
-        "BUDGET WARNING: You have approximately "
+        "<system-context>\nBUDGET WARNING: You have approximately "
         "100 tokens remaining. Wrap up your work efficiently. "
-        "Avoid unnecessary tool calls."
+        "Avoid unnecessary tool calls.\n</system-context>"
     )
 
 
