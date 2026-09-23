@@ -34,6 +34,12 @@ class OpenAIReasoning(BaseModel):
     requested_effort: str | None = None
     reasoning_token_count: int | None = None
 
+    @property
+    def encrypted_content_items(self) -> list[dict]:
+        """Deprecated: always empty. Replaced by ``reasoning_items``; kept so
+        attribute access from older callers does not break."""
+        return []
+
 
 class GeminiReasoning(BaseModel):
     provider: Literal["gemini"] = "gemini"
