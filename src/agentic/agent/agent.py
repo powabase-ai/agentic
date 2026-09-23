@@ -607,6 +607,7 @@ class Agent:
                                     reasoning_kwargs=self._compaction_reasoning_kwargs(
                                         state.current_model
                                     ),
+                                    context_model=state.current_model,
                                 )
                             except Exception:
                                 logger.warning(
@@ -804,6 +805,7 @@ class Agent:
                                 reasoning_kwargs=self._compaction_reasoning_kwargs(
                                     state.current_model
                                 ),
+                                context_model=state.current_model,
                             )
                             # Measure work done, not list identity. Identity is
                             # only a *sufficient* no-progress signal (see the
@@ -1304,6 +1306,7 @@ class Agent:
                             reasoning_kwargs=self._compaction_reasoning_kwargs(
                                 state.current_model
                             ),
+                            context_model=state.current_model,
                         )
                     except Exception:
                         logger.warning("Phase 5 compaction failed", exc_info=True)

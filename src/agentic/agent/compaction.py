@@ -276,6 +276,7 @@ def _summary_max_tokens(
     model: str,
     request: list[dict[str, Any]],
     reasoning_kwargs: dict[str, Any] | None,
+    context_model: str | None = None,
 ) -> int:
     """Output budget for the summary call.
 
@@ -289,14 +290,18 @@ def _summary_max_tokens(
     that ``max_tokens`` must exceed, so that budget is added on top of the
     summary's share, which is sized on the room left after it.
 
-    The window is resolved on the unrouted name: the model registry knows
-    ``openai/gpt-5.4``, not the ``openai/responses/gpt-5.4`` route the call
-    goes out under.
+    The window is resolved on ``context_model`` — the name the loop's
+    threshold resolves — when given; the registry can answer differently for
+    ``gpt-5`` and ``openai/gpt-5``. Otherwise on the unrouted name: the model
+    registry knows ``openai/gpt-5.4``, not the ``openai/responses/gpt-5.4``
+    route the call goes out under.
     """
     if not reasoning_kwargs:
         return _SUMMARY_MAX_TOKENS
     budget = thinking_budget(model, reasoning_kwargs)
-    window = resolve_context_window(model.replace("/responses/", "/", 1))
+    window = resolve_context_window(
+        context_model or model.replace("/responses/", "/", 1)
+    )
     room = window - _compact_buffer(window) - estimate_token_count(request)
     summary_part = max(
         _SUMMARY_MAX_TOKENS, min(_SUMMARY_WITH_REASONING_MAX_TOKENS, room - budget)
@@ -330,6 +335,7 @@ def compact_messages(
     api_key: str | None = None,
     tools: list[dict[str, Any]] | None = None,
     reasoning_kwargs: dict[str, Any] | None = None,
+    context_model: str | None = None,
 ) -> list[dict[str, Any]]:
     """Summarize the conversation in-context on ``model`` and rebuild a short history.
 
@@ -357,7 +363,9 @@ def compact_messages(
     call a tool.
 
     With reasoning on, thinking and the summary share ``max_tokens``; see
-    ``_summary_max_tokens``.
+    ``_summary_max_tokens``. ``context_model`` is the model name the loop's
+    compaction threshold resolves its window on (``Agent._threshold_for``),
+    so the output budget is sized against that same window.
 
     Messages are run through ``normalize_messages`` first: not every call site
     hands us already-normalized history, and non-standard bookkeeping keys
@@ -395,7 +403,9 @@ def compact_messages(
         "model": model,
         "messages": request_messages,
         "stream": False,
-        "max_tokens": _summary_max_tokens(model, summarize_request, reasoning_kwargs),
+        "max_tokens": _summary_max_tokens(
+            model, summarize_request, reasoning_kwargs, context_model
+        ),
         "num_retries": _COMPACTION_NUM_RETRIES,
         "timeout": _COMPACTION_TIMEOUT_SECONDS,
     }
