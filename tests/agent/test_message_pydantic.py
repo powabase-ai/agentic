@@ -195,6 +195,20 @@ def test_legacy_openai_row_still_validates():
     assert "reasoning_items" not in msg.to_litellm_input()
 
 
+def test_openai_encrypted_content_items_is_a_deprecated_empty_attribute():
+    """The field was replaced by `reasoning_items`; attribute access keeps
+    working, always empty, and it is not serialized."""
+    assert OpenAIReasoning().encrypted_content_items == []
+    item = {"id": "rs_1", "type": "reasoning", "encrypted_content": "e"}
+    reasoning = OpenAIReasoning(reasoning_items=[item])
+    assert reasoning.encrypted_content_items == []
+    assert "encrypted_content_items" not in reasoning.model_dump()
+    legacy = OpenAIReasoning.model_validate(
+        {"provider": "openai", "encrypted_content_items": [{"id": "x"}]}
+    )
+    assert legacy.encrypted_content_items == []
+
+
 def test_replay_fields_anthropic():
     blocks = [{"type": "thinking", "thinking": "x", "signature": "s"}]
     assert reasoning_replay_fields(AnthropicReasoning(thinking_blocks=blocks)) == {

@@ -169,6 +169,50 @@ def test_openai_reads_a_non_streaming_litellm_message():
     assert artifact.reasoning_items == [item]
 
 
+def _openai_artifact(items, **msg_kwargs):
+    with patch(
+        "agentic.llm.reasoning_extractor.litellm.get_llm_provider",
+        return_value=("gpt-5.4", "openai", None, None),
+    ):
+        return extract_reasoning_artifact(
+            model="openai/responses/gpt-5.4",
+            assembled_message=_msg(reasoning_items=items, **msg_kwargs),
+            final_response=_final_response(usage=None, id="resp"),
+            requested_effort="high",
+        )
+
+
+def test_openai_keeps_only_items_with_encrypted_content():
+    """An item without its encrypted payload replays only while the provider
+    stores responses, and fails for an organization that does not."""
+    kept = {"id": "rs_1", "type": "reasoning", "encrypted_content": "e", "summary": []}
+    artifact = _openai_artifact(
+        [
+            {"id": "rs_0", "type": "reasoning", "summary": []},
+            kept,
+            {"id": "rs_2", "type": "reasoning", "encrypted_content": "", "summary": []},
+            {"id": "rs_3", "type": "reasoning", "encrypted_content": None},
+        ]
+    )
+    assert artifact.reasoning_items == [kept]
+
+
+def test_openai_with_only_id_items_and_nothing_else_has_no_artifact():
+    assert _openai_artifact([{"id": "rs_0", "type": "reasoning", "summary": []}]) is (
+        None
+    )
+
+
+def test_openai_deduplicates_items_by_id_keeping_the_first():
+    first = {"id": "rs_1", "type": "reasoning", "encrypted_content": "a", "summary": []}
+    again = {"id": "rs_1", "type": "reasoning", "encrypted_content": "b", "summary": []}
+    no_id_1 = {"type": "reasoning", "encrypted_content": "c"}
+    no_id_2 = {"type": "reasoning", "encrypted_content": "c"}
+    other = {"id": "rs_2", "type": "reasoning", "encrypted_content": "d"}
+    artifact = _openai_artifact([first, no_id_1, again, other, no_id_2])
+    assert artifact.reasoning_items == [first, no_id_1, other, no_id_2]
+
+
 def test_openai_ignores_the_legacy_provider_specific_key():
     """LiteLLM never fills provider_specific_fields['encrypted_content_items'];
     reading it only ever produced empty artifacts."""

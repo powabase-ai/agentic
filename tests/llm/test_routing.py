@@ -268,6 +268,15 @@ def test_loop_kwargs_match_reasoning_kwargs_off_responses_routes(model):
     )
 
 
+def test_loop_kwargs_request_no_encrypted_reasoning_on_azure_responses(monkeypatch):
+    """Only the OpenAI provider's items are extracted and replayed, so another
+    Responses route would fetch the encrypted payload for nothing."""
+    monkeypatch.delenv("OPENAI_REASONING_SUMMARY", raising=False)
+    assert loop_reasoning_call_kwargs("medium", "azure/responses/x") == {
+        "extra_body": {"reasoning": {"effort": "medium"}}
+    }
+
+
 def test_loop_kwargs_empty_without_effort():
     assert loop_reasoning_call_kwargs(None, "openai/responses/gpt-5.4") == {}
 
