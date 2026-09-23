@@ -1602,3 +1602,49 @@ class TestCompactionMaxTokensAboveThinkingBudget:
             list(_BASE), model="claude-sonnet-4-5", reasoning_kwargs=self._MAX
         )
         assert mock_litellm.completion.call_args.kwargs["max_tokens"] == 16384 + 8000
+
+
+class TestSummaryMaxTokensCappedAtModelOutputCeiling:
+    """A budget-based Claude model's thinking budget plus the summary's own
+    share can exceed the model's real output ceiling (e.g. 16384 + 16000 =
+    32384 against a 32000 ceiling) — the provider rejects `max_tokens` above
+    its output limit, and compaction's broad `except` then swallows that as a
+    silent no-op. When the ceiling is known, cap the request at it."""
+
+    _MAX_RK = {"reasoning_effort": "max"}
+
+    @patch(
+        "agentic.agent.compaction.get_model_info",
+        return_value={"max_output_tokens": 32000},
+    )
+    @patch("agentic.agent.compaction.litellm")
+    def test_caps_at_the_known_ceiling(self, mock_litellm, _ceiling):
+        mock_litellm.completion.return_value = _mock_response("<summary>s</summary>")
+        compact_messages(
+            list(_BASE), model="claude-opus-4-1", reasoning_kwargs=self._MAX_RK
+        )
+        assert mock_litellm.completion.call_args.kwargs["max_tokens"] == 32000
+
+    @patch(
+        "agentic.agent.compaction.get_model_info",
+        side_effect=Exception("not mapped"),
+    )
+    @patch("agentic.agent.compaction.litellm")
+    def test_unknown_ceiling_keeps_todays_value(self, mock_litellm, _ceiling):
+        mock_litellm.completion.return_value = _mock_response("<summary>s</summary>")
+        compact_messages(
+            list(_BASE), model="claude-opus-4-1", reasoning_kwargs=self._MAX_RK
+        )
+        assert mock_litellm.completion.call_args.kwargs["max_tokens"] == 16384 + 16000
+
+    @patch("agentic.agent.compaction.litellm")
+    def test_adaptive_model_unaffected(self, mock_litellm):
+        # claude-opus-4-8's real output ceiling (well above the 16000-token
+        # adaptive-thinking summary request, budget 0) leaves the cap unused —
+        # this is the real (unmocked) ceiling lookup, not a stand-in.
+        mock_litellm.completion.return_value = _mock_response("<summary>s</summary>")
+        with patch.object(compaction, "resolve_context_window", return_value=1_000_000):
+            compact_messages(
+                list(_BASE), model="claude-opus-4-8", reasoning_kwargs=self._MAX_RK
+            )
+        assert mock_litellm.completion.call_args.kwargs["max_tokens"] == 16000
