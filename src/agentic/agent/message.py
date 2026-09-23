@@ -9,6 +9,7 @@ in-memory shape.
 
 from __future__ import annotations
 
+import copy
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
@@ -58,15 +59,27 @@ def reasoning_replay_fields(reasoning: ReasoningArtifact) -> dict:
     Anthropic reads ``thinking_blocks``; LiteLLM's OpenAI Responses bridge
     reads a top-level ``reasoning_items``; Gemini reads
     ``provider_specific_fields.thought_signatures``. Empty when the artifact
-    carries nothing to replay. The lists are copies, so a request built from
-    them cannot reach back into the artifact the host persists.
+    carries nothing to replay.
+
+    Only signed thinking blocks and redacted ones are replayed: a block with
+    no signature — a response cut off mid-thinking — is rejected by the
+    provider. The artifact keeps it for the record.
+
+    The structures are deep copies, so a request built from them cannot reach
+    back into the artifact the host persists.
     """
     if isinstance(reasoning, AnthropicReasoning):
-        if reasoning.thinking_blocks:
-            return {"thinking_blocks": [dict(b) for b in reasoning.thinking_blocks]}
+        blocks = [
+            b
+            for b in reasoning.thinking_blocks
+            if b.get("type") == "redacted_thinking"
+            or (b.get("type") == "thinking" and b.get("signature"))
+        ]
+        if blocks:
+            return {"thinking_blocks": copy.deepcopy(blocks)}
     elif isinstance(reasoning, OpenAIReasoning):
         if reasoning.reasoning_items:
-            return {"reasoning_items": [dict(i) for i in reasoning.reasoning_items]}
+            return {"reasoning_items": copy.deepcopy(reasoning.reasoning_items)}
     elif isinstance(reasoning, GeminiReasoning):
         if reasoning.thought_signatures:
             return {

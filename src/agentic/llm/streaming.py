@@ -144,10 +144,15 @@ def _combine_thinking_blocks(blocks: list[dict]) -> list[dict]:
     signature arrives on a delta of its own with empty text, and a redacted
     block arrives whole. Grouping by ``index`` therefore merged every block of
     a response into one, which the provider rejects on replay. The deltas are
-    walked in order instead, as LiteLLM's own combiner does
-    (``get_combined_thinking_content``), and ``index`` is ignored: text appends
-    to the open block, and a signature signs and closes it. A block still open
-    at the end is kept, without a ``signature`` key if none arrived.
+    walked in order instead, and ``index`` is ignored: text appends to the open
+    block, and a signature signs and closes it.
+
+    Unlike LiteLLM's own combiner (``get_combined_thinking_content``), which
+    drops a block that never received a signature, a block still open at the
+    end — a response cut off mid-thinking — is kept, without a ``signature``
+    key, so the record holds all the reasoning that streamed. The provider
+    rejects such a block on replay, so ``reasoning_replay_fields`` filters it
+    out.
 
     A ``redacted_thinking`` block is opaque — its payload is ``data`` — so it
     keeps ``data`` only, with no ``thinking`` key, which would make it
@@ -278,7 +283,8 @@ def accumulate_stream(
 
             # Anthropic thinking_blocks delta capture (verified at
             # litellm/main.py:6350-6361). Each chunk's delta.thinking_blocks
-            # is a list of partial blocks identified by index.
+            # is a list of block fragments; they carry no reliable index, so
+            # _combine_thinking_blocks assembles them by sequence.
             chunk_thinking = getattr(delta, "thinking_blocks", None) or []
             for block in chunk_thinking:
                 thinking_blocks_acc.append(block)

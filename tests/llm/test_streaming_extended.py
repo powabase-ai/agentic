@@ -18,7 +18,7 @@ def _chunk(*, delta=None, finish_reason=None, usage=None):
 
 def test_captures_thinking_blocks_across_chunks():
     """Anthropic thinking_blocks come as delta.thinking_blocks per chunk; the
-    accumulator combines them by index."""
+    accumulator combines them in sequence."""
     chunks = [
         _chunk(
             delta=_delta(
@@ -165,7 +165,7 @@ def test_message_dataclass_has_extended_fields():
 
 
 def test_combine_thinking_blocks_handles_no_index():
-    """If LiteLLM emits thinking_blocks without explicit index, treat as index=0."""
+    """Fragments without an index join the open block in sequence."""
     chunks = [
         _chunk(
             delta=_delta(
