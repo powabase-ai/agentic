@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 import litellm
-from litellm import get_llm_provider
+from litellm import get_llm_provider, get_model_info
 from litellm.llms.anthropic.chat.transformation import AnthropicConfig
 
 from agentic.agent.cache import add_cache_breakpoints
@@ -272,6 +272,21 @@ def _instruction_tokens() -> int:
     return estimate_token_count([{"role": "user", "content": COMPACTION_INSTRUCTION}])
 
 
+def _model_output_ceiling(model: str) -> int | None:
+    """The model's real output-token ceiling, or None when it isn't known.
+
+    Backed by LiteLLM's model map. Any lookup failure (unmapped model) or a
+    missing value means the caller applies no cap — this is a safety
+    reduction, not a source of truth to fail loudly over.
+    """
+    try:
+        info = get_model_info(model)
+    except Exception:
+        return None
+    ceiling = info.get("max_output_tokens") or info.get("max_tokens")
+    return int(ceiling) if ceiling else None
+
+
 def _summary_max_tokens(
     model: str,
     request: list[dict[str, Any]],
@@ -294,19 +309,31 @@ def _summary_max_tokens(
     threshold resolves — when given; the registry can answer differently for
     ``gpt-5`` and ``openai/gpt-5``. Otherwise on the unrouted name: the model
     registry knows ``openai/gpt-5.4``, not the ``openai/responses/gpt-5.4``
-    route the call goes out under.
+    route the call goes out under. The same resolved name is used to look up
+    the model's output ceiling below.
+
+    On a budget-based Claude model at high effort, ``thinking_budget`` plus
+    the summary's own share can exceed the model's real output ceiling (e.g.
+    16384 + 16000 = 32384 against a 32000 ceiling) — the provider rejects a
+    ``max_tokens`` above its output limit, and the broad ``except`` around the
+    call would swallow that as a silent no-op. When the ceiling is known, the
+    result is capped at it (kept above ``budget`` so the call still asks for
+    more than thinking alone needs).
     """
     if not reasoning_kwargs:
         return _SUMMARY_MAX_TOKENS
     budget = thinking_budget(model, reasoning_kwargs)
-    window = resolve_context_window(
-        context_model or model.replace("/responses/", "/", 1)
-    )
+    resolved_model = context_model or model.replace("/responses/", "/", 1)
+    window = resolve_context_window(resolved_model)
     room = window - _compact_buffer(window) - estimate_token_count(request)
     summary_part = max(
         _SUMMARY_MAX_TOKENS, min(_SUMMARY_WITH_REASONING_MAX_TOKENS, room - budget)
     )
-    return budget + summary_part
+    max_tokens = budget + summary_part
+    ceiling = _model_output_ceiling(resolved_model)
+    if ceiling is not None and max_tokens > ceiling:
+        max_tokens = max(budget + 1, ceiling)
+    return max_tokens
 
 
 def compaction_output_reserve(
