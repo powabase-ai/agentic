@@ -557,7 +557,11 @@ class Agent:
                 # them: a thinking block's signature binds the tool set, so
                 # dropping the tools would invalidate every block the step
                 # replays. Other routes withhold the tools, as not every
-                # provider accepts tool_choice="none".
+                # provider accepts tool_choice="none". Skipped when
+                # response_format is set: LiteLLM implements it on Claude as a
+                # forced json_tool_call, which keeping tools + tool_choice="none"
+                # would override — response_format wins, falling back to
+                # withholding the tools instead.
                 # Resolved here (not just before the call) so the compaction
                 # sites below can send the same value: tool definitions sit at
                 # the front of the cached prefix, so compacting with tools the
@@ -565,6 +569,7 @@ class Agent:
                 forbid_tool_use = (
                     is_last_step
                     and bool(tool_schemas)
+                    and response_format is None
                     and _provider_of(state.current_model) == "anthropic"
                 )
                 step_tools = (
