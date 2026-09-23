@@ -303,8 +303,8 @@ def test_rejected_signature_strips_blocks_and_retries_once():
         if e.get("type") == "step_reset"
         and e.get("reason") == "thinking_signature_rejected"
     ]
-    assert resets == [
-        {"type": "step_reset", "step": 2, "reason": "thinking_signature_rejected"}
+    assert [(e["type"], e["step"], e["reason"]) for e in resets] == [
+        ("step_reset", 2, "thinking_signature_rejected")
     ]
 
 

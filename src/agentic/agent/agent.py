@@ -153,6 +153,49 @@ def _provider_of(model: str) -> str | None:
         return None
 
 
+def _provider_view(message: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        message.get("role"),
+        message.get("content"),
+        message.get("tool_calls"),
+        message.get("tool_call_id"),
+    )
+
+
+def _without_blocks_after_edit(
+    before: list[dict[str, Any]], after: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Drop Claude thinking blocks from every assistant message at or after the
+    first message an edit changed.
+
+    A thinking block's signature binds everything before it, so a block that
+    follows a rewritten message is rejected; blocks before the edit stay valid
+    (and keep thinking on). Messages are compared on what the provider sees —
+    role, content, tool calls, tool-call id — so bookkeeping keys and message
+    removals both count conservatively.
+    """
+    edit_at = len(after)
+    for i, message in enumerate(after):
+        if i >= len(before) or _provider_view(before[i]) != _provider_view(message):
+            edit_at = i
+            break
+    return [
+        {k: v for k, v in m.items() if k != "thinking_blocks"}
+        if i >= edit_at and m.get("role") == "assistant" and "thinking_blocks" in m
+        else m
+        for i, m in enumerate(after)
+    ]
+
+
+def _without_thinking_blocks(messages: Any) -> list[dict[str, Any]]:
+    return [
+        {k: v for k, v in m.items() if k != "thinking_blocks"}
+        if m.get("role") == "assistant"
+        else m
+        for m in messages
+    ]
+
+
 class Agent:
     """
     A single LLM-powered agent.
@@ -474,6 +517,9 @@ class Agent:
             }
             # For doom loop detection: list of (tool_name, arguments_str) tuples
             recent_calls: list[tuple[str, str]] = []
+            # One free retry per run when the provider rejects a replayed
+            # thinking block's signature (see the LLM-call `except`).
+            thinking_backstop_used = False
 
             while True:
                 # The "step" as seen by events/output is turn_count + 1
@@ -499,12 +545,24 @@ class Agent:
 
                 is_last_step = step >= max_steps or state.budget_exhausted
 
-                # On last step, don't pass tools to force a text-only response.
+                # On the last step, force a text-only response. On the
+                # Anthropic route the tools stay and tool_choice="none" forbids
+                # them: a thinking block's signature binds the tool set, so
+                # dropping the tools would invalidate every block the step
+                # replays. Other routes withhold the tools, as not every
+                # provider accepts tool_choice="none".
                 # Resolved here (not just before the call) so the compaction
                 # sites below can send the same value: tool definitions sit at
                 # the front of the cached prefix, so compacting with tools the
                 # real call will not send breaks the match at the first block.
-                step_tools = None if is_last_step else tool_schemas
+                forbid_tool_use = (
+                    is_last_step
+                    and bool(tool_schemas)
+                    and _provider_of(state.current_model) == "anthropic"
+                )
+                step_tools = (
+                    None if is_last_step and not forbid_tool_use else tool_schemas
+                )
 
                 # Normalize messages before LLM call
                 normalized = normalize_messages(
@@ -519,7 +577,11 @@ class Agent:
                     # threshold decision: if it alone gets us under, we never
                     # pay for a compaction call.
                     compact_succeeded = False
-                    pruned = prune_messages(normalized)
+                    # Pruning rewrites old tool results, so thinking blocks
+                    # after the first rewrite would be rejected on replay.
+                    pruned = _without_blocks_after_edit(
+                        normalized, prune_messages(normalized)
+                    )
                     if estimate_token_count(pruned) > threshold:
                         if state.compact_failure_count < 3:
                             # Compact the UN-pruned list: compact_messages
@@ -603,6 +665,8 @@ class Agent:
                     call_kwargs["max_tokens"] = self.max_tokens
                 if step_tools:
                     call_kwargs["tools"] = step_tools
+                    if forbid_tool_use:
+                        call_kwargs["tool_choice"] = "none"
                 if response_format is not None:
                     call_kwargs["response_format"] = response_format
                 if self.api_key is not None:
@@ -629,9 +693,12 @@ class Agent:
                 # Claude caches only up to explicit breakpoints. They go on
                 # copies for this request: `normalized` and state.messages
                 # stay unmarked, or the markers would pile up step by step.
-                # A last step that withholds the agent's tools is skipped: tools
-                # open the cached prefix, so it can match no earlier entry, and
-                # the loop ends after it, so nothing would read what it wrote.
+                # A last step that withholds the agent's tools (every route but
+                # Anthropic's, which keeps them) is skipped: tools open the
+                # cached prefix, so it can match no earlier entry, and the loop
+                # ends after it, so nothing would read what it wrote. The
+                # Anthropic last step sends the same tools, so it is marked and
+                # reads the prefix the earlier steps cached.
                 if step_tools or not tool_schemas:
                     cached_messages, cached_tools = add_cache_breakpoints(
                         routed_model, normalized, step_tools
@@ -653,6 +720,30 @@ class Agent:
                 try:
                     response = litellm.completion(**call_kwargs)
                 except Exception as llm_error:
+                    # Backstop: a thinking block's signature binds the system
+                    # prompt, the tools and every message before it. Should a
+                    # history edit the loop does not guard slip through, the
+                    # provider rejects the block; replaying no blocks at all is
+                    # always accepted. Once per run — a second rejection means
+                    # something else is wrong, and is handled as before.
+                    if (
+                        not thinking_backstop_used
+                        and "bound to a different conversation" in str(llm_error)
+                    ):
+                        thinking_backstop_used = True
+                        context.emit_event(
+                            {
+                                "type": "step_reset",
+                                "step": step,
+                                "reason": "thinking_signature_rejected",
+                            }
+                        )
+                        state = state.recover(
+                            messages=_without_thinking_blocks(state.messages),
+                            reason="thinking_signature_rejected",
+                        )
+                        continue
+
                     error_type = classify_error(llm_error)
 
                     # Recovery: model fallback on rate limit
@@ -694,7 +785,10 @@ class Agent:
                             }
                         )
                         try:
-                            pruned = prune_messages(list(state.messages))
+                            current = list(state.messages)
+                            pruned = _without_blocks_after_edit(
+                                current, prune_messages(current)
+                            )
                             compacted = compact_messages(
                                 pruned,
                                 model=self._compaction_model_for(state.current_model),
@@ -739,7 +833,9 @@ class Agent:
                                 target = int(
                                     self._threshold_for(state.current_model) * 0.5
                                 )
-                                truncated = truncate_messages(compacted, target)
+                                truncated = _without_blocks_after_edit(
+                                    compacted, truncate_messages(compacted, target)
+                                )
                                 before_tokens = estimate_token_count(compacted)
                                 after_tokens = estimate_token_count(truncated)
                                 # Measure work done, not list identity:
@@ -908,14 +1004,21 @@ class Agent:
                     for k in total_usage:
                         total_usage[k] += step_usage.get(k, 0)
 
-                # Budget enforcement: consume tokens and check limits
+                # Budget enforcement: consume tokens and check limits. The
+                # warning is appended after this step's tool results (Phase 5),
+                # as a user message: a Claude thinking block's signature binds
+                # every message before it and the top-level system prompt, so a
+                # warning placed ahead of this step's reply — or sent as a
+                # system message, which LiteLLM folds into that prompt — would
+                # invalidate the blocks the next step replays.
+                budget_msg: dict[str, Any] | None = None
                 if context.budget and step_usage:
                     context.budget.consume(step_usage.get("total_tokens", 0))
                     if context.budget.exceeded:
                         state = state.with_budget_exhausted()
                     elif context.budget.remaining < (context.budget.max_tokens * 0.15):
                         budget_msg = {
-                            "role": "system",
+                            "role": "user",
                             "content": (
                                 f"BUDGET WARNING: You have approximately "
                                 f"{context.budget.remaining} tokens remaining. "
@@ -924,11 +1027,6 @@ class Agent:
                             ),
                             "_injected": True,
                         }
-                        # Add to working messages (will be picked up via next_turn)
-                        working_budget = list(state.messages) + [budget_msg]
-                        state = state.recover(
-                            messages=working_budget, reason="budget_warning"
-                        )
 
                 # Check abort after (potentially slow) LLM call
                 if context.is_aborted:
@@ -1236,6 +1334,8 @@ class Agent:
                         )
 
                 # ===== PHASE 5: CONTINUATION =====
+                if budget_msg is not None:
+                    working_messages.append(budget_msg)
                 state = state.next_turn(messages=working_messages)
 
             # Build final output
