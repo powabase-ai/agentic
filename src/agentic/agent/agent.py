@@ -1019,28 +1019,46 @@ class Agent:
                         total_usage[k] += step_usage.get(k, 0)
 
                 # Budget enforcement: consume tokens and check limits. The
-                # warning is appended after this step's tool results (Phase 5),
-                # as a user message: a Claude thinking block's signature binds
-                # every message before it and the top-level system prompt, so a
-                # warning placed ahead of this step's reply — or sent as a
-                # system message, which LiteLLM folds into that prompt — would
-                # invalidate the blocks the next step replays.
+                # warning is appended after this step's tool results (Phase 5).
+                # On the anthropic route it goes in as a user message,
+                # pre-wrapped in the same <system-context> marker
+                # normalize_messages puts on injected system messages: a
+                # Claude thinking block's signature binds every message before
+                # it and the top-level system prompt, and a real system
+                # message mid-run is folded into that prompt by LiteLLM,
+                # which would invalidate the blocks the next step replays.
+                # Elsewhere a system message costs nothing extra and keeps the
+                # warning's framing — a plain user message there would also
+                # cost context: on the OpenAI Responses route it becomes the
+                # "latest user message", after which the API discards earlier
+                # reasoning.
                 budget_msg: dict[str, Any] | None = None
                 if context.budget and step_usage:
                     context.budget.consume(step_usage.get("total_tokens", 0))
                     if context.budget.exceeded:
                         state = state.with_budget_exhausted()
                     elif context.budget.remaining < (context.budget.max_tokens * 0.15):
-                        budget_msg = {
-                            "role": "user",
-                            "content": (
-                                f"BUDGET WARNING: You have approximately "
-                                f"{context.budget.remaining} tokens remaining. "
-                                "Wrap up your work efficiently. Avoid unnecessary "
-                                "tool calls."
-                            ),
-                            "_injected": True,
-                        }
+                        warning_text = (
+                            f"BUDGET WARNING: You have approximately "
+                            f"{context.budget.remaining} tokens remaining. "
+                            "Wrap up your work efficiently. Avoid unnecessary "
+                            "tool calls."
+                        )
+                        if _provider_of(state.current_model) == "anthropic":
+                            budget_msg = {
+                                "role": "user",
+                                "content": (
+                                    f"<system-context>\n{warning_text}\n"
+                                    "</system-context>"
+                                ),
+                                "_injected": True,
+                            }
+                        else:
+                            budget_msg = {
+                                "role": "system",
+                                "content": warning_text,
+                                "_injected": True,
+                            }
 
                 # Check abort after (potentially slow) LLM call
                 if context.is_aborted:
