@@ -6,6 +6,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from agentic.agent.agent import Agent
 from agentic.agent.tools import BuiltinTool
 from agentic.execution.context import ExecutionContext
@@ -28,11 +30,11 @@ def _probe_tool():
     )
 
 
-def _tool_step():
+def _tool_step(blocks=_BLOCKS):
     msg = SimpleNamespace(
         content=None,
         role="assistant",
-        reasoning_content="I should probe.",
+        reasoning_content="I should probe." if blocks else None,
         tool_calls=[
             SimpleNamespace(
                 id="call_1",
@@ -40,7 +42,7 @@ def _tool_step():
                 function=SimpleNamespace(name="probe", arguments="{}"),
             )
         ],
-        thinking_blocks=_BLOCKS,
+        thinking_blocks=blocks,
         provider_specific_fields=None,
     )
     return SimpleNamespace(
@@ -66,11 +68,18 @@ def _answer_step():
     )
 
 
-def _run_with_fallback(fallback_model, history=None):
-    """Step 1 (Claude, thinking + tool call) succeeds, step 2 is rate limited,
-    so step 2 is retried on `fallback_model`."""
+def _run_with_fallback(
+    fallback_model, history=None, error_type="rate_limit", first_step=None
+):
+    """Step 1 (Claude, thinking + tool call) succeeds, step 2 fails with an
+    error classified as `error_type` (a rate limit or a server error — the two
+    fallback sites), so step 2 is retried on `fallback_model`."""
     events: list[dict] = []
-    responses = [_tool_step(), _RateLimited("rate limited"), _answer_step()]
+    responses = [
+        first_step or _tool_step(),
+        _RateLimited("provider error"),
+        _answer_step(),
+    ]
 
     def fake_completion(**kwargs):
         r = responses.pop(0)
@@ -83,7 +92,7 @@ def _run_with_fallback(fallback_model, history=None):
         patch(
             "agentic.agent.agent.litellm.completion", side_effect=fake_completion
         ) as completion,
-        patch("agentic.agent.agent.classify_error", return_value="rate_limit"),
+        patch("agentic.agent.agent.classify_error", return_value=error_type),
         patch.dict("os.environ", {"AGENT_LLM_STREAMING_ENABLED": "false"}),
     ):
         agent = Agent(model="anthropic/claude-opus-4-8", reasoning_effort="high")
@@ -95,6 +104,10 @@ def _run_with_fallback(fallback_model, history=None):
         )
     assert output.status.is_success()
     assert completion.call_count == 3
+    # The retry went through the fallback site for `error_type`.
+    assert [e["reason"] for e in events if e.get("type") == "step_reset"] == [
+        error_type
+    ]
     dropped = [e for e in events if e.get("type") == _EVENT]
     return output, completion.call_args_list[2], dropped
 
@@ -105,8 +118,14 @@ _HISTORY = [
 ]
 
 
-def test_cross_provider_fallback_strips_every_assistant_message():
-    _, fallback_call, dropped = _run_with_fallback("openai/gpt-5.4", _HISTORY)
+_FALLBACK_ERRORS = pytest.mark.parametrize("error_type", ["rate_limit", "model_error"])
+
+
+@_FALLBACK_ERRORS
+def test_cross_provider_fallback_strips_every_assistant_message(error_type):
+    _, fallback_call, dropped = _run_with_fallback(
+        "openai/gpt-5.4", _HISTORY, error_type=error_type
+    )
     assert fallback_call.kwargs["model"] == "openai/responses/gpt-5.4"
     for message in fallback_call.kwargs["messages"]:
         assert "thinking_blocks" not in message
@@ -132,9 +151,10 @@ def test_the_reasoning_record_survives_the_strip():
     assert "thinking_blocks" not in step_one
 
 
-def test_same_provider_fallback_keeps_the_blocks():
+@_FALLBACK_ERRORS
+def test_same_provider_fallback_keeps_the_blocks(error_type):
     _, fallback_call, dropped = _run_with_fallback(
-        "anthropic/claude-sonnet-5", _HISTORY
+        "anthropic/claude-sonnet-5", _HISTORY, error_type=error_type
     )
     assistants = [
         m for m in fallback_call.kwargs["messages"] if m.get("role") == "assistant"
@@ -151,4 +171,15 @@ def test_unresolvable_fallback_keeps_the_blocks():
         m for m in fallback_call.kwargs["messages"] if m.get("role") == "assistant"
     ][-1]
     assert prior["thinking_blocks"] == _BLOCKS
+    assert dropped == []
+
+
+@_FALLBACK_ERRORS
+def test_cross_provider_fallback_with_nothing_to_drop_emits_no_event(error_type):
+    """The event reports dropped reasoning; a history with no replay fields
+    drops nothing, so a provider switch alone emits none."""
+    _, fallback_call, dropped = _run_with_fallback(
+        "openai/gpt-5.4", error_type=error_type, first_step=_tool_step(blocks=None)
+    )
+    assert fallback_call.kwargs["model"] == "openai/responses/gpt-5.4"
     assert dropped == []
