@@ -115,3 +115,65 @@ def test_openai_reasoning_items_never_cross_runs():
     _history_answer(messages)
     for message in messages:
         assert "reasoning_items" not in message
+
+
+# A caller that chains runs passes one run's AgentOutput.messages as the next
+# run's list input; the same provider rule applies.
+
+
+def _chained_request_messages(model, earlier_assistant):
+    earlier_output = [
+        {"role": "user", "content": "earlier question"},
+        earlier_assistant,
+        {"role": "user", "content": "next question"},
+    ]
+    with (
+        patch("litellm.supports_reasoning", return_value=True),
+        patch(
+            "agentic.agent.agent.litellm.completion", return_value=_answer()
+        ) as completion,
+        patch.dict(
+            "os.environ",
+            {"AGENT_LLM_STREAMING_ENABLED": "false", "OPENAI_REASONING_SUMMARY": ""},
+        ),
+    ):
+        agent = Agent(model=model, reasoning_effort="high")
+        output = agent.run(earlier_output, context=ExecutionContext())
+    assert output.status.is_success()
+    return completion.call_args_list[0].kwargs["messages"]
+
+
+def _claude_answer():
+    return {
+        "role": "assistant",
+        "content": "earlier answer",
+        "thinking_blocks": [dict(b) for b in _BLOCKS],
+        "reasoning": {"provider": "anthropic", "thinking_blocks": _BLOCKS},
+    }
+
+
+def test_list_input_claude_reasoning_is_not_replayed_to_another_provider():
+    messages = _chained_request_messages("gemini/gemini-2.5-pro", _claude_answer())
+    _history_answer(messages)
+    for message in messages:
+        assert "thinking_blocks" not in message
+
+
+def test_list_input_claude_reasoning_is_replayed_to_claude():
+    messages = _chained_request_messages("anthropic/claude-opus-4-8", _claude_answer())
+    assert _history_answer(messages)["thinking_blocks"] == _BLOCKS
+
+
+def test_list_input_openai_reasoning_items_are_dropped():
+    messages = _chained_request_messages(
+        "openai/gpt-5.4",
+        {
+            "role": "assistant",
+            "content": "earlier answer",
+            "reasoning_items": [dict(i) for i in _ITEMS],
+            "reasoning": {"provider": "openai", "reasoning_items": _ITEMS},
+        },
+    )
+    _history_answer(messages)
+    for message in messages:
+        assert "reasoning_items" not in message
