@@ -2027,14 +2027,16 @@ class Agent:
         if isinstance(input, str):
             messages.append({"role": "user", "content": input})
         elif isinstance(input, list):
-            messages.extend(input)
+            messages.extend(self._replayable_history(input))
 
         return messages
 
     def _replayable_history(
         self, history: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """Earlier runs' messages as this run may replay them.
+        """Earlier runs' messages as this run may replay them, whether they
+        come from a session or are passed in as list input (a caller chaining
+        one run's ``AgentOutput.messages`` into the next).
 
         Reasoning goes back only to the provider that produced it: another
         provider cannot verify it, and LiteLLM turns some of it into malformed
