@@ -35,6 +35,16 @@ def _capture_async(seen: dict):
     return _fake
 
 
+def _run_async(coro):
+    # A private loop: asyncio.run() would leave this thread with no current
+    # event loop, breaking later tests that call asyncio.get_event_loop().
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
 def _run(agent: Agent) -> dict:
     seen: dict = {}
     with patch("agentic.agent.agent.litellm.completion", side_effect=_capture(seen)):
@@ -54,8 +64,10 @@ def _stream(agent: Agent) -> dict:
 
 def _arun(agent: Agent) -> dict:
     seen: dict = {}
-    with patch("agentic.agent.agent.litellm.acompletion", side_effect=_capture_async(seen)):
-        asyncio.run(agent.arun("hi"))
+    with patch(
+        "agentic.agent.agent.litellm.acompletion", side_effect=_capture_async(seen)
+    ):
+        _run_async(agent.arun("hi"))
     return seen
 
 
@@ -66,9 +78,11 @@ def _astream(agent: Agent) -> dict:
         async for _ in agent.astream("hi"):
             pass
 
-    with patch("agentic.agent.agent.litellm.acompletion", side_effect=_capture_async(seen)):
+    with patch(
+        "agentic.agent.agent.litellm.acompletion", side_effect=_capture_async(seen)
+    ):
         with pytest.raises(_Stop):
-            asyncio.run(_drain())
+            _run_async(_drain())
     return seen
 
 
