@@ -370,3 +370,58 @@ def test_blocks_parsed_by_litellms_anthropic_stream_parser_stay_separate():
         {"type": "thinking", "thinking": "second", "signature": "SIG2"},
     ]
     assert msg.content == "answer"
+
+
+def test_stream_cut_off_mid_thinking_replays_no_unsigned_block():
+    """A response truncated mid-thinking leaves its last block unsigned. The
+    record keeps it; replay must not send it back."""
+    from agentic.agent.message import reasoning_replay_fields
+    from agentic.llm.reasoning_extractor import extract_reasoning_artifact
+
+    def thinking_delta(text="", signature=""):
+        return _chunk(
+            delta=_delta(
+                content=None,
+                reasoning_content=text or None,
+                tool_calls=None,
+                thinking_blocks=[
+                    {"type": "thinking", "thinking": text, "signature": signature}
+                ],
+                provider_specific_fields=None,
+            )
+        )
+
+    chunks = [
+        thinking_delta("first "),
+        thinking_delta("block"),
+        thinking_delta(signature="sig1"),
+        thinking_delta("second, cut "),
+        thinking_delta("off"),
+        _chunk(
+            delta=_delta(
+                content=None,
+                reasoning_content=None,
+                tool_calls=None,
+                thinking_blocks=None,
+                provider_specific_fields=None,
+            ),
+            finish_reason="length",
+        ),
+    ]
+    msg, finish_reason, _ = accumulate_stream(iter(chunks))
+    assert finish_reason == "length"
+    artifact = extract_reasoning_artifact(
+        model="anthropic/claude-opus-4-8",
+        assembled_message=msg,
+        final_response=SimpleNamespace(usage=None),
+        requested_effort="high",
+    )
+    assert artifact.thinking_blocks == [
+        {"type": "thinking", "thinking": "first block", "signature": "sig1"},
+        {"type": "thinking", "thinking": "second, cut off"},
+    ]
+    assert reasoning_replay_fields(artifact) == {
+        "thinking_blocks": [
+            {"type": "thinking", "thinking": "first block", "signature": "sig1"}
+        ]
+    }

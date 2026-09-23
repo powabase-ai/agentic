@@ -268,3 +268,64 @@ def test_drop_replay_fields_removes_an_emptied_provider_dict():
         {"role": "assistant", "provider_specific_fields": {"thought_signatures": ["s"]}}
     )
     assert out == {"role": "assistant"}
+
+
+_SIGNED = {"type": "thinking", "thinking": "x", "signature": "s"}
+_UNSIGNED = {"type": "thinking", "thinking": "cut off"}
+_EMPTY_SIGNATURE = {"type": "thinking", "thinking": "cut off", "signature": ""}
+_REDACTED = {"type": "redacted_thinking", "data": "opaque"}
+
+
+def test_replay_fields_drop_unsigned_thinking_blocks():
+    """A block with no signature — a stream cut off mid-thinking — is rejected
+    by the provider on replay. The persisted artifact keeps it."""
+    artifact = AnthropicReasoning(
+        thinking_blocks=[_SIGNED, _UNSIGNED, _EMPTY_SIGNATURE, _REDACTED]
+    )
+    assert reasoning_replay_fields(artifact) == {
+        "thinking_blocks": [_SIGNED, _REDACTED]
+    }
+    assert artifact.thinking_blocks == [_SIGNED, _UNSIGNED, _EMPTY_SIGNATURE, _REDACTED]
+
+
+def test_replay_fields_keep_redacted_thinking_blocks():
+    assert reasoning_replay_fields(AnthropicReasoning(thinking_blocks=[_REDACTED])) == {
+        "thinking_blocks": [_REDACTED]
+    }
+
+
+def test_replay_fields_keep_signed_thinking_blocks():
+    assert reasoning_replay_fields(AnthropicReasoning(thinking_blocks=[_SIGNED])) == {
+        "thinking_blocks": [_SIGNED]
+    }
+
+
+def test_replay_fields_empty_when_every_block_is_unsigned():
+    artifact = AnthropicReasoning(thinking_blocks=[_UNSIGNED, _EMPTY_SIGNATURE])
+    assert reasoning_replay_fields(artifact) == {}
+
+
+def test_to_litellm_input_drops_unsigned_thinking_blocks():
+    msg = Message(
+        role="assistant",
+        content="answer",
+        reasoning=AnthropicReasoning(thinking_blocks=[_UNSIGNED]),
+    )
+    assert "thinking_blocks" not in msg.to_litellm_input()
+
+
+def test_replay_fields_are_deep_copies():
+    """Nested structures — an OpenAI item's summary list — are copies too."""
+    item = {
+        "id": "rs_1",
+        "type": "reasoning",
+        "encrypted_content": "e",
+        "summary": [{"type": "summary_text", "text": "t"}],
+    }
+    artifact = OpenAIReasoning(reasoning_items=[item])
+    out = reasoning_replay_fields(artifact)
+    out["reasoning_items"][0]["summary"].append({"type": "summary_text"})
+    out["reasoning_items"][0]["summary"][0]["text"] = "edited"
+    assert artifact.reasoning_items[0]["summary"] == [
+        {"type": "summary_text", "text": "t"}
+    ]
