@@ -111,7 +111,9 @@ def test_every_streaming_call_is_bounded_by_default(call, monkeypatch, streaming
 
 
 @pytest.mark.parametrize("call", STREAMING, ids=_ids)
-def test_the_bound_is_read_from_the_environment_per_call(call, monkeypatch, streaming_on):
+def test_the_bound_is_read_from_the_environment_per_call(
+    call, monkeypatch, streaming_on
+):
     monkeypatch.setenv("AGENT_LLM_TIMEOUT_SECONDS", "42")
     seen = call(Agent(model="openai/gpt-4o-mini"))
     assert seen["timeout"] == 42.0
