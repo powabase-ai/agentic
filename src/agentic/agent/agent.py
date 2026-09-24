@@ -45,6 +45,47 @@ from agentic.llm.routing import (
 
 logger = logging.getLogger(__name__)
 
+# litellm's `request_timeout` default is 6000.0s, so a provider that accepts a
+# call and never answers holds the run for 100 minutes: `timeout_seconds` and a
+# client abort both set `abort_signal`, which is only read between stream
+# chunks and so cannot end a call still waiting for its first one. On a
+# streaming call the timeout bounds each read (time to first byte, then the
+# gap between chunks), not the whole generation. A non-streaming call sends
+# nothing until the answer is complete, so there the same bound would cap the
+# whole generation; those calls keep litellm's default.
+#
+# It is per ATTEMPT: with `num_retries: 3` plus the provider SDK's own retries,
+# a provider that never answers costs up to ~7x this before the run fails. The
+# retries are also the recovery path — an intermittently stuck upstream usually
+# answers the next request — so the bound is kept short enough for a retry to
+# happen within minutes, and long enough to clear a slow first token on a large
+# context.
+_DEFAULT_LLM_TIMEOUT_SECONDS = 300.0
+
+
+def _llm_timeout_kwargs(*, stream: bool) -> dict[str, float]:
+    """``{"timeout": s}`` for a streaming agent model call; ``{}`` otherwise.
+
+    Read per call, not at import, so ``monkeypatch.setenv`` works in tests
+    (same as ``AGENT_LLM_STREAMING_ENABLED``). ``AGENT_LLM_TIMEOUT_SECONDS`` of
+    0 or less leaves the call to litellm's own default; a value that is not a
+    number is logged and ignored, so a bad setting cannot fail every run.
+    """
+    if not stream:
+        return {}
+    raw = os.getenv("AGENT_LLM_TIMEOUT_SECONDS")
+    seconds = _DEFAULT_LLM_TIMEOUT_SECONDS
+    if raw is not None:
+        try:
+            seconds = float(raw)
+        except ValueError:
+            logger.warning(
+                "Invalid AGENT_LLM_TIMEOUT_SECONDS=%r (not a number); using %ss",
+                raw,
+                _DEFAULT_LLM_TIMEOUT_SECONDS,
+            )
+    return {"timeout": seconds} if seconds > 0 else {}
+
 
 def _usage_stub(usage: dict[str, int]):
     """Wrap a usage dict so it satisfies extract_reasoning_artifact's
@@ -728,6 +769,7 @@ class Agent:
                 call_kwargs["stream"] = streaming_enabled
                 if streaming_enabled:
                     call_kwargs["stream_options"] = {"include_usage": True}
+                call_kwargs.update(_llm_timeout_kwargs(stream=streaming_enabled))
 
                 # Call LLM
                 try:
@@ -1570,6 +1612,7 @@ class Agent:
                 "stream": True,
                 "stream_options": {"include_usage": True},
                 "num_retries": 3,
+                **_llm_timeout_kwargs(stream=True),
             }
             if self.temperature is not None:
                 call_kwargs["temperature"] = self.temperature
@@ -1717,6 +1760,7 @@ class Agent:
             messages=messages,
             stream=True,
             num_retries=3,
+            **_llm_timeout_kwargs(stream=True),
             **(
                 {"temperature": self.temperature}
                 if self.temperature is not None

@@ -118,6 +118,8 @@ export OPENAI_API_KEY="sk-..."
 export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
+Streaming agent model calls time out after `AGENT_LLM_TIMEOUT_SECONDS` (default `300`) without a response. On a stream this bounds the wait for each chunk, not the length of the answer, and it applies per attempt, so litellm's retries still run. `0` or less uses litellm's own default (6000s). Non-streaming calls always use litellm's default, since a timeout there would cap the whole generation.
+
 ## Core Concepts
 
 ### Agent

@@ -27,6 +27,12 @@ def classify_error(error: Exception | None) -> str | None:
         return "rate_limit"
     if error_type in ("AuthenticationError", "PermissionDeniedError"):
         return "unrecoverable"
+    # By type, before the text patterns below: litellm appends "time taken=<s>
+    # seconds" to a timeout's message, whose digits read as a 413/5xx status.
+    # litellm has already retried the call, so the run fails rather than
+    # compacting or falling back.
+    if error_type in ("Timeout", "APITimeoutError"):
+        return "unrecoverable"
     msg = str(error).lower()
     for p in _PROMPT_TOO_LONG_PATTERNS:
         if p in msg:
