@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.3](https://github.com/powabase-ai/agentic/compare/v0.5.2...v0.5.3) (2026-09-24)
+
+
+### Bug Fixes
+
+* **agent:** bound streaming agent model calls with an explicit timeout ([#37](https://github.com/powabase-ai/agentic/issues/37)) ([268944a](https://github.com/powabase-ai/agentic/commit/268944a7665228e90fbb146c1fa9072e89eeb091))
+
 ## [0.5.2](https://github.com/powabase-ai/agentic/compare/v0.5.1...v0.5.2) (2026-09-23)
 
 
