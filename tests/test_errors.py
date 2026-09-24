@@ -1,3 +1,5 @@
+import pytest
+
 from agentic.agent.errors import classify_error, classify_finish_reason
 
 
@@ -43,3 +45,18 @@ class TestClassifyFinishReason:
 
     def test_tool_calls_finish_reason(self):
         assert classify_finish_reason("tool_calls") is None
+
+
+class TestClassifyTimeout:
+    # litellm's OpenAI/Azure paths append "timeout value=…, time taken=… seconds"
+    # to a Timeout's message, so digits there must not be read as status codes.
+    @pytest.mark.parametrize("seconds", ["413.2", "500.03", "502.9"])
+    def test_a_timeout_is_unrecoverable_whatever_its_message_says(self, seconds):
+        import litellm
+
+        error = litellm.Timeout(
+            message=f"Request timed out. - timeout value=600, time taken={seconds} seconds",
+            model="gpt-4o-mini",
+            llm_provider="openai",
+        )
+        assert classify_error(error) == "unrecoverable"
