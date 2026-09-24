@@ -1,6 +1,10 @@
 # agentic
 
-The agent/knowledge/orchestration/workflow engine that powers the [Powabase](https://github.com/powabase-ai/powabase) stack — a well-documented Python library you can also import on its own.
+The open-source agent engine behind [Powabase](https://powabase.ai) — The AI-Native Supabase Alternative — RAG and Agents built-in.
+
+Powabase is the Postgres backend for AI apps. Every project gets its own database, auth, storage, and dedicated compute, with documents that index on upload and agents that call tools over HTTP or MCP — all behind one REST API. `agentic` is the agent/knowledge/orchestration/workflow engine that powers those agents and indexes in the [Powabase](https://github.com/powabase-ai/powabase) stack — a well-documented Python library you can also import on its own.
+
+[Website](https://powabase.ai) · [Docs](https://docs.powabase.ai) · [Compare with Supabase](https://powabase.ai/supabase-alternative/)
 
 ## Features
 
