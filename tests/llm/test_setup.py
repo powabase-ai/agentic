@@ -4,6 +4,8 @@ import importlib
 import subprocess
 import sys
 
+import pytest
+
 
 def test_modify_params_set_when_setup_runs():
     """setup.py's module body sets litellm.modify_params=True. Verify by
@@ -151,3 +153,68 @@ def test_registered_entry_supports_response_schema(force_registered_opus_5_5):
     import litellm
 
     assert litellm.supports_response_schema("claude-opus-5-5") is True
+
+
+# ===== Models newer than the pinned litellm's bundled cost map =====
+
+# Every model setup.py registers, with the capability its absence breaks.
+_NEW_MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "gpt-6-luna", "gpt-6.1-sol"]
+
+
+def test_registered_model_ids_cover_the_new_models():
+    from agentic.llm.setup import REGISTERED_MODEL_IDS
+
+    assert set(_NEW_MODELS) <= set(REGISTERED_MODEL_IDS)
+
+
+@pytest.mark.parametrize("model", _NEW_MODELS)
+def test_new_model_usable_against_a_genuinely_bundled_map(model):
+    """In a fresh interpreter on litellm's bundled map (no live download),
+    importing agentic makes each model resolve its provider from the bare id,
+    report reasoning, and price its tokens."""
+    code = (
+        "import os; os.environ['LITELLM_LOCAL_MODEL_COST_MAP'] = 'True'; "
+        "import litellm; import agentic; "
+        f"m = {model!r}; "
+        "assert litellm.supports_reasoning(model=m) is True; "
+        "assert litellm.get_llm_provider(m)[1] in ('openai', 'anthropic'); "
+        "assert litellm.get_model_info(m)['input_cost_per_token'] > 0; "
+        "assert litellm.supports_function_calling(model=m) is True"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True
+    )
+    assert result.returncode == 0, (
+        f"Subprocess failed:\nstdout={result.stdout}\nstderr={result.stderr}"
+    )
+
+
+@pytest.mark.parametrize("model", ["claude-opus-5-5", "claude-sonnet-5-5"])
+def test_claude_5_5_entries_declare_no_sampling_params(
+    model, restore_registered_model_cost
+):
+    """Claude 5.5 rejects temperature/top_p/top_k with HTTP 400; the flag is
+    what lets litellm drop them under drop_params."""
+    import litellm
+
+    from agentic.llm import setup
+
+    litellm.model_cost.pop(model, None)
+    importlib.reload(setup)
+
+    assert litellm.model_cost[model]["supports_sampling_params"] is False
+    assert litellm.model_cost[model]["supports_adaptive_thinking"] is True
+
+
+def test_registration_never_overwrites_an_existing_entry(
+    restore_registered_model_cost,
+):
+    import litellm
+
+    from agentic.llm import setup
+
+    sentinel = {"litellm_provider": "openai", "mode": "chat", "sentinel": True}
+    litellm.model_cost["gpt-6-luna"] = sentinel
+    importlib.reload(setup)
+
+    assert litellm.model_cost["gpt-6-luna"] == sentinel

@@ -32,9 +32,120 @@ in the UI) by setting the env var ``OPENAI_REASONING_SUMMARY=1``.
 
 from __future__ import annotations
 
+import logging
 import os
 
 import litellm
+
+logger = logging.getLogger(__name__)
+
+
+# Every effort level any provider accepts, least to most reasoning.
+_EFFORT_LADDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+# Models whose accepted levels litellm's cost map does not describe. Kimi K3
+# always thinks and takes low/high/max only (Moonshot's API reference); its
+# cost-map entries carry no effort flags.
+_EFFORT_OVERRIDES: tuple[tuple[str, frozenset[str]], ...] = (
+    ("kimi-k3", frozenset({"low", "high", "max"})),
+)
+
+
+def _flag(info: dict, name: str) -> bool:
+    return info.get(name) is True
+
+
+def supported_reasoning_efforts(model: str) -> frozenset[str] | None:
+    """The effort levels ``model`` accepts, or None when that isn't known.
+
+    None means "pass the value through": an unmapped model, a model litellm
+    says doesn't reason, or a provider whose rules aren't encoded here.
+
+    Read from litellm's cost-map flags (``supports_none/minimal/xhigh/
+    max_reasoning_effort``) and the provider's own rules:
+
+    - OpenAI / Azure: low, medium and high, plus each level its flag allows.
+      Both routes this module builds -- top-level ``reasoning_effort`` and
+      the Responses ``extra_body`` -- reach OpenAI unvalidated by litellm.
+    - Adaptive Claude (4.6+): low, medium and high, plus xhigh/max per flag.
+      The effort goes out as ``output_config.effort``, which Anthropic
+      validates and litellm does not; neither ``none`` nor ``minimal`` is
+      an effort there.
+    - Pre-adaptive Claude: None -- the effort goes out as top-level
+      ``reasoning_effort`` and litellm maps every level to a thinking budget.
+    - Gemini: litellm maps none..high to the model's thinking config and
+      rejects xhigh/max.
+    - OpenRouter: OpenRouter maps a level a model lacks to the nearest one
+      it has, except ``none`` on a model that always reasons, which it
+      rejects; ``none`` is kept only where the flag allows it.
+    """
+    model_lower = model.lower()
+    for family, efforts in _EFFORT_OVERRIDES:
+        if family in model_lower:
+            return efforts
+    lookup = model.replace("/responses/", "/", 1)
+    try:
+        _, provider, _, _ = litellm.get_llm_provider(lookup)
+        if not litellm.supports_reasoning(model=lookup):
+            return None
+        info = dict(litellm.get_model_info(lookup))
+    except Exception:
+        return None
+
+    extras = {
+        level
+        for level in ("none", "minimal", "xhigh", "max")
+        if _flag(info, f"supports_{level}_reasoning_effort")
+    }
+    if provider in ("openai", "azure"):
+        return frozenset({"low", "medium", "high"} | extras)
+    if "claude" in model_lower and provider in ("anthropic", "vertex_ai", "bedrock"):
+        if _flag(info, "supports_adaptive_thinking"):
+            return frozenset({"low", "medium", "high"} | (extras & {"xhigh", "max"}))
+        return None
+    if provider in ("gemini", "vertex_ai"):
+        return frozenset({"none", "minimal", "low", "medium", "high"})
+    if provider == "openrouter":
+        return frozenset({"minimal", "low", "medium", "high", "xhigh", "max"} | extras)
+    return None
+
+
+def normalize_reasoning_effort(reasoning_effort: str | None, model: str) -> str | None:
+    """The effort to actually send to ``model`` for a requested level.
+
+    A level the model accepts is sent as is. One it doesn't is moved to the
+    nearest level it does, ties going to the higher one (``medium`` on a
+    low/high model becomes ``high``), so a model that can't switch reasoning
+    off still reasons at its lightest. A value outside every provider's
+    vocabulary is dropped -- sending no effort is accepted everywhere and
+    leaves the provider's default in place. With no capability data for the
+    model, the value passes through.
+    """
+    if reasoning_effort is None:
+        return None
+    effort = reasoning_effort.strip().lower()
+    if effort not in _EFFORT_LADDER:
+        logger.warning(
+            "reasoning_effort_unrecognized",
+            extra={"model": model, "requested_effort": reasoning_effort},
+        )
+        return None
+    supported = supported_reasoning_efforts(model)
+    if not supported or effort in supported:
+        return effort
+    index = _EFFORT_LADDER.index(effort)
+    nearest = min(
+        supported,
+        key=lambda level: (
+            abs(_EFFORT_LADDER.index(level) - index),
+            -_EFFORT_LADDER.index(level),
+        ),
+    )
+    logger.info(
+        "reasoning_effort_adjusted",
+        extra={"model": model, "requested_effort": effort, "sent_effort": nearest},
+    )
+    return nearest
 
 
 def maybe_route_through_responses(model: str, reasoning_effort: str | None) -> str:
@@ -156,6 +267,7 @@ def reasoning_call_kwargs(reasoning_effort: str | None, model: str) -> dict:
     forwards `thinking`/`output_config` to the Anthropic wire unchanged
     (verified offline via get_optional_params on 1.90.1).
     """
+    reasoning_effort = normalize_reasoning_effort(reasoning_effort, model)
     if reasoning_effort is None:
         return {}
     if "/responses/" in model:

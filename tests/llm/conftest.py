@@ -53,3 +53,23 @@ def force_registered_opus_5_5(restore_opus_5_5_model_cost):
 
     litellm.model_cost.pop("claude-opus-5-5", None)
     importlib.reload(setup)
+
+
+@pytest.fixture
+def restore_registered_model_cost():
+    """Like restore_opus_5_5_model_cost, for every model setup.py registers:
+    snapshot each entry (present or absent) and restore it afterwards."""
+    import litellm
+
+    from agentic.llm.setup import REGISTERED_MODEL_IDS
+
+    snapshot = {m: litellm.model_cost.get(m) for m in REGISTERED_MODEL_IDS}
+    present = {m for m in REGISTERED_MODEL_IDS if m in litellm.model_cost}
+    yield
+    for model, entry in snapshot.items():
+        if model in present:
+            litellm.model_cost[model] = entry
+        else:
+            litellm.model_cost.pop(model, None)
+    if hasattr(litellm.get_model_info, "cache_clear"):
+        litellm.get_model_info.cache_clear()

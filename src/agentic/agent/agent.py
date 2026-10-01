@@ -62,6 +62,14 @@ logger = logging.getLogger(__name__)
 # context.
 _DEFAULT_LLM_TIMEOUT_SECONDS = 300.0
 
+# An agent's temperature is set once and kept across model changes, but newer
+# models reject it: Claude 4.7+/5.x and Fable refuse every sampling parameter,
+# and GPT-5.x/6 refuse a non-default temperature while reasoning. litellm knows
+# each model's rule (including OpenAI's "only when effort resolves to none")
+# and, with drop_params, leaves the parameter out instead of failing the run.
+# The knowledge-pipeline call sites already pass it.
+_DROP_UNSUPPORTED_PARAMS: dict[str, bool] = {"drop_params": True}
+
 
 def _llm_timeout_kwargs(*, stream: bool) -> dict[str, float]:
     """``{"timeout": s}`` for a streaming agent model call; ``{}`` otherwise.
@@ -712,6 +720,7 @@ class Agent:
                     "messages": normalized,
                     "num_retries": 3,
                     "stream": False,
+                    **_DROP_UNSUPPORTED_PARAMS,
                 }
                 if self.temperature is not None:
                     call_kwargs["temperature"] = self.temperature
@@ -1520,6 +1529,7 @@ class Agent:
                 model=self.model,
                 messages=messages,
                 num_retries=3,
+                **_DROP_UNSUPPORTED_PARAMS,
                 **(
                     {"temperature": self.temperature}
                     if self.temperature is not None
@@ -1613,6 +1623,7 @@ class Agent:
                 "stream_options": {"include_usage": True},
                 "num_retries": 3,
                 **_llm_timeout_kwargs(stream=True),
+                **_DROP_UNSUPPORTED_PARAMS,
             }
             if self.temperature is not None:
                 call_kwargs["temperature"] = self.temperature
@@ -1761,6 +1772,7 @@ class Agent:
             stream=True,
             num_retries=3,
             **_llm_timeout_kwargs(stream=True),
+            **_DROP_UNSUPPORTED_PARAMS,
             **(
                 {"temperature": self.temperature}
                 if self.temperature is not None
