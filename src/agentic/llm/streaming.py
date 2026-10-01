@@ -141,11 +141,13 @@ def _combine_thinking_blocks(blocks: list[dict]) -> list[dict]:
 
     LiteLLM's Anthropic stream parser puts no ``index`` on thinking deltas: a
     text delta is ``{type: thinking, thinking: <text>, signature: ""}``, the
-    signature arrives on a delta of its own with empty text, and a redacted
-    block arrives whole. Grouping by ``index`` therefore merged every block of
-    a response into one, which the provider rejects on replay. The deltas are
-    walked in order instead, and ``index`` is ignored: text appends to the open
-    block, and a signature signs and closes it.
+    signature arrives on a delta of its own, and a redacted block arrives
+    whole. Grouping by ``index`` therefore merged every block of a response
+    into one, which the provider rejects on replay. The deltas are walked in
+    order instead, and ``index`` is ignored: text appends to the open block,
+    and a signature signs and closes it. The signature delta's text is empty
+    on older LiteLLM and the whole block's text again on newer (1.103+), so
+    text that repeats the block so far replaces it instead of appending.
 
     Unlike LiteLLM's own combiner (``get_combined_thinking_content``), which
     drops a block that never received a signature, a block still open at the
@@ -169,11 +171,16 @@ def _combine_thinking_blocks(blocks: list[dict]) -> list[dict]:
             combined.append({"type": "redacted_thinking", "data": block.get("data")})
             continue
         text = block.get("thinking")
+        signature = block.get("signature")
         if text:
             if open_block is None:
                 open_block = {"type": "thinking", "thinking": ""}
-            open_block["thinking"] += text
-        signature = block.get("signature")
+            if signature and text.startswith(open_block["thinking"]):
+                # Newer LiteLLM repeats the whole block's text on the delta
+                # carrying its signature; replace rather than append it.
+                open_block["thinking"] = text
+            else:
+                open_block["thinking"] += text
         if signature:
             if open_block is None:
                 open_block = {"type": "thinking", "thinking": ""}

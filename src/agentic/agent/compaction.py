@@ -259,7 +259,7 @@ def thinking_budget(model: str, reasoning_kwargs: dict[str, Any] | None) -> int:
             provider in ("vertex_ai", "bedrock") and "claude" in model.lower()
         ):
             return 0
-        mapped = AnthropicConfig._map_reasoning_effort(effort, model)
+        mapped = AnthropicConfig._map_reasoning_effort(effort, model, provider)
         if mapped and mapped.get("type") == "enabled":
             return int(mapped["budget_tokens"])
     except Exception:
