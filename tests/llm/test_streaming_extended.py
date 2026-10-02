@@ -298,6 +298,63 @@ def test_two_thinking_blocks_stay_separate():
     ]
 
 
+def test_signature_delta_repeating_the_whole_block_is_not_appended_twice():
+    """Newer LiteLLM repeats the block's full text on the delta that carries
+    its signature, after streaming that text in fragments. The repeat is the
+    block, not more of it."""
+    chunks = _thinking_chunks(
+        {"type": "thinking", "thinking": "fir"},
+        {"type": "thinking", "thinking": "st"},
+        {"type": "thinking", "thinking": "first", "signature": "SA"},
+        {"type": "thinking", "thinking": "sec"},
+        {"type": "thinking", "thinking": "ond"},
+        {"type": "thinking", "thinking": "second", "signature": "SB"},
+    )
+    msg, _, _ = accumulate_stream(iter(chunks))
+    assert msg.thinking_blocks == [
+        {"type": "thinking", "thinking": "first", "signature": "SA"},
+        {"type": "thinking", "thinking": "second", "signature": "SB"},
+    ]
+
+
+def test_signature_delta_carrying_a_last_fragment_is_appended():
+    """A signature delta whose text is not a repeat of the block so far is the
+    block's last fragment, and is appended."""
+    chunks = _thinking_chunks(
+        {"type": "thinking", "thinking": "fir"},
+        {"type": "thinking", "thinking": "st", "signature": "SA"},
+    )
+    msg, _, _ = accumulate_stream(iter(chunks))
+    assert msg.thinking_blocks == [
+        {"type": "thinking", "thinking": "first", "signature": "SA"},
+    ]
+
+
+def test_signature_delta_extending_the_block_is_appended():
+    """Only text exactly equal to the block so far is a repeat; text that
+    merely starts with it is more of the block."""
+    chunks = _thinking_chunks(
+        {"type": "thinking", "thinking": "ha"},
+        {"type": "thinking", "thinking": "hah", "signature": "SA"},
+    )
+    msg, _, _ = accumulate_stream(iter(chunks))
+    assert msg.thinking_blocks == [
+        {"type": "thinking", "thinking": "hahah", "signature": "SA"},
+    ]
+
+
+def test_repeated_text_without_a_signature_is_appended():
+    chunks = _thinking_chunks(
+        {"type": "thinking", "thinking": "a"},
+        {"type": "thinking", "thinking": "a"},
+        {"type": "thinking", "thinking": "", "signature": "SA"},
+    )
+    msg, _, _ = accumulate_stream(iter(chunks))
+    assert msg.thinking_blocks == [
+        {"type": "thinking", "thinking": "aa", "signature": "SA"},
+    ]
+
+
 def test_redacted_before_thinking():
     chunks = _thinking_chunks(
         {"type": "redacted_thinking", "data": "OPAQUE"},

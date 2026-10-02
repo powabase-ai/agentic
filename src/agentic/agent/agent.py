@@ -41,6 +41,7 @@ from agentic.llm.routing import (
     loop_reasoning_call_kwargs,
     maybe_route_through_responses,
     reasoning_call_kwargs,
+    sampling_call_kwargs,
 )
 
 logger = logging.getLogger(__name__)
@@ -713,8 +714,6 @@ class Agent:
                     "num_retries": 3,
                     "stream": False,
                 }
-                if self.temperature is not None:
-                    call_kwargs["temperature"] = self.temperature
                 if self.max_tokens is not None:
                     call_kwargs["max_tokens"] = self.max_tokens
                 if step_tools:
@@ -742,6 +741,11 @@ class Agent:
                 call_kwargs["model"] = routed_model
                 call_kwargs.update(
                     loop_reasoning_call_kwargs(effective_effort, routed_model)
+                )
+                call_kwargs.update(
+                    sampling_call_kwargs(
+                        state.current_model, self.temperature, effective_effort
+                    )
                 )
 
                 # Claude caches only up to explicit breakpoints. They go on
@@ -1520,11 +1524,7 @@ class Agent:
                 model=self.model,
                 messages=messages,
                 num_retries=3,
-                **(
-                    {"temperature": self.temperature}
-                    if self.temperature is not None
-                    else {}
-                ),
+                **sampling_call_kwargs(self.model, self.temperature, None),
                 **(
                     {"max_tokens": self.max_tokens}
                     if self.max_tokens is not None
@@ -1613,9 +1613,8 @@ class Agent:
                 "stream_options": {"include_usage": True},
                 "num_retries": 3,
                 **_llm_timeout_kwargs(stream=True),
+                **sampling_call_kwargs(self.model, self.temperature, effort),
             }
-            if self.temperature is not None:
-                call_kwargs["temperature"] = self.temperature
             if self.max_tokens is not None:
                 call_kwargs["max_tokens"] = self.max_tokens
             if self.api_key is not None:
@@ -1761,11 +1760,7 @@ class Agent:
             stream=True,
             num_retries=3,
             **_llm_timeout_kwargs(stream=True),
-            **(
-                {"temperature": self.temperature}
-                if self.temperature is not None
-                else {}
-            ),
+            **sampling_call_kwargs(self.model, self.temperature, None),
             **({"max_tokens": self.max_tokens} if self.max_tokens is not None else {}),
             **({"api_key": self.api_key} if self.api_key is not None else {}),
         )

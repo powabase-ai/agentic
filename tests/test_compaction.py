@@ -1,4 +1,5 @@
 import json
+import logging
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -1648,3 +1649,30 @@ class TestSummaryMaxTokensCappedAtModelOutputCeiling:
                 list(_BASE), model="claude-opus-4-8", reasoning_kwargs=self._MAX_RK
             )
         assert mock_litellm.completion.call_args.kwargs["max_tokens"] == 16000
+
+
+def test_thinking_budget_lookup_failure_is_logged_once_per_model(caplog):
+    """A failing budget lookup is unexpected (a litellm API change) and worth
+    a warning, but thinking_budget runs on every threshold check."""
+    compaction._budget_lookup_failures_logged.discard("claude-sonnet-4-5")
+    with (
+        caplog.at_level(logging.WARNING, logger="agentic.agent.compaction"),
+        patch.object(
+            compaction.AnthropicConfig,
+            "_map_reasoning_effort",
+            side_effect=TypeError("signature changed"),
+        ),
+    ):
+        for _ in range(3):
+            assert compaction.thinking_budget(
+                "claude-sonnet-4-5", {"reasoning_effort": "high"}
+            ) == 0
+    failures = [r for r in caplog.records if r.message == "thinking_budget_lookup_failed"]
+    assert len(failures) == 1
+
+
+def test_thinking_budget_of_an_unresolvable_model_is_zero_and_silent(caplog, capsys):
+    with caplog.at_level(logging.WARNING, logger="agentic.agent.compaction"):
+        assert compaction.thinking_budget("acme-unknown", {"reasoning_effort": "high"}) == 0
+    assert not caplog.records
+    assert "Provider List" not in capsys.readouterr().out

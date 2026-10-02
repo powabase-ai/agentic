@@ -1,8 +1,11 @@
 """Tests for the global LiteLLM configuration."""
 
+import copy
 import importlib
 import subprocess
 import sys
+
+import pytest
 
 
 def test_modify_params_set_when_setup_runs():
@@ -114,10 +117,13 @@ def test_does_not_overwrite_an_existing_model_cost_entry(
     from agentic.llm import setup
 
     sentinel = {"litellm_provider": "anthropic", "mode": "chat", "sentinel": True}
+    expected = copy.deepcopy(sentinel)
     litellm.model_cost["claude-opus-5-5"] = sentinel
     importlib.reload(setup)
 
-    assert litellm.model_cost["claude-opus-5-5"] == sentinel
+    # register_model merges into the existing dict in place, so compare with
+    # a copy: comparing with `sentinel` would compare the entry with itself.
+    assert litellm.model_cost["claude-opus-5-5"] == expected
 
 
 def test_bare_registration_also_resolves_the_anthropic_prefixed_form(
@@ -151,3 +157,88 @@ def test_registered_entry_supports_response_schema(force_registered_opus_5_5):
     import litellm
 
     assert litellm.supports_response_schema("claude-opus-5-5") is True
+
+
+# ===== Models newer than the pinned litellm's bundled cost map =====
+
+# Every model setup.py registers, with the capability its absence breaks.
+_NEW_MODELS = [
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "gpt-6-luna",
+    "gpt-6-sol",
+    "gpt-6.1-sol",
+]
+
+
+def test_registered_model_ids_cover_the_new_models():
+    from agentic.llm.setup import REGISTERED_MODEL_IDS
+
+    assert set(_NEW_MODELS) <= set(REGISTERED_MODEL_IDS)
+
+
+@pytest.mark.parametrize("model", _NEW_MODELS)
+def test_new_model_usable_against_a_genuinely_bundled_map(model):
+    """In a fresh interpreter on litellm's bundled map (no live download),
+    importing agentic makes each model resolve its provider from the bare id,
+    report reasoning, and price its tokens."""
+    code = (
+        "import os; os.environ['LITELLM_LOCAL_MODEL_COST_MAP'] = 'True'; "
+        "import litellm; import agentic; "
+        f"m = {model!r}; "
+        "assert litellm.supports_reasoning(model=m) is True; "
+        "assert litellm.get_llm_provider(m)[1] in ('openai', 'anthropic'); "
+        "assert litellm.get_model_info(m)['input_cost_per_token'] > 0; "
+        "assert litellm.supports_function_calling(model=m) is True"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True
+    )
+    assert result.returncode == 0, (
+        f"Subprocess failed:\nstdout={result.stdout}\nstderr={result.stderr}"
+    )
+
+
+@pytest.mark.parametrize("model", ["claude-opus-5-5", "claude-sonnet-5-5"])
+def test_claude_5_5_entries_declare_no_sampling_params(
+    model, restore_registered_model_cost
+):
+    """Claude 5.5 rejects temperature/top_p/top_k with HTTP 400; the flag is
+    what lets litellm drop them under drop_params."""
+    import litellm
+
+    from agentic.llm import setup
+
+    litellm.model_cost.pop(model, None)
+    importlib.reload(setup)
+
+    assert litellm.model_cost[model]["supports_sampling_params"] is False
+    assert litellm.model_cost[model]["supports_adaptive_thinking"] is True
+
+
+def test_registration_never_overwrites_an_existing_entry(
+    restore_registered_model_cost,
+):
+    import litellm
+
+    from agentic.llm import setup
+
+    sentinel = {"litellm_provider": "openai", "mode": "chat", "sentinel": True}
+    expected = copy.deepcopy(sentinel)
+    litellm.model_cost["gpt-6-luna"] = sentinel
+    importlib.reload(setup)
+
+    assert litellm.model_cost["gpt-6-luna"] == expected
+
+
+def test_importing_agentic_prints_no_provider_banner():
+    """Registering the bare OpenAI ids makes litellm resolve providers it
+    doesn't know yet, which prints its "Provider List" banner to stdout."""
+    code = (
+        "import os; os.environ['LITELLM_LOCAL_MODEL_COST_MAP'] = 'True'; "
+        "import litellm; litellm.model_cost.pop('gpt-6-luna', None); "
+        "import agentic"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "Provider List" not in result.stdout

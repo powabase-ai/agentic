@@ -13,6 +13,7 @@ from litellm.llms.anthropic.chat.transformation import AnthropicConfig
 from agentic.agent.cache import add_cache_breakpoints
 from agentic.agent.model_registry import resolve_context_window
 from agentic.agent.normalization import normalize_messages
+from agentic.llm.routing import _quiet_litellm
 
 logger = logging.getLogger(__name__)
 
@@ -254,17 +255,32 @@ def thinking_budget(model: str, reasoning_kwargs: dict[str, Any] | None) -> int:
     if not effort:
         return 0
     try:
-        provider = get_llm_provider(model)[1]
-        if provider != "anthropic" and not (
-            provider in ("vertex_ai", "bedrock") and "claude" in model.lower()
-        ):
-            return 0
-        mapped = AnthropicConfig._map_reasoning_effort(effort, model)
-        if mapped and mapped.get("type") == "enabled":
-            return int(mapped["budget_tokens"])
+        with _quiet_litellm():
+            provider = get_llm_provider(model)[1]
     except Exception:
+        return 0  # a model litellm can't place has no budget it maps
+    if provider != "anthropic" and not (
+        provider in ("vertex_ai", "bedrock") and "claude" in model.lower()
+    ):
         return 0
+    try:
+        mapped = AnthropicConfig._map_reasoning_effort(effort, model, provider)
+    except Exception:
+        # A litellm signature change once made this return 0 silently, which
+        # under-sizes max_tokens for budget-based Claude; leave a trace, once
+        # per model rather than on every threshold check.
+        if model not in _budget_lookup_failures_logged:
+            _budget_lookup_failures_logged.add(model)
+            logger.warning(
+                "thinking_budget_lookup_failed", extra={"model": model}, exc_info=True
+            )
+        return 0
+    if mapped and mapped.get("type") == "enabled":
+        return int(mapped["budget_tokens"])
     return 0
+
+
+_budget_lookup_failures_logged: set[str] = set()
 
 
 def _instruction_tokens() -> int:
