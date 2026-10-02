@@ -263,6 +263,11 @@ def thinking_budget(model: str, reasoning_kwargs: dict[str, Any] | None) -> int:
         if mapped and mapped.get("type") == "enabled":
             return int(mapped["budget_tokens"])
     except Exception:
+        # A litellm signature change once made this return 0 silently, which
+        # under-sizes max_tokens for budget-based Claude; leave a trace.
+        logger.warning(
+            "thinking_budget_lookup_failed", extra={"model": model}, exc_info=True
+        )
         return 0
     return 0
 

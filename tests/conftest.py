@@ -2,7 +2,16 @@
 Pytest fixtures for agentic tests.
 """
 
-from unittest.mock import MagicMock, patch
+import os
+
+# litellm downloads its cost map from GitHub at import time unless this is
+# set, so without it the suite checks whatever upstream published last -- and
+# the live map already knows the models agentic registers for itself
+# (agentic/llm/model_cost_additions.json), which then never get exercised.
+# Pin the map bundled with the locked litellm. Set before anything imports it.
+os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+
+from unittest.mock import MagicMock, patch  # noqa: E402
 
 import pytest
 

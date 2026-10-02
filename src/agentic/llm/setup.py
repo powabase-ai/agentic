@@ -20,8 +20,8 @@ import litellm
 litellm.modify_params = True
 
 # Models released after the cost map bundled with the pinned litellm
-# (1.103.2) was cut: claude-opus-5-5, claude-sonnet-5-5, gpt-6-luna and
-# gpt-6.1-sol. litellm only picks up a brand-new model when its own runtime
+# (1.103.2) was cut: claude-opus-5-5, claude-sonnet-5-5, gpt-6-luna,
+# gpt-6-sol and gpt-6.1-sol. litellm only picks up a brand-new model when its own runtime
 # download of the live cost map succeeds, so whether the entry exists is a
 # function of network conditions at import time, not of the litellm version
 # pinned. Without an entry:
@@ -59,4 +59,12 @@ _missing = {
     if model not in litellm.model_cost
 }
 if _missing:
-    litellm.register_model(_missing)
+    # register_model resolves each entry's provider and prints litellm's
+    # "Provider List" banner to stdout for the bare OpenAI ids it doesn't
+    # know yet -- the very ids being registered.
+    _previous_suppress = litellm.suppress_debug_info
+    litellm.suppress_debug_info = True
+    try:
+        litellm.register_model(_missing)
+    finally:
+        litellm.suppress_debug_info = _previous_suppress

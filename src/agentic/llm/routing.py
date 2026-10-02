@@ -34,118 +34,222 @@ from __future__ import annotations
 
 import logging
 import os
+from contextlib import contextmanager
+from dataclasses import dataclass
 
 import litellm
+from litellm.router_utils.reasoning_effort_capability import (
+    nearest_declared_reasoning_effort,
+    resolve_supported_reasoning_efforts,
+)
+from litellm.utils import get_optional_params
 
 logger = logging.getLogger(__name__)
 
 
-# Every effort level any provider accepts, least to most reasoning.
-_EFFORT_LADDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+# Every effort level any provider accepts. "none" is the off switch, the rest
+# a strength ladder, weakest first.
+_STRENGTHS = ("minimal", "low", "medium", "high", "xhigh", "max")
+_EFFORTS = ("none", *_STRENGTHS)
 
-# Models whose accepted levels litellm's cost map does not describe. Kimi K3
-# always thinks and takes low/high/max only (Moonshot's API reference); its
-# cost-map entries carry no effort flags.
-_EFFORT_OVERRIDES: tuple[tuple[str, frozenset[str]], ...] = (
-    ("kimi-k3", frozenset({"low", "high", "max"})),
+# OpenRouter's Kimi K3 entries declare no levels (litellm's own Moonshot and
+# Fireworks K3 entries declare low/high/max, which litellm's resolver reads);
+# Kimi K3 always reasons and takes low, high and max only.
+_OPENROUTER_KIMI_K3 = (
+    "openrouter/moonshotai/kimi-k3",
+    "openrouter/moonshotai/kimi-k3:batch",
 )
+_KIMI_K3_EFFORTS = frozenset({"low", "high", "max"})
 
 
-def _flag(info: dict, name: str) -> bool:
-    return info.get(name) is True
+@contextmanager
+def _quiet_litellm():
+    """litellm prints a "Provider List" banner to stdout for every model it
+    can't resolve; a capability probe on an unmapped model is not an error."""
+    previous = litellm.suppress_debug_info
+    litellm.suppress_debug_info = True
+    try:
+        yield
+    finally:
+        litellm.suppress_debug_info = previous
+
+
+@dataclass(frozen=True)
+class _ReasoningCapability:
+    efforts: frozenset[str] | None
+    """Levels the model accepts; None when that isn't known (pass through)."""
+    always_reasons: bool
+    """True when the model cannot switch reasoning off."""
+
+
+def _reasoning_capability(model: str) -> _ReasoningCapability | None:
+    """What ``model`` accepts as a reasoning effort, or None if it doesn't
+    reason (or isn't known to litellm).
+
+    Starts from litellm's own resolver (``resolve_supported_reasoning_
+    efforts``), which reads the per-level ``supports_*_reasoning_effort``
+    flags, the bare-model twin of a provider-prefixed entry, and an entry's
+    declared ``reasoning_effort_levels``. Then applies what the resolver
+    can't know about the routes this module builds:
+
+    - Adaptive Claude (4.6+): the effort goes out as ``output_config.effort``,
+      where neither ``none`` nor ``minimal`` is a level; with no flags, every
+      other level passes. Models flagged ``thinking_always_on`` (Claude 5.5,
+      Fable) can't switch thinking off.
+    - Pre-adaptive Claude: unknown (pass through) -- the effort goes out as
+      top-level ``reasoning_effort`` and litellm maps every level, ``none``
+      included, onto a thinking budget.
+    - OpenAI / Azure: a reasoning model with no flags (o-series) takes low,
+      medium and high. Without a ``none`` level it can't switch reasoning off.
+    - Gemini: litellm maps none through high onto the model's thinking config.
+    - OpenRouter: maps any strength to the model's nearest level itself, but
+      rejects ``none`` where the model always reasons, so with no flags every
+      strength passes and ``none`` sends nothing.
+    - OpenRouter's Kimi K3: low/high/max, always reasoning.
+    """
+    if model.lower() in _OPENROUTER_KIMI_K3:
+        return _ReasoningCapability(_KIMI_K3_EFFORTS, always_reasons=True)
+    lookup = model.replace("/responses/", "/", 1)
+    try:
+        with _quiet_litellm():
+            _, provider, _, _ = litellm.get_llm_provider(lookup)
+            if not litellm.supports_reasoning(model=lookup):
+                return None
+            info = dict(litellm.get_model_info(lookup))
+    except Exception:
+        logger.debug(
+            "reasoning_capability_unknown", extra={"model": model}, exc_info=True
+        )
+        return None
+    resolved = resolve_supported_reasoning_efforts(info, deployment_is_mapped=True)
+    efforts = frozenset(resolved) if resolved is not None else None
+
+    if "claude" in model.lower() and provider in ("anthropic", "vertex_ai", "bedrock"):
+        if not (
+            info.get("supports_adaptive_thinking") is True
+            or _anthropic_reasoning_needs_summarized(model)
+        ):
+            return _ReasoningCapability(None, always_reasons=False)
+        ladder = efforts if efforts is not None else frozenset(_STRENGTHS)
+        return _ReasoningCapability(
+            ladder - {"none", "minimal"},
+            always_reasons=info.get("thinking_always_on") is True,
+        )
+    if provider in ("openai", "azure"):
+        if efforts is None:
+            efforts = frozenset({"low", "medium", "high"})
+        return _ReasoningCapability(efforts, always_reasons="none" not in efforts)
+    if provider == "gemini" or (provider == "vertex_ai" and "gemini" in model.lower()):
+        return _ReasoningCapability(
+            frozenset({"none", "minimal", "low", "medium", "high"}),
+            always_reasons=False,
+        )
+    if provider == "openrouter" and efforts is None:
+        # OpenRouter maps a strength a model lacks to its nearest level, but
+        # rejects "none" on a model that always reasons.
+        efforts = frozenset(_STRENGTHS)
+    return _ReasoningCapability(efforts, always_reasons=False)
 
 
 def supported_reasoning_efforts(model: str) -> frozenset[str] | None:
-    """The effort levels ``model`` accepts, or None when that isn't known.
-
-    None means "pass the value through": an unmapped model, a model litellm
-    says doesn't reason, or a provider whose rules aren't encoded here.
-
-    Read from litellm's cost-map flags (``supports_none/minimal/xhigh/
-    max_reasoning_effort``) and the provider's own rules:
-
-    - OpenAI / Azure: low, medium and high, plus each level its flag allows.
-      Both routes this module builds -- top-level ``reasoning_effort`` and
-      the Responses ``extra_body`` -- reach OpenAI unvalidated by litellm.
-    - Adaptive Claude (4.6+): low, medium and high, plus xhigh/max per flag.
-      The effort goes out as ``output_config.effort``, which Anthropic
-      validates and litellm does not; neither ``none`` nor ``minimal`` is
-      an effort there.
-    - Pre-adaptive Claude: None -- the effort goes out as top-level
-      ``reasoning_effort`` and litellm maps every level to a thinking budget.
-    - Gemini: litellm maps none..high to the model's thinking config and
-      rejects xhigh/max.
-    - OpenRouter: OpenRouter maps a level a model lacks to the nearest one
-      it has, except ``none`` on a model that always reasons, which it
-      rejects; ``none`` is kept only where the flag allows it.
-    """
-    model_lower = model.lower()
-    for family, efforts in _EFFORT_OVERRIDES:
-        if family in model_lower:
-            return efforts
-    lookup = model.replace("/responses/", "/", 1)
-    try:
-        _, provider, _, _ = litellm.get_llm_provider(lookup)
-        if not litellm.supports_reasoning(model=lookup):
-            return None
-        info = dict(litellm.get_model_info(lookup))
-    except Exception:
-        return None
-
-    extras = {
-        level
-        for level in ("none", "minimal", "xhigh", "max")
-        if _flag(info, f"supports_{level}_reasoning_effort")
-    }
-    if provider in ("openai", "azure"):
-        return frozenset({"low", "medium", "high"} | extras)
-    if "claude" in model_lower and provider in ("anthropic", "vertex_ai", "bedrock"):
-        if _flag(info, "supports_adaptive_thinking"):
-            return frozenset({"low", "medium", "high"} | (extras & {"xhigh", "max"}))
-        return None
-    if provider in ("gemini", "vertex_ai"):
-        return frozenset({"none", "minimal", "low", "medium", "high"})
-    if provider == "openrouter":
-        return frozenset({"minimal", "low", "medium", "high", "xhigh", "max"} | extras)
-    return None
+    """The effort levels ``model`` accepts, or None when that isn't known."""
+    capability = _reasoning_capability(model)
+    return capability.efforts if capability is not None else None
 
 
 def normalize_reasoning_effort(reasoning_effort: str | None, model: str) -> str | None:
     """The effort to actually send to ``model`` for a requested level.
 
-    A level the model accepts is sent as is. One it doesn't is moved to the
-    nearest level it does, ties going to the higher one (``medium`` on a
-    low/high model becomes ``high``), so a model that can't switch reasoning
-    off still reasons at its lightest. A value outside every provider's
-    vocabulary is dropped -- sending no effort is accepted everywhere and
-    leaves the provider's default in place. With no capability data for the
-    model, the value passes through.
+    - A level the model accepts is sent as is.
+    - Any other strength moves to the weakest accepted level at least as
+      strong, or the strongest one when it asks for more than the model has
+      (litellm's ``nearest_declared_reasoning_effort``): ``medium`` on Kimi
+      K3 becomes ``high``, ``max`` on o3 becomes ``high``.
+    - ``none`` is the off switch, never rounded onto the ladder: on a model
+      without a ``none`` level nothing is sent, which leaves reasoning off
+      where the provider defaults it off. Only a model that cannot switch
+      reasoning off (Claude 5.5 / Fable, Kimi K3, OpenAI reasoning models
+      without ``none``) gets its weakest level instead, since sending
+      nothing there means its (stronger) default.
+    - A value outside every provider's vocabulary is dropped: sending no
+      effort is accepted everywhere.
+    - With no capability data for the model, the value passes through.
     """
     if reasoning_effort is None:
         return None
-    effort = reasoning_effort.strip().lower()
-    if effort not in _EFFORT_LADDER:
+    effort = (
+        reasoning_effort.strip().lower() if isinstance(reasoning_effort, str) else None
+    )
+    if effort not in _EFFORTS:
         logger.warning(
             "reasoning_effort_unrecognized",
             extra={"model": model, "requested_effort": reasoning_effort},
         )
         return None
-    supported = supported_reasoning_efforts(model)
-    if not supported or effort in supported:
+    capability = _reasoning_capability(model)
+    if capability is None or capability.efforts is None:
         return effort
-    index = _EFFORT_LADDER.index(effort)
-    nearest = min(
-        supported,
-        key=lambda level: (
-            abs(_EFFORT_LADDER.index(level) - index),
-            -_EFFORT_LADDER.index(level),
-        ),
-    )
+    supported = capability.efforts
+    if effort in supported:
+        return effort
+    strengths = [level for level in _STRENGTHS if level in supported]
+    if effort == "none":
+        sent = strengths[0] if capability.always_reasons and strengths else None
+    elif strengths:
+        sent = nearest_declared_reasoning_effort(effort, strengths)
+    else:
+        sent = None
     logger.info(
         "reasoning_effort_adjusted",
-        extra={"model": model, "requested_effort": effort, "sent_effort": nearest},
+        extra={"model": model, "requested_effort": effort, "sent_effort": sent},
     )
-    return nearest
+    return sent
+
+
+def sampling_call_kwargs(
+    model: str, temperature: float | None, reasoning_effort: str | None
+) -> dict:
+    """``{"temperature": temperature}`` when ``model`` takes it at this
+    reasoning effort, ``{}`` when it would reject it.
+
+    An agent's temperature is set once and kept across model changes, but
+    newer models refuse it: Claude 4.7+/5.x and Fable take no sampling
+    parameters, GPT-5.x/6 take a non-default temperature only when the
+    effort resolves to ``none``, and budget-based Claude thinking is
+    incompatible with a temperature. litellm knows each model's rule, so the
+    question is put to its own ``get_optional_params`` with ``drop_params``
+    -- for the temperature alone, so nothing else in the request (tools,
+    ``response_format``) can be dropped silently. When litellm can't answer,
+    the temperature is kept, as before.
+    """
+    if temperature is None:
+        return {}
+    effort = normalize_reasoning_effort(reasoning_effort, model)
+    lookup = model.replace("/responses/", "/", 1)
+    try:
+        with _quiet_litellm():
+            bare_model, provider, _, _ = litellm.get_llm_provider(lookup)
+            accepted = get_optional_params(
+                model=bare_model,
+                custom_llm_provider=provider,
+                temperature=temperature,
+                drop_params=True,
+                **({"reasoning_effort": effort} if effort is not None else {}),
+            )
+    except Exception:
+        logger.debug(
+            "sampling_capability_unknown", extra={"model": model}, exc_info=True
+        )
+        return {"temperature": temperature}
+    thinking = accepted.get("thinking")
+    budget_thinking = isinstance(thinking, dict) and thinking.get("type") == "enabled"
+    if "temperature" in accepted and not budget_thinking:
+        return {"temperature": temperature}
+    logger.info(
+        "temperature_dropped",
+        extra={"model": model, "temperature": temperature, "reasoning_effort": effort},
+    )
+    return {}
 
 
 def maybe_route_through_responses(model: str, reasoning_effort: str | None) -> str:
@@ -168,6 +272,11 @@ def maybe_route_through_responses(model: str, reasoning_effort: str | None) -> s
     if reasoning_effort is None:
         return model
     if "/responses/" in model:
+        return model
+    if normalize_reasoning_effort(reasoning_effort, model) in (None, "none"):
+        # No reasoning to bring back, and on the Responses route the effort
+        # travels in extra_body, where litellm can't see that it resolves to
+        # "none" -- so it would refuse a temperature the model accepts.
         return model
 
     # Resolve provider for bare or prefixed model names.
@@ -299,7 +408,7 @@ def loop_reasoning_call_kwargs(reasoning_effort: str | None, model: str) -> dict
     nothing to replay, keep using ``reasoning_call_kwargs``.
     """
     kwargs = reasoning_call_kwargs(reasoning_effort, model)
-    if reasoning_effort is not None and model.startswith("openai/responses/"):
+    if kwargs and model.startswith("openai/responses/"):
         extra_body = dict(kwargs.get("extra_body") or {})
         extra_body["include"] = ["reasoning.encrypted_content"]
         kwargs["extra_body"] = extra_body

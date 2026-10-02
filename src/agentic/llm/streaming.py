@@ -147,7 +147,7 @@ def _combine_thinking_blocks(blocks: list[dict]) -> list[dict]:
     order instead, and ``index`` is ignored: text appends to the open block,
     and a signature signs and closes it. The signature delta's text is empty
     on older LiteLLM and the whole block's text again on newer (1.103+), so
-    text that repeats the block so far replaces it instead of appending.
+    signature-delta text equal to the block so far is not appended again.
 
     Unlike LiteLLM's own combiner (``get_combined_thinking_content``), which
     drops a block that never received a signature, a block still open at the
@@ -175,11 +175,9 @@ def _combine_thinking_blocks(blocks: list[dict]) -> list[dict]:
         if text:
             if open_block is None:
                 open_block = {"type": "thinking", "thinking": ""}
-            if signature and text.startswith(open_block["thinking"]):
-                # Newer LiteLLM repeats the whole block's text on the delta
-                # carrying its signature; replace rather than append it.
-                open_block["thinking"] = text
-            else:
+            # Newer LiteLLM repeats the whole block's text on the delta
+            # carrying its signature; that is the block, not more of it.
+            if not (signature and text == open_block["thinking"]):
                 open_block["thinking"] += text
         if signature:
             if open_block is None:

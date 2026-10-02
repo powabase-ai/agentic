@@ -1,5 +1,6 @@
 """Tests for the global LiteLLM configuration."""
 
+import copy
 import importlib
 import subprocess
 import sys
@@ -116,10 +117,13 @@ def test_does_not_overwrite_an_existing_model_cost_entry(
     from agentic.llm import setup
 
     sentinel = {"litellm_provider": "anthropic", "mode": "chat", "sentinel": True}
+    expected = copy.deepcopy(sentinel)
     litellm.model_cost["claude-opus-5-5"] = sentinel
     importlib.reload(setup)
 
-    assert litellm.model_cost["claude-opus-5-5"] == sentinel
+    # register_model merges into the existing dict in place, so compare with
+    # a copy: comparing with `sentinel` would compare the entry with itself.
+    assert litellm.model_cost["claude-opus-5-5"] == expected
 
 
 def test_bare_registration_also_resolves_the_anthropic_prefixed_form(
@@ -158,7 +162,13 @@ def test_registered_entry_supports_response_schema(force_registered_opus_5_5):
 # ===== Models newer than the pinned litellm's bundled cost map =====
 
 # Every model setup.py registers, with the capability its absence breaks.
-_NEW_MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "gpt-6-luna", "gpt-6.1-sol"]
+_NEW_MODELS = [
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "gpt-6-luna",
+    "gpt-6-sol",
+    "gpt-6.1-sol",
+]
 
 
 def test_registered_model_ids_cover_the_new_models():
@@ -214,7 +224,8 @@ def test_registration_never_overwrites_an_existing_entry(
     from agentic.llm import setup
 
     sentinel = {"litellm_provider": "openai", "mode": "chat", "sentinel": True}
+    expected = copy.deepcopy(sentinel)
     litellm.model_cost["gpt-6-luna"] = sentinel
     importlib.reload(setup)
 
-    assert litellm.model_cost["gpt-6-luna"] == sentinel
+    assert litellm.model_cost["gpt-6-luna"] == expected
