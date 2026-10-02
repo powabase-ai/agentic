@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -62,16 +63,43 @@ _OPENROUTER_KIMI_K3 = (
 _KIMI_K3_EFFORTS = frozenset({"low", "high", "max"})
 
 
+# Claude families that think when no thinking config is sent: Claude 5.5 and
+# Fable always do (thinking_always_on), and Opus 5 / Sonnet 5 run adaptive
+# thinking by default even though they accept it disabled. Matched by family
+# so Bedrock and Vertex ids, whose entries may lack the flag, are covered.
+_CLAUDE_REASONS_BY_DEFAULT = (
+    "opus-5",
+    "sonnet-5",
+    "fable-5",
+    "mythos-5",
+    "mythos-preview",
+)
+
+_quiet_lock = threading.Lock()
+_quiet_depth = 0
+_quiet_previous = False
+
+
 @contextmanager
 def _quiet_litellm():
     """litellm prints a "Provider List" banner to stdout for every model it
-    can't resolve; a capability probe on an unmapped model is not an error."""
-    previous = litellm.suppress_debug_info
-    litellm.suppress_debug_info = True
+    can't resolve; a capability probe on an unmapped model is not an error.
+
+    The flag is process-global, so overlapping probes on other threads are
+    counted: the first in sets it, the last out restores it."""
+    global _quiet_depth, _quiet_previous
+    with _quiet_lock:
+        if _quiet_depth == 0:
+            _quiet_previous = litellm.suppress_debug_info
+            litellm.suppress_debug_info = True
+        _quiet_depth += 1
     try:
         yield
     finally:
-        litellm.suppress_debug_info = previous
+        with _quiet_lock:
+            _quiet_depth -= 1
+            if _quiet_depth == 0:
+                litellm.suppress_debug_info = _quiet_previous
 
 
 @dataclass(frozen=True)
@@ -94,8 +122,9 @@ def _reasoning_capability(model: str) -> _ReasoningCapability | None:
 
     - Adaptive Claude (4.6+): the effort goes out as ``output_config.effort``,
       where neither ``none`` nor ``minimal`` is a level; with no flags, every
-      other level passes. Models flagged ``thinking_always_on`` (Claude 5.5,
-      Fable) can't switch thinking off.
+      other level passes. Claude 5.x and Fable think when no thinking config is
+      sent -- always (``thinking_always_on``: Claude 5.5, Fable) or by default
+      (Opus 5, Sonnet 5) -- so sending nothing doesn't switch thinking off.
     - Pre-adaptive Claude: unknown (pass through) -- the effort goes out as
       top-level ``reasoning_effort`` and litellm maps every level, ``none``
       included, onto a thinking budget.
@@ -105,7 +134,8 @@ def _reasoning_capability(model: str) -> _ReasoningCapability | None:
     - OpenRouter: maps any strength to the model's nearest level itself, but
       rejects ``none`` where the model always reasons, so with no flags every
       strength passes and ``none`` sends nothing.
-    - OpenRouter's Kimi K3: low/high/max, always reasoning.
+    - OpenRouter's Kimi K3: low/high/max. Kimi K3 always reasons, on any
+      provider.
     """
     if model.lower() in _OPENROUTER_KIMI_K3:
         return _ReasoningCapability(_KIMI_K3_EFFORTS, always_reasons=True)
@@ -133,7 +163,8 @@ def _reasoning_capability(model: str) -> _ReasoningCapability | None:
         ladder = efforts if efforts is not None else frozenset(_STRENGTHS)
         return _ReasoningCapability(
             ladder - {"none", "minimal"},
-            always_reasons=info.get("thinking_always_on") is True,
+            always_reasons=info.get("thinking_always_on") is True
+            or any(family in model.lower() for family in _CLAUDE_REASONS_BY_DEFAULT),
         )
     if provider in ("openai", "azure"):
         if efforts is None:
@@ -148,7 +179,8 @@ def _reasoning_capability(model: str) -> _ReasoningCapability | None:
         # OpenRouter maps a strength a model lacks to its nearest level, but
         # rejects "none" on a model that always reasons.
         efforts = frozenset(_STRENGTHS)
-    return _ReasoningCapability(efforts, always_reasons=False)
+    # Kimi K3 reasons on every provider that serves it.
+    return _ReasoningCapability(efforts, always_reasons="kimi-k3" in model.lower())
 
 
 def supported_reasoning_efforts(model: str) -> frozenset[str] | None:
@@ -199,7 +231,7 @@ def normalize_reasoning_effort(reasoning_effort: str | None, model: str) -> str 
         sent = nearest_declared_reasoning_effort(effort, strengths)
     else:
         sent = None
-    logger.info(
+    logger.debug(
         "reasoning_effort_adjusted",
         extra={"model": model, "requested_effort": effort, "sent_effort": sent},
     )
@@ -224,6 +256,13 @@ def sampling_call_kwargs(
     """
     if temperature is None:
         return {}
+    model_lower = model.lower()
+    if "claude" in model_lower and _anthropic_reasoning_needs_summarized(model):
+        # Claude 4.7+/5.x and Fable take no sampling parameters on any route;
+        # Bedrock and Vertex entries don't always carry the flag that tells
+        # litellm so.
+        logger.debug("temperature_dropped", extra={"model": model})
+        return {}
     effort = normalize_reasoning_effort(reasoning_effort, model)
     lookup = model.replace("/responses/", "/", 1)
     try:
@@ -242,10 +281,16 @@ def sampling_call_kwargs(
         )
         return {"temperature": temperature}
     thinking = accepted.get("thinking")
-    budget_thinking = isinstance(thinking, dict) and thinking.get("type") == "enabled"
+    # Anthropic rejects a temperature next to budget thinking; other providers
+    # that map effort to a thinking budget take one.
+    budget_thinking = (
+        "claude" in model_lower
+        and isinstance(thinking, dict)
+        and thinking.get("type") == "enabled"
+    )
     if "temperature" in accepted and not budget_thinking:
         return {"temperature": temperature}
-    logger.info(
+    logger.debug(
         "temperature_dropped",
         extra={"model": model, "temperature": temperature, "reasoning_effort": effort},
     )

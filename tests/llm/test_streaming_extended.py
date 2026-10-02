@@ -330,6 +330,31 @@ def test_signature_delta_carrying_a_last_fragment_is_appended():
     ]
 
 
+def test_signature_delta_extending_the_block_is_appended():
+    """Only text exactly equal to the block so far is a repeat; text that
+    merely starts with it is more of the block."""
+    chunks = _thinking_chunks(
+        {"type": "thinking", "thinking": "ha"},
+        {"type": "thinking", "thinking": "hah", "signature": "SA"},
+    )
+    msg, _, _ = accumulate_stream(iter(chunks))
+    assert msg.thinking_blocks == [
+        {"type": "thinking", "thinking": "hahah", "signature": "SA"},
+    ]
+
+
+def test_repeated_text_without_a_signature_is_appended():
+    chunks = _thinking_chunks(
+        {"type": "thinking", "thinking": "a"},
+        {"type": "thinking", "thinking": "a"},
+        {"type": "thinking", "thinking": "", "signature": "SA"},
+    )
+    msg, _, _ = accumulate_stream(iter(chunks))
+    assert msg.thinking_blocks == [
+        {"type": "thinking", "thinking": "aa", "signature": "SA"},
+    ]
+
+
 def test_redacted_before_thinking():
     chunks = _thinking_chunks(
         {"type": "redacted_thinking", "data": "OPAQUE"},

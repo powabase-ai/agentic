@@ -164,8 +164,8 @@ def test_run_on_gemini_keeps_temperature_and_maps_effort():
 
 def test_tools_are_never_dropped_to_make_a_call_go_through():
     """Only the temperature is ever left out. On a model litellm says takes
-    no tools, the run fails rather than going out without them -- a blanket
-    drop_params would have stripped them and run the agent toolless."""
+    no tools, the run fails before anything is sent -- a blanket drop_params
+    would have stripped the tools and run the agent toolless."""
     tool = BuiltinTool(
         name="echo",
         description="echo",
@@ -177,8 +177,9 @@ def test_tools_are_never_dropped_to_make_a_call_go_through():
     with p1, p2:
         output = agent.run("hi", tools={"echo": tool})
 
-    assert all("tools" in body for _, body in sent)
+    assert sent == []
     assert output.status == ExecutionStatus.FAILED
+    assert "tools" in (output.error or "")
 
 
 def test_stream_drops_temperature_on_claude_5_5():
@@ -218,3 +219,68 @@ async def test_astream_drops_temperature_on_claude_5_5():
 
     assert url.endswith("/v1/messages")
     assert "temperature" not in body
+
+
+def _consume(gen):
+    for _ in gen:
+        pass
+
+
+def test_stream_keeps_an_accepted_temperature():
+    url, body = _sent(lambda: _consume(_agent("claude-haiku-4-5").stream("hi")))
+
+    assert body["temperature"] == 0.3
+
+
+def test_stream_drops_temperature_next_to_budget_thinking():
+    url, body = _sent(
+        lambda: _consume(
+            _agent("claude-haiku-4-5", reasoning_effort="medium").stream("hi")
+        )
+    )
+
+    assert body["thinking"]["type"] == "enabled"
+    assert "temperature" not in body
+
+
+def test_stream_on_openai_keeps_temperature_at_effort_none():
+    url, body = _sent(
+        lambda: _consume(_agent("gpt-6-luna", reasoning_effort="none").stream("hi"))
+    )
+
+    assert url.endswith("/chat/completions")
+    assert body["reasoning_effort"] == "none"
+    assert body["temperature"] == 0.3
+
+
+def test_stream_on_responses_sends_the_normalized_effort():
+    url, body = _sent(
+        lambda: _consume(_agent("gpt-6-astra", reasoning_effort="minimal").stream("hi"))
+    )
+
+    assert url.endswith("/v1/responses")
+    assert body["reasoning"]["effort"] == "low"
+    assert "temperature" not in body
+
+
+def test_stream_on_gemini_keeps_temperature():
+    url, body = _sent(
+        lambda: _consume(
+            _agent("gemini/gemini-3.8-flash", reasoning_effort="xhigh").stream("hi")
+        )
+    )
+
+    assert ":streamGenerateContent" in url
+    assert body["generationConfig"]["temperature"] == 0.3
+    assert body["generationConfig"]["thinkingConfig"]["thinkingLevel"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_astream_keeps_an_accepted_temperature():
+    async def consume():
+        async for _ in _agent("claude-haiku-4-5").astream("hi"):
+            pass
+
+    url, body = await _asent(consume)
+
+    assert body["temperature"] == 0.3

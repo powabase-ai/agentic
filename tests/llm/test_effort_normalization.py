@@ -92,7 +92,16 @@ def test_none_sends_no_effort_where_reasoning_can_be_switched_off(model):
         ("claude-opus-5-5", "low"),
         ("claude-sonnet-5-5", "low"),
         ("claude-fable-5-1", "low"),
+        # Opus 5 / Sonnet 5 aren't thinking_always_on, but omitting thinking
+        # runs them adaptive at their (high) default -- not off.
+        ("claude-opus-5", "low"),
+        ("claude-sonnet-5", "low"),
+        ("anthropic.claude-opus-5", "low"),
+        ("vertex_ai/claude-opus-5-5", "low"),
+        ("bedrock/anthropic.claude-opus-5-5", "low"),
         ("openrouter/moonshotai/kimi-k3", "low"),
+        # Kimi K3 reasons on every provider, not just OpenRouter.
+        ("moonshot/kimi-k3", "low"),
         ("gpt-6-astra", "low"),
         ("gpt-5", "minimal"),
         ("o3", "low"),
@@ -132,6 +141,14 @@ def test_unknown_model_passes_effort_through():
 
 def test_non_reasoning_model_has_no_supported_efforts():
     assert supported_reasoning_efforts("gpt-4o") is None
+
+
+@pytest.mark.parametrize(
+    "model", ["openrouter/moonshotai/kimi-k3:batch", "OpenRouter/MoonshotAI/Kimi-K3"]
+)
+def test_kimi_k3_override_covers_batch_and_any_case(model):
+    assert supported_reasoning_efforts(model) == frozenset({"low", "high", "max"})
+    assert normalize_reasoning_effort("medium", model) == "high"
 
 
 def test_kimi_k3_override_is_limited_to_openrouter_ids():
@@ -174,6 +191,10 @@ def test_reasoning_call_kwargs_with_unrecognized_effort_sends_nothing():
         # Budget-based Claude thinking is incompatible with a temperature.
         ("claude-haiku-4-5", "medium"),
         ("claude-sonnet-4-5", "high"),
+        # Claude 4.7+/5.x take no sampling parameters on any route, including
+        # cloud ids whose cost-map entry doesn't say so.
+        ("bedrock/anthropic.claude-opus-5-5", None),
+        ("bedrock/anthropic.claude-opus-5-5", "high"),
     ],
 )
 def test_temperature_left_out_where_the_model_rejects_it(model, effort):
@@ -190,6 +211,11 @@ def test_temperature_left_out_where_the_model_rejects_it(model, effort):
         ("gemini/gemini-3.8-flash", "medium"),
         ("openrouter/moonshotai/kimi-k3", "high"),
         ("acme/unknown-model", None),
+        # The budget-thinking rule is Anthropic's; other providers that map
+        # effort to a thinking budget keep their temperature.
+        ("deepseek/deepseek-reasoner", "high"),
+        # A routed id is looked up under its unrouted name.
+        ("azure/responses/eu/gpt-5.4", None),
     ],
 )
 def test_temperature_kept_where_the_model_takes_it(model, effort):

@@ -229,3 +229,16 @@ def test_registration_never_overwrites_an_existing_entry(
     importlib.reload(setup)
 
     assert litellm.model_cost["gpt-6-luna"] == expected
+
+
+def test_importing_agentic_prints_no_provider_banner():
+    """Registering the bare OpenAI ids makes litellm resolve providers it
+    doesn't know yet, which prints its "Provider List" banner to stdout."""
+    code = (
+        "import os; os.environ['LITELLM_LOCAL_MODEL_COST_MAP'] = 'True'; "
+        "import litellm; litellm.model_cost.pop('gpt-6-luna', None); "
+        "import agentic"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "Provider List" not in result.stdout
