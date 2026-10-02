@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/powabase-ai/agentic/compare/v0.5.3...v0.6.0) (2026-10-02)
+
+
+### Features
+
+* support Claude 5.5, GPT-6 and Kimi K3 on litellm 1.103.2 ([#41](https://github.com/powabase-ai/agentic/issues/41)) ([3d0daab](https://github.com/powabase-ai/agentic/commit/3d0daab8f8a9b4deac0c73da448764474262078d))
+
 ## [0.5.3](https://github.com/powabase-ai/agentic/compare/v0.5.2...v0.5.3) (2026-09-24)
 
 
