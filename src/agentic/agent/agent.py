@@ -200,13 +200,20 @@ def _reasoning_source(model: str) -> str | None:
     """Who produced a model's reasoning, for the fallback guard: the LiteLLM
     provider, or for OpenRouter the provider plus the model's vendor
     (``openrouter/<vendor>``), since one OpenRouter key reaches many vendors'
-    models."""
+    models. It sees only the model a request names: a vendor switch OpenRouter
+    makes itself (``openrouter/auto``, its own fallbacks) is invisible here."""
     provider = _provider_of(model)
     if provider == "openrouter":
         parts = model.split("/")
         if len(parts) >= 3 and parts[0] == "openrouter":
             return f"openrouter/{parts[1]}"
     return provider
+
+
+def _on_anthropic_route(model: str) -> bool:
+    """Whether ``model`` is Claude whose replayed thinking can carry
+    signatures: direct, or through OpenRouter."""
+    return _reasoning_source(model) in ("anthropic", "openrouter/anthropic")
 
 
 def _is_bound_detail(detail: Any) -> bool:
@@ -654,7 +661,7 @@ class Agent:
                     is_last_step
                     and bool(tool_schemas)
                     and response_format is None
-                    and _provider_of(state.current_model) == "anthropic"
+                    and _on_anthropic_route(state.current_model)
                 )
                 step_tools = (
                     None if is_last_step and not forbid_tool_use else tool_schemas
@@ -1132,7 +1139,7 @@ class Agent:
                             "Wrap up your work efficiently. Avoid unnecessary "
                             "tool calls."
                         )
-                        if _provider_of(state.current_model) == "anthropic":
+                        if _on_anthropic_route(state.current_model):
                             budget_msg = {
                                 "role": "user",
                                 "content": (

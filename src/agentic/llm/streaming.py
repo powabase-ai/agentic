@@ -147,26 +147,29 @@ def _merge_reasoning_details(fragments: list[Any]) -> list[dict]:
     OpenRouter streams each detail as fragments that share its ``index`` and
     ``type``: their text-like fields are concatenated, and any other non-empty
     field (``signature``, ``id``, ``format``) is set from the fragment that
-    carries it. A fragment whose ``index`` or ``type`` differs starts a new
-    detail. LiteLLM passes the fragments through as dicts on
+    carries it. Fragments of one detail need not be adjacent. A fragment
+    whose non-empty ``id`` differs from its detail's starts a new detail.
+    LiteLLM passes the fragments through as dicts on
     ``delta.reasoning_details``.
     """
     merged: list[dict] = []
+    open_details: dict[tuple[Any, Any], dict] = {}
     for fragment in fragments:
         part = dict(fragment) if isinstance(fragment, dict) else vars(fragment)
-        last = merged[-1] if merged else None
-        if (
-            last is None
-            or last.get("index") != part.get("index")
-            or last.get("type") != part.get("type")
+        key = (part.get("index"), part.get("type"))
+        detail = open_details.get(key)
+        if detail is None or (
+            part.get("id") and detail.get("id") and part["id"] != detail["id"]
         ):
-            merged.append(dict(part))
+            detail = dict(part)
+            merged.append(detail)
+            open_details[key] = detail
             continue
-        for key, value in part.items():
-            if key in _DETAIL_TEXT_KEYS and isinstance(value, str):
-                last[key] = (last.get(key) or "") + value
+        for field_name, value in part.items():
+            if field_name in _DETAIL_TEXT_KEYS and isinstance(value, str):
+                detail[field_name] = (detail.get(field_name) or "") + value
             elif value not in (None, ""):
-                last[key] = value
+                detail[field_name] = value
     return merged
 
 
