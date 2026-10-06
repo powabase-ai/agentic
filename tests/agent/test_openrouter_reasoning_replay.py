@@ -89,8 +89,49 @@ _TOOL_STEP = _sse(
 _ANSWER_STEP = _sse(_chunk({"role": "assistant", "content": "done"}, "stop"))
 
 
-def _run_streamed(responses: list[bytes]) -> list[dict]:
-    """Run a streaming two-step tool loop through LiteLLM's own OpenRouter
+def _completion_json(message: dict, finish_reason: str) -> bytes:
+    return json.dumps(
+        {
+            "id": "gen-1",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "moonshotai/kimi-k3",
+            "choices": [
+                {"index": 0, "message": message, "finish_reason": finish_reason}
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+        }
+    ).encode()
+
+
+_TOOL_STEP_JSON = _completion_json(
+    {
+        "role": "assistant",
+        "content": "",
+        "reasoning": "I should probe.",
+        "reasoning_details": [
+            {
+                "type": "reasoning.text",
+                "text": "I should probe.",
+                "format": "unknown",
+                "index": 0,
+            }
+        ],
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "probe", "arguments": "{}"},
+            }
+        ],
+    },
+    "tool_calls",
+)
+_ANSWER_STEP_JSON = _completion_json({"role": "assistant", "content": "done"}, "stop")
+
+
+def _run_streamed(responses: list[bytes], stream: bool = True) -> list[dict]:
+    """Run a two-step tool loop through LiteLLM's own OpenRouter
     transformation; returns the JSON bodies it posted."""
     bodies: list[dict] = []
 
@@ -98,7 +139,9 @@ def _run_streamed(responses: list[bytes]) -> list[dict]:
         bodies.append(json.loads(request.content))
         return httpx.Response(
             200,
-            headers={"content-type": "text/event-stream"},
+            headers={
+                "content-type": "text/event-stream" if stream else "application/json"
+            },
             content=responses[len(bodies) - 1],
         )
 
@@ -110,7 +153,7 @@ def _run_streamed(responses: list[bytes]) -> list[dict]:
 
     with (
         patch("agentic.agent.agent.litellm.completion", side_effect=completion),
-        patch.dict("os.environ", {"AGENT_LLM_STREAMING_ENABLED": "true"}),
+        patch.dict("os.environ", {"AGENT_LLM_STREAMING_ENABLED": str(stream).lower()}),
     ):
         agent = Agent(model=_MODEL, reasoning_effort="high")
         output = agent.run(
@@ -126,6 +169,21 @@ def _prior_assistant(messages: list[dict]) -> dict:
 
 def test_streamed_reasoning_details_are_posted_back_on_the_next_step():
     bodies = _run_streamed([_TOOL_STEP, _ANSWER_STEP])
+    assert len(bodies) == 2
+    assert _prior_assistant(bodies[1]["messages"])["reasoning_details"] == [
+        {
+            "type": "reasoning.text",
+            "text": "I should probe.",
+            "format": "unknown",
+            "index": 0,
+        }
+    ]
+
+
+def test_non_streamed_reasoning_details_are_posted_back_on_the_next_step():
+    """LiteLLM's non-streaming OpenRouter message carries the details in
+    `provider_specific_fields`, not as an attribute of their own."""
+    bodies = _run_streamed([_TOOL_STEP_JSON, _ANSWER_STEP_JSON], stream=False)
     assert len(bodies) == 2
     assert _prior_assistant(bodies[1]["messages"])["reasoning_details"] == [
         {
@@ -209,8 +267,8 @@ def test_reasoning_details_replayed_on_the_next_step():
 
 
 def test_reasoning_text_alone_is_recorded_but_not_replayed():
-    """LiteLLM's non-streaming OpenRouter response keeps the reasoning text
-    but drops `reasoning_details`: the step is recorded, nothing is replayed."""
+    """A response with reasoning text but no `reasoning_details` anywhere: the
+    step is recorded, nothing is replayed."""
     output, calls = _run_two_steps(_tool_step(details=None))
     assert "reasoning_details" not in _prior_assistant(calls[1].kwargs["messages"])
     step_one = [m for m in output.messages if m.get("role") == "assistant"][0]

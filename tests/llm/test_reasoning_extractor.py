@@ -297,8 +297,25 @@ def test_openrouter_extracts_details_summary_and_count():
     assert artifact.reasoning_token_count == 40
 
 
-def test_openrouter_reads_a_non_streaming_message_without_details():
-    """LiteLLM's non-streaming Message has no `reasoning_details` attribute."""
+def test_openrouter_reads_details_from_provider_specific_fields():
+    """LiteLLM's non-streaming Message has no `reasoning_details` attribute;
+    it keeps the field in `provider_specific_fields`."""
+    msg = SimpleNamespace(
+        reasoning_content="x",
+        thinking_blocks=None,
+        provider_specific_fields={
+            "reasoning": "x",
+            "refusal": None,
+            "reasoning_details": _OR_DETAILS,
+        },
+    )
+    artifact = _extract_openrouter(msg)
+    assert isinstance(artifact, OpenRouterReasoning)
+    assert artifact.reasoning_details == _OR_DETAILS
+    assert artifact.summary_text == "x"
+
+
+def test_openrouter_records_text_when_there_are_no_details():
     msg = SimpleNamespace(
         reasoning_content="x", thinking_blocks=None, provider_specific_fields=None
     )
