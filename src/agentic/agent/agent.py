@@ -196,6 +196,47 @@ def _provider_of(model: str) -> str | None:
         return None
 
 
+def _reasoning_source(model: str) -> str | None:
+    """Who produced a model's reasoning, for the fallback guard: the LiteLLM
+    provider, or for OpenRouter the provider plus the model's vendor
+    (``openrouter/<vendor>``), since one OpenRouter key reaches many vendors'
+    models. It sees only the model a request names: a vendor switch OpenRouter
+    makes itself (``openrouter/auto``, its own fallbacks) is invisible here."""
+    provider = _provider_of(model)
+    if provider == "openrouter":
+        parts = model.split("/")
+        if len(parts) >= 3 and parts[0] == "openrouter":
+            return f"openrouter/{parts[1]}"
+    return provider
+
+
+def _on_anthropic_route(model: str) -> bool:
+    """Whether ``model`` is Claude whose replayed thinking can carry
+    signatures: direct, or through OpenRouter."""
+    return _reasoning_source(model) in ("anthropic", "openrouter/anthropic")
+
+
+def _is_bound_detail(detail: Any) -> bool:
+    """An OpenRouter reasoning detail that can be bound to its prefix: signed,
+    or encrypted. Plain reasoning text is not."""
+    return isinstance(detail, dict) and bool(
+        detail.get("signature") or detail.get("type") == "reasoning.encrypted"
+    )
+
+
+def _without_bound_reasoning(message: dict[str, Any]) -> dict[str, Any]:
+    """``message`` without thinking blocks and without bound reasoning details."""
+    out = {k: v for k, v in message.items() if k != "thinking_blocks"}
+    details = out.get("reasoning_details")
+    if details:
+        kept = [d for d in details if not _is_bound_detail(d)]
+        if kept:
+            out["reasoning_details"] = kept
+        else:
+            del out["reasoning_details"]
+    return out
+
+
 def _provider_view(message: dict[str, Any]) -> tuple[Any, ...]:
     return (
         message.get("role"),
@@ -208,8 +249,9 @@ def _provider_view(message: dict[str, Any]) -> tuple[Any, ...]:
 def _without_blocks_after_edit(
     before: list[dict[str, Any]], after: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Drop Claude thinking blocks from every assistant message at or after the
-    first message an edit changed.
+    """Drop Claude thinking blocks, and signed or encrypted OpenRouter
+    reasoning details, from every assistant message at or after the first
+    message an edit changed.
 
     A thinking block's signature binds everything before it, so a block that
     follows a rewritten message is rejected; blocks before the edit stay valid
@@ -223,8 +265,10 @@ def _without_blocks_after_edit(
             edit_at = i
             break
     return [
-        {k: v for k, v in m.items() if k != "thinking_blocks"}
-        if i >= edit_at and m.get("role") == "assistant" and "thinking_blocks" in m
+        _without_bound_reasoning(m)
+        if i >= edit_at
+        and m.get("role") == "assistant"
+        and ("thinking_blocks" in m or "reasoning_details" in m)
         else m
         for i, m in enumerate(after)
     ]
@@ -232,7 +276,11 @@ def _without_blocks_after_edit(
 
 def _without_thinking_blocks(messages: Any) -> list[dict[str, Any]]:
     return [
-        {k: v for k, v in m.items() if k != "thinking_blocks"}
+        {
+            k: v
+            for k, v in m.items()
+            if k not in ("thinking_blocks", "reasoning_details")
+        }
         if m.get("role") == "assistant"
         else m
         for m in messages
@@ -393,10 +441,11 @@ class Agent:
         assistant message loses its replay fields, session history included.
         The ``reasoning`` record stays. The same provider, or a model LiteLLM
         cannot resolve, keeps everything: the rule the host applies to session
-        history.
+        history. On OpenRouter, a model from another vendor counts as another
+        provider.
         """
-        from_provider = _provider_of(state.current_model)
-        to_provider = _provider_of(fallback_model)
+        from_provider = _reasoning_source(state.current_model)
+        to_provider = _reasoning_source(fallback_model)
         state = state.with_fallback_model(fallback_model)
         if from_provider is None or to_provider is None or from_provider == to_provider:
             return state
@@ -612,7 +661,7 @@ class Agent:
                     is_last_step
                     and bool(tool_schemas)
                     and response_format is None
-                    and _provider_of(state.current_model) == "anthropic"
+                    and _on_anthropic_route(state.current_model)
                 )
                 step_tools = (
                     None if is_last_step and not forbid_tool_use else tool_schemas
@@ -1090,7 +1139,7 @@ class Agent:
                             "Wrap up your work efficiently. Avoid unnecessary "
                             "tool calls."
                         )
-                        if _provider_of(state.current_model) == "anthropic":
+                        if _on_anthropic_route(state.current_model):
                             budget_msg = {
                                 "role": "user",
                                 "content": (
@@ -2108,7 +2157,8 @@ class Agent:
         input. OpenAI reasoning items never cross runs at all — the Responses
         API discards reasoning from turns before the latest user message, and
         encrypted content is bound to the organization that produced it, so
-        replaying one can only cost a rejected request. A provider LiteLLM
+        replaying one can only cost a rejected request. OpenRouter reasoning
+        details are likewise replayed within a run only. A provider LiteLLM
         cannot resolve keeps everything else, as at a fallback.
         """
         target = _provider_of(self.model)
@@ -2124,7 +2174,9 @@ class Agent:
                     message = drop_reasoning_replay_fields(message)
                 else:
                     message = {
-                        k: v for k, v in message.items() if k != "reasoning_items"
+                        k: v
+                        for k, v in message.items()
+                        if k not in ("reasoning_items", "reasoning_details")
                     }
             replayable.append(message)
         return replayable

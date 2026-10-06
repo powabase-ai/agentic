@@ -12,6 +12,7 @@ _STANDARD_FIELDS = {
     "name",
     "thinking_blocks",  # Anthropic reasoning replay
     "reasoning_items",  # OpenAI Responses reasoning replay
+    "reasoning_details",  # OpenRouter reasoning replay
     "provider_specific_fields",  # OpenAI/Gemini reasoning replay
 }
 

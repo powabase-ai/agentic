@@ -49,8 +49,18 @@ class GeminiReasoning(BaseModel):
     thoughts_token_count: int | None = None
 
 
+class OpenRouterReasoning(BaseModel):
+    provider: Literal["openrouter"] = "openrouter"
+    # OpenRouter's `reasoning_details` ({type, text|summary|data, signature,
+    # format, index}), as streamed and merged per detail.
+    reasoning_details: list[dict] = Field(default_factory=list)
+    summary_text: str | None = None
+    requested_effort: str | None = None
+    reasoning_token_count: int | None = None
+
+
 ReasoningArtifact = Annotated[
-    AnthropicReasoning | OpenAIReasoning | GeminiReasoning,
+    AnthropicReasoning | OpenAIReasoning | GeminiReasoning | OpenRouterReasoning,
     Field(discriminator="provider"),
 ]
 
@@ -64,8 +74,9 @@ def reasoning_replay_fields(reasoning: ReasoningArtifact) -> dict:
 
     Anthropic reads ``thinking_blocks``; LiteLLM's OpenAI Responses bridge
     reads a top-level ``reasoning_items``; Gemini reads
-    ``provider_specific_fields.thought_signatures``. Empty when the artifact
-    carries nothing to replay.
+    ``provider_specific_fields.thought_signatures``; OpenRouter reads a
+    top-level ``reasoning_details``, which LiteLLM forwards as is. Empty when
+    the artifact carries nothing to replay.
 
     Only signed thinking blocks and redacted ones are replayed: a block with
     no signature — a response cut off mid-thinking — is rejected by the
@@ -93,6 +104,9 @@ def reasoning_replay_fields(reasoning: ReasoningArtifact) -> dict:
                     "thought_signatures": list(reasoning.thought_signatures)
                 }
             }
+    elif isinstance(reasoning, OpenRouterReasoning):
+        if reasoning.reasoning_details:
+            return {"reasoning_details": copy.deepcopy(reasoning.reasoning_details)}
     return {}
 
 
@@ -107,7 +121,7 @@ def drop_reasoning_replay_fields(message: dict) -> dict:
     out = {
         k: v
         for k, v in message.items()
-        if k not in ("thinking_blocks", "reasoning_items")
+        if k not in ("thinking_blocks", "reasoning_items", "reasoning_details")
     }
     psf = out.get("provider_specific_fields")
     if isinstance(psf, dict):
@@ -136,7 +150,8 @@ class Message(BaseModel):
         OpenAI reasoning items are not emitted: the Responses API discards
         reasoning from turns before the latest user message and binds
         encrypted content to the organization that produced it, so replaying
-        one across turns can only cost a rejected request.
+        one across turns can only cost a rejected request. OpenRouter
+        reasoning details are likewise replayed within a run only.
         """
         base: dict = {"role": self.role}
         if self.content is not None:
@@ -148,5 +163,6 @@ class Message(BaseModel):
         if self.role == "assistant" and self.reasoning is not None:
             replay = reasoning_replay_fields(self.reasoning)
             replay.pop("reasoning_items", None)
+            replay.pop("reasoning_details", None)
             base.update(replay)
         return base

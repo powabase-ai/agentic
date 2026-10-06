@@ -388,3 +388,53 @@ def test_a_second_rejection_in_the_same_run_fails_as_before():
         and e.get("reason") == "thinking_signature_rejected"
     ]
     assert len(resets) == 1
+
+
+# --- OpenRouter reasoning details -------------------------------------------
+
+_TEXT_DETAIL = {"type": "reasoning.text", "text": "t", "format": "unknown", "index": 0}
+_SIGNED_DETAIL = {"type": "reasoning.text", "text": "t", "signature": "s", "index": 0}
+_ENCRYPTED_DETAIL = {"type": "reasoning.encrypted", "data": "ENC", "index": 1}
+
+
+def _details_history(details):
+    return [
+        {"role": "user", "content": "q"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "c1", "type": "function", "function": {}}],
+            "reasoning_details": list(details),
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": "big result"},
+        {"role": "assistant", "content": "one", "reasoning_details": list(details)},
+    ]
+
+
+def test_bound_reasoning_details_after_an_edit_go():
+    """A signed or encrypted detail can be bound to its prefix like a Claude
+    thinking block, so after an edit it is dropped. Plain text is not bound
+    and stays."""
+    details = [_TEXT_DETAIL, _SIGNED_DETAIL, _ENCRYPTED_DETAIL]
+    before = _details_history(details)
+    after = _details_history(details)
+    after[2] = {"role": "tool", "tool_call_id": "c1", "content": _PRUNED}
+    result = agent_module._without_blocks_after_edit(before, after)
+    assert result[1]["reasoning_details"] == details
+    assert result[3]["reasoning_details"] == [_TEXT_DETAIL]
+
+
+def test_an_emptied_reasoning_details_list_is_removed():
+    before = _details_history([_SIGNED_DETAIL])
+    after = _details_history([_SIGNED_DETAIL])
+    after[2] = {"role": "tool", "tool_call_id": "c1", "content": _PRUNED}
+    result = agent_module._without_blocks_after_edit(before, after)
+    assert "reasoning_details" not in result[3]
+
+
+def test_backstop_strips_reasoning_details():
+    result = agent_module._without_thinking_blocks(
+        _details_history([_TEXT_DETAIL, _SIGNED_DETAIL])
+    )
+    for message in result:
+        assert "reasoning_details" not in message

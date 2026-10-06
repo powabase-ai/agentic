@@ -13,6 +13,7 @@ from agentic.agent.message import (
     AnthropicReasoning,
     GeminiReasoning,
     OpenAIReasoning,
+    OpenRouterReasoning,
     ReasoningArtifact,
 )
 
@@ -136,6 +137,28 @@ def _extract_inner(
             summary_text=summary,
             requested_effort=requested_effort,
             thoughts_token_count=thoughts_count,
+        )
+
+    if provider == "openrouter":
+        # Streaming: `reasoning_details` collected by accumulate_stream.
+        # Non-streaming: LiteLLM's Message keeps the field in
+        # provider_specific_fields.
+        raw_details = getattr(assembled_message, "reasoning_details", None) or psf.get(
+            "reasoning_details"
+        )
+        details = [_plain_item(d) for d in (raw_details or [])]
+        reasoning_count = None
+        if usage is not None:
+            details_usage = getattr(usage, "completion_tokens_details", None)
+            if details_usage is not None:
+                reasoning_count = getattr(details_usage, "reasoning_tokens", None)
+        if not details and not summary and not reasoning_count:
+            return None
+        return OpenRouterReasoning(
+            reasoning_details=details,
+            summary_text=summary,
+            requested_effort=requested_effort,
+            reasoning_token_count=reasoning_count,
         )
 
     return None

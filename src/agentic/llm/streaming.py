@@ -131,9 +131,46 @@ class Message:
     # OpenAI Responses reasoning items, replayed on the next step (see
     # agentic.agent.message.reasoning_replay_fields).
     reasoning_items: list = field(default_factory=list)
+    # OpenRouter reasoning details, merged per detail; replayed likewise.
+    reasoning_details: list[dict] = field(default_factory=list)
 
 
 # ===== Accumulator =====
+
+# Fields of an OpenRouter reasoning detail that stream in pieces.
+_DETAIL_TEXT_KEYS = ("text", "summary", "data")
+
+
+def _merge_reasoning_details(fragments: list[Any]) -> list[dict]:
+    """Merge streamed OpenRouter ``reasoning_details`` fragments into details.
+
+    OpenRouter streams each detail as fragments that share its ``index`` and
+    ``type``: their text-like fields are concatenated, and any other non-empty
+    field (``signature``, ``id``, ``format``) is set from the fragment that
+    carries it. Fragments of one detail need not be adjacent. A fragment
+    whose non-empty ``id`` differs from its detail's starts a new detail.
+    LiteLLM passes the fragments through as dicts on
+    ``delta.reasoning_details``.
+    """
+    merged: list[dict] = []
+    open_details: dict[tuple[Any, Any], dict] = {}
+    for fragment in fragments:
+        part = dict(fragment) if isinstance(fragment, dict) else vars(fragment)
+        key = (part.get("index"), part.get("type"))
+        detail = open_details.get(key)
+        if detail is None or (
+            part.get("id") and detail.get("id") and part["id"] != detail["id"]
+        ):
+            detail = dict(part)
+            merged.append(detail)
+            open_details[key] = detail
+            continue
+        for field_name, value in part.items():
+            if field_name in _DETAIL_TEXT_KEYS and isinstance(value, str):
+                detail[field_name] = (detail.get(field_name) or "") + value
+            elif value not in (None, ""):
+                detail[field_name] = value
+    return merged
 
 
 def _combine_thinking_blocks(blocks: list[dict]) -> list[dict]:
@@ -221,6 +258,7 @@ def accumulate_stream(
     thinking_blocks_acc: list[dict] = []
     psf_acc: dict[str, Any] = {}
     reasoning_items_acc: list = []
+    reasoning_details_acc: list = []
     finish_reason: str | None = None
     usage: dict | None = None
 
@@ -308,6 +346,10 @@ def accumulate_stream(
             # them, so this is the only place they survive a stream.
             chunk_items = getattr(delta, "reasoning_items", None) or []
             reasoning_items_acc.extend(chunk_items)
+
+            # OpenRouter reasoning details, as fragments; merged at the end.
+            chunk_details = getattr(delta, "reasoning_details", None) or []
+            reasoning_details_acc.extend(chunk_details)
     except (AbortedError, StreamPartialError):
         # Already wrapped — propagate as-is
         raise
@@ -381,6 +423,7 @@ def accumulate_stream(
             thinking_blocks=_combine_thinking_blocks(thinking_blocks_acc),
             provider_specific_fields=psf_acc,
             reasoning_items=reasoning_items_acc,
+            reasoning_details=_merge_reasoning_details(reasoning_details_acc),
         ),
         finish_reason,
         usage,

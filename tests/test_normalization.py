@@ -172,3 +172,11 @@ def test_reasoning_items_survive_normalization():
         [{"role": "assistant", "content": None, "reasoning_items": [item]}]
     )
     assert out[0]["reasoning_items"] == [item]
+
+
+def test_reasoning_details_survive_normalization():
+    detail = {"type": "reasoning.text", "text": "t", "format": "unknown", "index": 0}
+    out = normalize_messages(
+        [{"role": "assistant", "content": None, "reasoning_details": [detail]}]
+    )
+    assert out[0]["reasoning_details"] == [detail]

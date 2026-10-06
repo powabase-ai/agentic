@@ -482,3 +482,97 @@ def test_stream_cut_off_mid_thinking_replays_no_unsigned_block():
             {"type": "thinking", "thinking": "first block", "signature": "sig1"}
         ]
     }
+
+
+def _detail(text=None, index=0, type_="reasoning.text", **extra):
+    d = {"type": type_, "format": "unknown", "index": index, **extra}
+    if text is not None:
+        d["text"] = text
+    return d
+
+
+def test_reasoning_details_fragments_merge_by_index():
+    """OpenRouter streams each reasoning detail as fragments sharing an index;
+    the accumulator joins their text, and a later fragment's signature lands
+    on the same detail. This exercises the merge itself: LiteLLM 1.103.2 never
+    delivers a signature-only delta like the third one (see
+    test_litellm_drops_a_stream_chunk_that_carries_only_reasoning_details)."""
+    chunks = [
+        _chunk(delta=_bare_delta(reasoning_details=[_detail("I should ")])),
+        _chunk(delta=_bare_delta(reasoning_details=[_detail("probe.")])),
+        _chunk(delta=_bare_delta(reasoning_details=[_detail("", signature="sig")])),
+        _chunk(delta=_bare_delta(), finish_reason="stop"),
+    ]
+    msg, _, _ = accumulate_stream(iter(chunks))
+    assert msg.reasoning_details == [
+        {
+            "type": "reasoning.text",
+            "format": "unknown",
+            "index": 0,
+            "text": "I should probe.",
+            "signature": "sig",
+        }
+    ]
+
+
+def test_reasoning_details_keep_distinct_details_apart():
+    chunks = [
+        _chunk(delta=_bare_delta(reasoning_details=[_detail("a", index=0)])),
+        _chunk(
+            delta=_bare_delta(
+                reasoning_details=[
+                    _detail(index=1, type_="reasoning.encrypted", data="ENC")
+                ]
+            )
+        ),
+        _chunk(delta=_bare_delta(reasoning_details=[_detail("b", index=2)])),
+    ]
+    msg, _, _ = accumulate_stream(iter(chunks))
+    assert msg.reasoning_details == [
+        {"type": "reasoning.text", "format": "unknown", "index": 0, "text": "a"},
+        {"type": "reasoning.encrypted", "format": "unknown", "index": 1, "data": "ENC"},
+        {"type": "reasoning.text", "format": "unknown", "index": 2, "text": "b"},
+    ]
+
+
+def test_reasoning_details_with_different_ids_stay_apart():
+    """Without an index, the id tells two details of the same type apart."""
+    chunks = [
+        _chunk(
+            delta=_bare_delta(
+                reasoning_details=[
+                    {"type": "reasoning.encrypted", "data": "A", "id": "rs_1"}
+                ]
+            )
+        ),
+        _chunk(
+            delta=_bare_delta(
+                reasoning_details=[
+                    {"type": "reasoning.encrypted", "data": "B", "id": "rs_2"}
+                ]
+            )
+        ),
+    ]
+    msg, _, _ = accumulate_stream(iter(chunks))
+    assert msg.reasoning_details == [
+        {"type": "reasoning.encrypted", "data": "A", "id": "rs_1"},
+        {"type": "reasoning.encrypted", "data": "B", "id": "rs_2"},
+    ]
+
+
+def test_interleaved_reasoning_details_merge_per_detail():
+    chunks = [
+        _chunk(delta=_bare_delta(reasoning_details=[_detail("a", index=0)])),
+        _chunk(delta=_bare_delta(reasoning_details=[_detail("x", index=1)])),
+        _chunk(delta=_bare_delta(reasoning_details=[_detail("b", index=0)])),
+    ]
+    msg, _, _ = accumulate_stream(iter(chunks))
+    assert msg.reasoning_details == [
+        {"type": "reasoning.text", "format": "unknown", "index": 0, "text": "ab"},
+        {"type": "reasoning.text", "format": "unknown", "index": 1, "text": "x"},
+    ]
+
+
+def test_reasoning_details_default_to_empty():
+    msg, _, _ = accumulate_stream(iter([]))
+    assert msg.reasoning_details == []
