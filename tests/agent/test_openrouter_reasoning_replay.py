@@ -17,7 +17,7 @@ from agentic.agent.agent import Agent
 from agentic.agent.output import AgentOutput
 from agentic.agent.session import AgentSession
 from agentic.agent.tools import BuiltinTool
-from agentic.execution.context import ExecutionContext
+from agentic.execution.context import ExecutionContext, TokenBudget
 from agentic.execution.status import ExecutionStatus
 
 _MODEL = "openrouter/moonshotai/kimi-k3"
@@ -397,3 +397,102 @@ def test_list_input_never_replays_reasoning_details():
     assert any(m.get("content") == "earlier answer" for m in messages)
     for message in messages:
         assert "reasoning_details" not in message
+
+
+# --- A stream chunk carrying only reasoning details --------------------------
+
+
+def _encrypted(data: str, id_: str, index: int) -> dict:
+    return {
+        "type": "reasoning.encrypted",
+        "data": data,
+        "id": id_,
+        "format": "google-gemini-v1",
+        "index": index,
+    }
+
+
+def test_litellm_drops_a_stream_chunk_that_carries_only_reasoning_details():
+    """Pins a LiteLLM 1.103.2 limitation, not agentic behaviour: a streamed
+    chunk with no content, reasoning text or tool call never reaches the
+    accumulator, so a detail that arrives alone on one (a Claude signature, an
+    encrypted detail) is lost; the same detail on a tool-call chunk is kept.
+    If this fails after a LiteLLM upgrade, the limitation is gone."""
+    tool_step = _sse(
+        _chunk({"role": "assistant", **_reasoning_delta("I should probe.")}),
+        _chunk({"content": "", "reasoning_details": [_encrypted("LOST", "rs_1", 1)]}),
+        _chunk(
+            {
+                "reasoning_details": [_encrypted("KEPT", "rs_2", 2)],
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "probe", "arguments": "{}"},
+                    }
+                ],
+            },
+            "tool_calls",
+        ),
+    )
+    bodies = _run_streamed([tool_step, _ANSWER_STEP])
+    replayed = _prior_assistant(bodies[1]["messages"])["reasoning_details"]
+    assert [d.get("data") for d in replayed] == [None, "KEPT"]
+
+
+# --- Claude on OpenRouter takes the Anthropic route --------------------------
+# Its replayed reasoning can be signed, and a signature binds the tool set and
+# system prompt, so the last step and the budget warning must leave them alone.
+
+_CLAUDE = "openrouter/anthropic/claude-sonnet-5.5"
+
+
+def _final_step_kwargs(model):
+    with (
+        patch(
+            "agentic.agent.agent.litellm.completion", return_value=_answer_step()
+        ) as completion,
+        patch.dict("os.environ", {"AGENT_LLM_STREAMING_ENABLED": "false"}),
+    ):
+        Agent(model=model, reasoning_effort="high").run(
+            "hi",
+            context=ExecutionContext(),
+            tools={"probe": _probe_tool()},
+            max_steps=1,
+        )
+    return completion.call_args.kwargs
+
+
+def test_claude_on_openrouter_last_step_keeps_tools_with_tool_choice_none():
+    kwargs = _final_step_kwargs(_CLAUDE)
+    assert [t["function"]["name"] for t in kwargs["tools"]] == ["probe"]
+    assert kwargs["tool_choice"] == "none"
+
+
+def test_other_openrouter_models_last_step_still_withholds_tools():
+    kwargs = _final_step_kwargs(_MODEL)
+    assert "tools" not in kwargs
+    assert "tool_choice" not in kwargs
+
+
+def test_claude_on_openrouter_budget_warning_is_a_user_message():
+    first = _tool_step()
+    first.usage = SimpleNamespace(
+        prompt_tokens=10, completion_tokens=890, total_tokens=900
+    )
+    with (
+        patch(
+            "agentic.agent.agent.litellm.completion",
+            side_effect=[first, _answer_step()],
+        ) as completion,
+        patch.dict("os.environ", {"AGENT_LLM_STREAMING_ENABLED": "false"}),
+    ):
+        Agent(model=_CLAUDE, reasoning_effort="high").run(
+            "hi",
+            context=ExecutionContext(budget=TokenBudget(max_tokens=1000)),
+            tools={"probe": _probe_tool()},
+        )
+    sent = completion.call_args_list[-1].kwargs["messages"]
+    assert [m["role"] for m in sent] == ["user", "assistant", "tool", "user"]
+    assert sent[-1]["content"].startswith("<system-context>\nBUDGET WARNING")
