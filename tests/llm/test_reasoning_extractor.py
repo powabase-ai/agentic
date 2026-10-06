@@ -9,6 +9,7 @@ from agentic.agent.message import (
     AnthropicReasoning,
     GeminiReasoning,
     OpenAIReasoning,
+    OpenRouterReasoning,
 )
 from agentic.llm.reasoning_extractor import extract_reasoning_artifact
 from agentic.llm.streaming import Message
@@ -265,3 +266,47 @@ def test_extractor_swallows_exceptions_returns_none(caplog):
             )
             is None
         )
+
+
+# --- OpenRouter -------------------------------------------------------------
+
+_OR_DETAILS = [{"type": "reasoning.text", "text": "x", "format": "unknown", "index": 0}]
+
+
+def _extract_openrouter(msg, usage=None):
+    return extract_reasoning_artifact(
+        model="openrouter/moonshotai/kimi-k3",
+        assembled_message=msg,
+        final_response=_final_response(usage=usage, id="gen-1"),
+        requested_effort="high",
+    )
+
+
+def test_openrouter_extracts_details_summary_and_count():
+    usage = SimpleNamespace(
+        completion_tokens=50,
+        completion_tokens_details=SimpleNamespace(reasoning_tokens=40),
+    )
+    artifact = _extract_openrouter(
+        _msg(reasoning_details=_OR_DETAILS, reasoning_content="x"), usage
+    )
+    assert isinstance(artifact, OpenRouterReasoning)
+    assert artifact.reasoning_details == _OR_DETAILS
+    assert artifact.summary_text == "x"
+    assert artifact.requested_effort == "high"
+    assert artifact.reasoning_token_count == 40
+
+
+def test_openrouter_reads_a_non_streaming_message_without_details():
+    """LiteLLM's non-streaming Message has no `reasoning_details` attribute."""
+    msg = SimpleNamespace(
+        reasoning_content="x", thinking_blocks=None, provider_specific_fields=None
+    )
+    artifact = _extract_openrouter(msg)
+    assert isinstance(artifact, OpenRouterReasoning)
+    assert artifact.reasoning_details == []
+    assert artifact.summary_text == "x"
+
+
+def test_openrouter_returns_none_when_nothing_was_reasoned():
+    assert _extract_openrouter(_msg(reasoning_content="")) is None

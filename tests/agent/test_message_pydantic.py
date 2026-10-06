@@ -7,6 +7,7 @@ from agentic.agent.message import (
     GeminiReasoning,
     Message,
     OpenAIReasoning,
+    OpenRouterReasoning,
     drop_reasoning_replay_fields,
     reasoning_replay_fields,
 )
@@ -343,3 +344,67 @@ def test_replay_fields_are_deep_copies():
     assert artifact.reasoning_items[0]["summary"] == [
         {"type": "summary_text", "text": "t"}
     ]
+
+
+# --- OpenRouter -------------------------------------------------------------
+
+_OR_DETAIL = {"type": "reasoning.text", "text": "t", "format": "unknown", "index": 0}
+
+
+def test_openrouter_reasoning_round_trips_through_message():
+    raw = {
+        "role": "assistant",
+        "content": "a",
+        "reasoning": {
+            "provider": "openrouter",
+            "reasoning_details": [_OR_DETAIL],
+            "summary_text": "t",
+            "requested_effort": "high",
+            "reasoning_token_count": 12,
+        },
+    }
+    msg = Message.model_validate(raw)
+    assert isinstance(msg.reasoning, OpenRouterReasoning)
+    assert msg.model_dump(exclude_none=True)["reasoning"] == raw["reasoning"]
+
+
+def test_replay_fields_openrouter():
+    assert reasoning_replay_fields(
+        OpenRouterReasoning(reasoning_details=[_OR_DETAIL])
+    ) == {"reasoning_details": [_OR_DETAIL]}
+
+
+def test_replay_fields_openrouter_empty_when_nothing_to_replay():
+    assert reasoning_replay_fields(OpenRouterReasoning(summary_text="s")) == {}
+
+
+def test_replay_fields_openrouter_are_deep_copies():
+    artifact = OpenRouterReasoning(reasoning_details=[dict(_OR_DETAIL)])
+    out = reasoning_replay_fields(artifact)
+    out["reasoning_details"][0]["text"] = "edited"
+    out["reasoning_details"].append({"type": "reasoning.text"})
+    assert artifact.reasoning_details == [_OR_DETAIL]
+
+
+def test_message_to_litellm_input_omits_openrouter_reasoning_details():
+    """Replayed within a run only, like OpenAI reasoning items."""
+    msg = Message(
+        role="assistant",
+        content="answer",
+        reasoning=OpenRouterReasoning(reasoning_details=[_OR_DETAIL]),
+    )
+    assert msg.to_litellm_input() == {"role": "assistant", "content": "answer"}
+
+
+def test_drop_replay_fields_removes_reasoning_details():
+    msg = {
+        "role": "assistant",
+        "content": "a",
+        "reasoning": {"provider": "openrouter"},
+        "reasoning_details": [_OR_DETAIL],
+    }
+    assert drop_reasoning_replay_fields(msg) == {
+        "role": "assistant",
+        "content": "a",
+        "reasoning": {"provider": "openrouter"},
+    }

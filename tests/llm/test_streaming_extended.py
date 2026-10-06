@@ -482,3 +482,57 @@ def test_stream_cut_off_mid_thinking_replays_no_unsigned_block():
             {"type": "thinking", "thinking": "first block", "signature": "sig1"}
         ]
     }
+
+
+def _detail(text=None, index=0, type_="reasoning.text", **extra):
+    d = {"type": type_, "format": "unknown", "index": index, **extra}
+    if text is not None:
+        d["text"] = text
+    return d
+
+
+def test_reasoning_details_fragments_merge_by_index():
+    """OpenRouter streams each reasoning detail as fragments sharing an index;
+    the accumulator joins their text, and a later fragment's signature lands
+    on the same detail."""
+    chunks = [
+        _chunk(delta=_bare_delta(reasoning_details=[_detail("I should ")])),
+        _chunk(delta=_bare_delta(reasoning_details=[_detail("probe.")])),
+        _chunk(delta=_bare_delta(reasoning_details=[_detail("", signature="sig")])),
+        _chunk(delta=_bare_delta(), finish_reason="stop"),
+    ]
+    msg, _, _ = accumulate_stream(iter(chunks))
+    assert msg.reasoning_details == [
+        {
+            "type": "reasoning.text",
+            "format": "unknown",
+            "index": 0,
+            "text": "I should probe.",
+            "signature": "sig",
+        }
+    ]
+
+
+def test_reasoning_details_keep_distinct_details_apart():
+    chunks = [
+        _chunk(delta=_bare_delta(reasoning_details=[_detail("a", index=0)])),
+        _chunk(
+            delta=_bare_delta(
+                reasoning_details=[
+                    _detail(index=1, type_="reasoning.encrypted", data="ENC")
+                ]
+            )
+        ),
+        _chunk(delta=_bare_delta(reasoning_details=[_detail("b", index=2)])),
+    ]
+    msg, _, _ = accumulate_stream(iter(chunks))
+    assert msg.reasoning_details == [
+        {"type": "reasoning.text", "format": "unknown", "index": 0, "text": "a"},
+        {"type": "reasoning.encrypted", "format": "unknown", "index": 1, "data": "ENC"},
+        {"type": "reasoning.text", "format": "unknown", "index": 2, "text": "b"},
+    ]
+
+
+def test_reasoning_details_default_to_empty():
+    msg, _, _ = accumulate_stream(iter([]))
+    assert msg.reasoning_details == []
