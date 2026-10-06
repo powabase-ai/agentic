@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/powabase-ai/agentic/compare/v0.6.0...v0.6.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **agent:** replay OpenRouter reasoning within a run ([#43](https://github.com/powabase-ai/agentic/issues/43)) ([2dd9053](https://github.com/powabase-ai/agentic/commit/2dd905361d4212fee6690a44ae775aa2bfdaf461))
+
 ## [0.6.0](https://github.com/powabase-ai/agentic/compare/v0.5.3...v0.6.0) (2026-10-02)
 
 
