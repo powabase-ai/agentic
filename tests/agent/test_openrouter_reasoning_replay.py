@@ -22,7 +22,12 @@ from agentic.execution.status import ExecutionStatus
 
 _MODEL = "openrouter/moonshotai/kimi-k3"
 _DETAILS = [
-    {"type": "reasoning.text", "text": "I should probe.", "format": "unknown", "index": 0}
+    {
+        "type": "reasoning.text",
+        "text": "I should probe.",
+        "format": "unknown",
+        "index": 0,
+    }
 ]
 _EVENT = "reasoning_dropped_at_provider_switch"
 
@@ -194,7 +199,9 @@ def _run_two_steps(first_step):
 
 def test_reasoning_details_replayed_on_the_next_step():
     output, calls = _run_two_steps(_tool_step())
-    assert _prior_assistant(calls[1].kwargs["messages"])["reasoning_details"] == _DETAILS
+    assert (
+        _prior_assistant(calls[1].kwargs["messages"])["reasoning_details"] == _DETAILS
+    )
     step_one = [m for m in output.messages if m.get("role") == "assistant"][0]
     assert step_one["reasoning"]["provider"] == "openrouter"
     assert step_one["reasoning"]["reasoning_details"] == _DETAILS
@@ -270,9 +277,10 @@ def test_fallback_to_another_vendor_on_openrouter_drops_the_details():
 
 def test_fallback_to_the_same_vendor_on_openrouter_keeps_the_details():
     fallback_call, dropped = _run_with_fallback("openrouter/moonshotai/kimi-k2.5")
-    assert _prior_assistant(fallback_call.kwargs["messages"])[
-        "reasoning_details"
-    ] == _DETAILS
+    assert (
+        _prior_assistant(fallback_call.kwargs["messages"])["reasoning_details"]
+        == _DETAILS
+    )
     assert dropped == []
 
 
@@ -308,7 +316,10 @@ def test_session_history_never_replays_reasoning_details():
             execution_id="earlier",
             status=ExecutionStatus.COMPLETED,
             content="earlier answer",
-            messages=[{"role": "user", "content": "earlier question"}, _earlier_answer()],
+            messages=[
+                {"role": "user", "content": "earlier question"},
+                _earlier_answer(),
+            ],
         )
     )
     messages = _first_request_messages("next question", session=session)
