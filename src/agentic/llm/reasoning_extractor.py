@@ -140,13 +140,13 @@ def _extract_inner(
         )
 
     if provider == "openrouter":
-        # Streaming carries `reasoning_details` (collected by
-        # accumulate_stream); LiteLLM's non-streaming Message keeps only the
-        # reasoning text, so there is nothing to replay from it.
-        details = [
-            _plain_item(d)
-            for d in (getattr(assembled_message, "reasoning_details", None) or [])
-        ]
+        # Streaming: `reasoning_details` collected by accumulate_stream.
+        # Non-streaming: LiteLLM's Message keeps the field in
+        # provider_specific_fields.
+        raw_details = getattr(assembled_message, "reasoning_details", None) or psf.get(
+            "reasoning_details"
+        )
+        details = [_plain_item(d) for d in (raw_details or [])]
         reasoning_count = None
         if usage is not None:
             details_usage = getattr(usage, "completion_tokens_details", None)
