@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.2](https://github.com/powabase-ai/agentic/compare/v0.6.1...v0.6.2) (2026-11-10)
+
+
+### Bug Fixes
+
+* **knowledge:** keep text after an unclosed code fence in MarkdownHeaderChunking ([#47](https://github.com/powabase-ai/agentic/issues/47)) ([8335843](https://github.com/powabase-ai/agentic/commit/8335843719bfc417aaa477af57cfa97f1826f846))
+
 ## [0.6.1](https://github.com/powabase-ai/agentic/compare/v0.6.0...v0.6.1) (2026-10-06)
 
 
