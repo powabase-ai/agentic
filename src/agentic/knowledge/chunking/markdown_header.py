@@ -6,6 +6,10 @@ using LangChain's ExperimentalMarkdownSyntaxTextSplitter, then further
 divides each section by length using RecursiveChunking. Header context
 is prepended to each chunk for better embedding quality.
 
+The header splitter is a subclass that keeps all text after an unclosed code
+fence; the upstream splitter silently discards it (see
+_FenceSafeMarkdownSplitter).
+
 Useful for structured Markdown documents (docs, READMEs, etc.).
 """
 
@@ -39,12 +43,22 @@ class _FenceSafeMarkdownSplitter(ExperimentalMarkdownSyntaxTextSplitter):
 
     Upstream ``_resolve_code_chunk`` pops every remaining line looking for a
     closing fence and returns ``""`` when there is none, discarding the rest of
-    the document. OCR output often has a stray or unbalanced fence, so here an
-    unclosed fence instead puts the consumed lines back and its own line is
-    carried into the following text as plain content.
+    the document (#46). OCR output often has a stray or unbalanced fence, so
+    here an unclosed fence instead puts the consumed lines back and its own line
+    is carried into the following text as plain content. If nothing but
+    whitespace follows it before the next header, rule or end of input, the
+    fence line joins the text directly before it, or is dropped when there is
+    none, so it is never emitted as a chunk of its own.
+
+    Written against the private ``_resolve_code_chunk`` / ``_complete_chunk_doc``
+    of langchain-text-splitters 1.1.x (the pin in pyproject.toml is capped for
+    this reason). Re-check both overrides before raising the cap.
     """
 
-    _pending_fence = ""
+    _pending_fence = ""  # unclosed fence line, to start the next chunk
+    _carried_fence = ""  # fence line the current chunk starts with
+    _fence_follows_text = False  # chunks[-1] ends directly before the fence
+    _emitted_last = False  # the last completion appended a chunk
 
     def _resolve_code_chunk(self, current_line: str, raw_lines: list[str]) -> str:
         consumed: list[str] = []
@@ -54,16 +68,28 @@ class _FenceSafeMarkdownSplitter(ExperimentalMarkdownSyntaxTextSplitter):
             if self._match_code(raw_line):
                 return current_line + "".join(consumed)
         raw_lines[:0] = consumed
-        # The caller stores the returned text as a code chunk. Returning "" makes
-        # that chunk empty, so it is discarded, and the fence line is held until
+        # The caller completed the preceding text just before calling us, then
+        # stores the returned text as a code chunk. Returning "" makes that chunk
+        # empty, so it is discarded, and the fence line is held until
         # _complete_chunk_doc starts the next chunk with it.
+        self._fence_follows_text = self._emitted_last
         self._pending_fence = current_line
         return ""
 
     def _complete_chunk_doc(self) -> None:
+        carried = self._carried_fence
+        self._carried_fence = ""
+        if carried and self.current_chunk.page_content.strip() == carried.strip():
+            if self._fence_follows_text:
+                self.chunks[-1].page_content += carried
+            self.current_chunk.page_content = ""
+
+        count = len(self.chunks)
         super()._complete_chunk_doc()
+        self._emitted_last = len(self.chunks) > count
+
         if self._pending_fence:
-            self.current_chunk.page_content = self._pending_fence
+            self.current_chunk.page_content = self._carried_fence = self._pending_fence
             self._pending_fence = ""
 
 
@@ -75,6 +101,8 @@ class MarkdownHeaderChunking(ChunkingStrategy):
     - Splits by Markdown header structure (h1-h6)
     - Further divides sections by length using recursive splitting
     - Prepends header context to each chunk for embedding
+    - Keeps all text after an unbalanced code fence, treating the stray fence
+      line as plain text; closed code blocks are never split on headers
 
     Args:
         chunk_size: Maximum tokens per chunk (default: 2000)

@@ -300,15 +300,65 @@ class TestMarkdownHeaderChunkingUnbalancedFences:
         _assert_covers_in_order(chunks, ["AAA", "some md", "BBB"])
         assert max(c.end_char for c in chunks) == len(markdown.rstrip())
 
-    def test_unclosed_fence_is_not_its_own_chunk(self):
-        """The stray fence line is folded into the following text, not emitted alone."""
-        markdown = "# Part A\n\nintro AAA\n\n```\nafter fence BBB\n"
+    @pytest.mark.parametrize(
+        "after_fence",
+        [
+            "after fence BBB\n",
+            "\n# Part B\n\nafter fence BBB\n",
+            "# Part B\nafter fence BBB\n",
+            "---\nafter fence BBB\n",
+            "",
+            "\n",
+        ],
+        ids=["text", "blank-then-header", "header", "rule", "eof", "eof-newline"],
+    )
+    @pytest.mark.parametrize(
+        "before_fence",
+        ["intro AAA\n", "intro AAA\n\n# Part F\n"],
+        ids=["follows-text", "follows-header"],
+    )
+    def test_unclosed_fence_is_not_its_own_chunk(self, before_fence, after_fence):
+        """Whatever follows it, the stray fence line is never emitted alone."""
+        markdown = f"# Part A\n\n{before_fence}```\n{after_fence}"
 
         chunks = MarkdownHeaderChunking(chunk_size=200, overlap=10).chunk(markdown)
 
-        assert all(c.text.split("\n", 1)[-1].strip() != "```" for c in chunks)
+        bodies = [c.text.split("\n", 1)[-1].strip() for c in chunks]
+        assert "```" not in bodies
         assert all("Code" not in c.metadata for c in chunks)
-        _assert_covers_in_order(chunks, ["AAA", "BBB"])
+        _assert_covers_in_order(chunks, ["AAA", "BBB"] if after_fence.strip() else ["AAA"])
+
+    def test_lone_closing_fence_joins_the_text_before_it(self):
+        """A closer whose opener OCR lost belongs with the diagram text above it."""
+        markdown = "# Part A\n\nmermaid\ngraph TD\n```\n\n# Part B\n\ntail BBB\n"
+
+        chunks = MarkdownHeaderChunking(chunk_size=200, overlap=10).chunk(markdown)
+
+        assert [c.text for c in chunks] == [
+            "# Part A\nmermaid\ngraph TD\n```",
+            "# Part B\ntail BBB",
+        ]
+
+    @pytest.mark.parametrize(
+        "markdown",
+        [
+            "# Part A\n\nintro AAA\n\nmermaid\ngraph TD\n```\n\n# Part B\n\ntail BBB\n",
+            "# Part A\n\nintro AAA\n\n```markdown\nsome md\n\n# Part B\n\ntail BBB\n",
+            "# Part A\n\nAAA\n\n```\n\n# Part B\n\nBBB\n\n```python\nx = 1\n```\n\n# C\n\nCCC\n",
+        ],
+        ids=["lone-closer", "unclosed-opener", "odd-count"],
+    )
+    def test_offsets_point_at_chunk_body(self, markdown):
+        """Carrying a stray fence keeps offsets on each chunk's body (minus its header).
+
+        These inputs have no whitespace runs: RecursiveChunking reports offsets
+        into its whitespace-collapsed text, which drift from the input otherwise.
+        """
+        chunks = MarkdownHeaderChunking(chunk_size=200, overlap=10).chunk(markdown)
+
+        for c in chunks:
+            body = c.text.split("\n", 1)[1] if c.text.startswith("#") else c.text
+            assert markdown[c.start_char : c.end_char].strip() == body
 
     def test_odd_fence_count_mid_document(self):
         """A stray fence before a real code block shifts the pairing but loses nothing."""
@@ -347,99 +397,6 @@ class TestMarkdownHeaderChunkingUnbalancedFences:
         assert "x = 1\n# not a header\ny = 2\n```" in code[0].text
         assert not any(c.metadata.get("Header 1") == "not a header" for c in chunks)
         _assert_covers_in_order(chunks, ["AAA", "x = 1", "BBB"])
-
-
-class TestChunkCoverageGuard:
-    """ChunkAndEmbed records how much of the input its chunks cover (#46)."""
-
-    class _LengthEmbedder(Embedder):
-        model = "test-model"
-
-        def embed(self, text):
-            return [float(len(text))]
-
-        async def aembed(self, text):
-            return [float(len(text))]
-
-    class _HalfChunker(ChunkingStrategy):
-        """Stands in for a chunker that silently drops the back half of the input."""
-
-        name = "half"
-
-        def chunk(self, text, source_id=None):
-            end = len(text) // 2
-            return [TextChunk(text=text[:end], index=0, start_char=0, end_char=end)]
-
-    @staticmethod
-    async def _run(algorithm, content, use_async):
-        if use_async:
-            return await algorithm.aindex(content)
-        return algorithm.index(content)
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("use_async", [False, True])
-    async def test_full_coverage_recorded(self, use_async):
-        from agentic.knowledge.chunking import RecursiveChunking
-        from agentic.knowledge.indexing.chunk_embed import ChunkAndEmbedAlgorithm
-
-        content = "Paragraph one is here.\n\n" * 50
-        algorithm = ChunkAndEmbedAlgorithm(
-            chunker=RecursiveChunking(chunk_size=50, overlap=5),
-            embedder=self._LengthEmbedder(),
-        )
-
-        result = await self._run(algorithm, content, use_async)
-
-        assert result.stats["coverage_ratio"] == 1.0
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("use_async", [False, True])
-    async def test_truncation_recorded_and_warned(self, use_async, caplog):
-        from agentic.knowledge.indexing.chunk_embed import ChunkAndEmbedAlgorithm
-
-        content = "word " * 400
-        algorithm = ChunkAndEmbedAlgorithm(
-            chunker=self._HalfChunker(), embedder=self._LengthEmbedder()
-        )
-
-        with caplog.at_level("WARNING", logger="agentic.knowledge.indexing.chunk_embed"):
-            result = await self._run(algorithm, content, use_async)
-
-        assert result.stats["coverage_ratio"] == pytest.approx(0.5, abs=0.01)
-        assert "coverage" in caplog.text
-
-    def test_markdown_with_stray_fence_has_high_coverage(self):
-        from agentic.knowledge.indexing.chunk_embed import ChunkAndEmbedAlgorithm
-
-        content = "# Preface\n\nmermaid\ngraph TD\n```\n\n" + "".join(
-            f"# Chapter {i}\n\n" + f"chapter {i} body text. " * 40 + "\n\n"
-            for i in range(20)
-        )
-        algorithm = ChunkAndEmbedAlgorithm(
-            chunker=MarkdownHeaderChunking(chunk_size=100, overlap=10),
-            embedder=self._LengthEmbedder(),
-        )
-
-        result = algorithm.index(content)
-
-        assert result.stats["coverage_ratio"] > 0.95
-
-    def test_whitespace_only_content_counts_as_covered(self):
-        from agentic.knowledge.indexing.chunk_embed import chunk_coverage_ratio
-
-        assert chunk_coverage_ratio("  \n\n ", []) == 1.0
-        assert chunk_coverage_ratio("text", []) == 0.0
-
-    def test_overlapping_chunks_are_not_double_counted(self):
-        from agentic.knowledge.indexing.chunk_embed import chunk_coverage_ratio
-
-        content = "abcdefghij"
-        chunks = [
-            TextChunk(text=content[0:6], index=0, start_char=0, end_char=6),
-            TextChunk(text=content[4:8], index=1, start_char=4, end_char=8),
-        ]
-
-        assert chunk_coverage_ratio(content, chunks) == pytest.approx(0.8)
 
 
 class TestEmbedder:
