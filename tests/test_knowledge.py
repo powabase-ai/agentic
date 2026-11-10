@@ -266,6 +266,139 @@ Subsection content.
             MarkdownHeaderChunking(chunk_size=100, overlap=100)
 
 
+def _assert_covers_in_order(chunks, markers):
+    """Every marker appears in some chunk, and the chunks reach them in order."""
+    joined = "\n".join(c.text for c in chunks)
+    positions = [joined.find(m) for m in markers]
+    assert all(p >= 0 for p in positions), dict(zip(markers, positions, strict=True))
+    assert positions == sorted(positions)
+
+
+class TestMarkdownHeaderChunkingUnbalancedFences:
+    """An unclosed code fence must never drop the rest of the document (#46)."""
+
+    def test_lone_closing_fence_keeps_rest_of_document(self):
+        """OCR loses the opening backticks of a diagram but keeps the closer."""
+        markdown = (
+            "# Part A\n\nintro AAA\n\nmermaid\ngraph TD\n```\n\n"
+            "# Part B\n\nafter fence BBB\n\n# Part C\n\nmore text CCC\n"
+        )
+
+        chunks = MarkdownHeaderChunking(chunk_size=200, overlap=10).chunk(markdown)
+
+        _assert_covers_in_order(chunks, ["AAA", "graph TD", "BBB", "CCC"])
+        part_c = [c for c in chunks if "CCC" in c.text]
+        assert part_c[0].metadata.get("Header 1") == "Part C"
+
+    @pytest.mark.parametrize("opener", ["```", "```markdown", "~~~"])
+    def test_unclosed_opening_fence_keeps_rest_of_document(self, opener):
+        """An opening fence that is never closed, with and without a language tag."""
+        markdown = f"# Part A\n\nintro AAA\n\n{opener}\nsome md\n\n# Part B\n\ntail BBB\n"
+
+        chunks = MarkdownHeaderChunking(chunk_size=200, overlap=10).chunk(markdown)
+
+        _assert_covers_in_order(chunks, ["AAA", "some md", "BBB"])
+        assert max(c.end_char for c in chunks) == len(markdown.rstrip())
+
+    @pytest.mark.parametrize(
+        "after_fence",
+        [
+            "after fence BBB\n",
+            "\n# Part B\n\nafter fence BBB\n",
+            "# Part B\nafter fence BBB\n",
+            "---\nafter fence BBB\n",
+            "",
+            "\n",
+        ],
+        ids=["text", "blank-then-header", "header", "rule", "eof", "eof-newline"],
+    )
+    @pytest.mark.parametrize(
+        "before_fence",
+        ["intro AAA\n", "intro AAA\n\n# Part F\n"],
+        ids=["follows-text", "follows-header"],
+    )
+    def test_unclosed_fence_is_not_its_own_chunk(self, before_fence, after_fence):
+        """Whatever follows it, the stray fence line is never emitted alone."""
+        markdown = f"# Part A\n\n{before_fence}```\n{after_fence}"
+
+        chunks = MarkdownHeaderChunking(chunk_size=200, overlap=10).chunk(markdown)
+
+        bodies = [c.text.split("\n", 1)[-1].strip() for c in chunks]
+        assert "```" not in bodies
+        assert all("Code" not in c.metadata for c in chunks)
+        _assert_covers_in_order(chunks, ["AAA", "BBB"] if after_fence.strip() else ["AAA"])
+
+    def test_lone_closing_fence_joins_the_text_before_it(self):
+        """A closer whose opener OCR lost belongs with the diagram text above it."""
+        markdown = "# Part A\n\nmermaid\ngraph TD\n```\n\n# Part B\n\ntail BBB\n"
+
+        chunks = MarkdownHeaderChunking(chunk_size=200, overlap=10).chunk(markdown)
+
+        assert [c.text for c in chunks] == [
+            "# Part A\nmermaid\ngraph TD\n```",
+            "# Part B\ntail BBB",
+        ]
+
+    @pytest.mark.parametrize(
+        "markdown",
+        [
+            "# Part A\n\nintro AAA\n\nmermaid\ngraph TD\n```\n\n# Part B\n\ntail BBB\n",
+            "# Part A\n\nintro AAA\n\n```markdown\nsome md\n\n# Part B\n\ntail BBB\n",
+            "# Part A\n\nAAA\n\n```\n\n# Part B\n\nBBB\n\n```python\nx = 1\n```\n\n# C\n\nCCC\n",
+        ],
+        ids=["lone-closer", "unclosed-opener", "odd-count"],
+    )
+    def test_offsets_point_at_chunk_body(self, markdown):
+        """Carrying a stray fence keeps offsets on each chunk's body (minus its header).
+
+        These inputs have no whitespace runs: RecursiveChunking reports offsets
+        into its whitespace-collapsed text, which drift from the input otherwise.
+        """
+        chunks = MarkdownHeaderChunking(chunk_size=200, overlap=10).chunk(markdown)
+
+        for c in chunks:
+            body = c.text.split("\n", 1)[1] if c.text.startswith("#") else c.text
+            assert markdown[c.start_char : c.end_char].strip() == body
+
+    def test_odd_fence_count_mid_document(self):
+        """A stray fence before a real code block shifts the pairing but loses nothing."""
+        markdown = (
+            "# Part A\n\nintro AAA\n\n```\n\n# Part B\n\nmiddle BBB\n\n"
+            "```python\nx = 1\n```\n\n# Part C\n\ntail CCC\n"
+        )
+
+        chunks = MarkdownHeaderChunking(chunk_size=200, overlap=10).chunk(markdown)
+
+        _assert_covers_in_order(chunks, ["AAA", "BBB", "x = 1", "CCC"])
+
+    def test_long_document_after_unclosed_fence_is_fully_chunked(self):
+        """The production shape: a stray fence early in a long document."""
+        sections = "".join(
+            f"# Chapter {i}\n\n" + f"chapter {i} body text. " * 40 + f"END{i}\n\n"
+            for i in range(50)
+        )
+        markdown = "# Preface\n\nmermaid\ngraph TD\n```\n\n" + sections
+
+        chunks = MarkdownHeaderChunking(chunk_size=100, overlap=10).chunk(markdown)
+
+        _assert_covers_in_order(chunks, [f"END{i}" for i in range(50)])
+
+    def test_well_formed_code_block_is_not_split(self):
+        """A closed fence stays one section, and headers inside it are not headers."""
+        markdown = (
+            "# Part A\n\nintro AAA\n\n```python\nx = 1\n# not a header\ny = 2\n```\n\n"
+            "# Part B\n\ntail BBB\n"
+        )
+
+        chunks = MarkdownHeaderChunking(chunk_size=200, overlap=10).chunk(markdown)
+
+        code = [c for c in chunks if c.metadata.get("Code") == "python"]
+        assert len(code) == 1
+        assert "x = 1\n# not a header\ny = 2\n```" in code[0].text
+        assert not any(c.metadata.get("Header 1") == "not a header" for c in chunks)
+        _assert_covers_in_order(chunks, ["AAA", "x = 1", "BBB"])
+
+
 class TestEmbedder:
     """Tests for Embedder base class."""
 
