@@ -8,7 +8,9 @@ This algorithm:
 """
 
 import logging
+import re
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from agentic.knowledge.chunking.base import ChunkingStrategy
@@ -19,6 +21,57 @@ from agentic.knowledge.indexing.base import IndexingAlgorithm
 from agentic.knowledge.models import IndexingConfig, TextChunk
 
 logger = logging.getLogger(__name__)
+
+# Below this share of the input's non-whitespace text, a chunker has probably
+# dropped content (e.g. #46). Not exactly 1.0 even when nothing is lost:
+# MarkdownHeaderChunking strips header lines and horizontal rules by design.
+COVERAGE_WARNING_THRESHOLD = 0.9
+
+_WHITESPACE = re.compile(r"\s+")
+
+
+def _non_whitespace_len(text: str) -> int:
+    return len(_WHITESPACE.sub("", text))
+
+
+def chunk_coverage_ratio(content: str, chunks: Sequence[TextChunk]) -> float:
+    """Share of the non-whitespace characters of ``content`` inside some chunk's span.
+
+    Spans are ``[start_char, end_char)`` offsets into ``content``; overlapping
+    spans are merged so overlap is not counted twice. Content with no
+    non-whitespace text counts as fully covered.
+    """
+    total = _non_whitespace_len(content)
+    if total == 0:
+        return 1.0
+
+    covered = 0
+    span_start = span_end = 0
+    for start, end in sorted((c.start_char, c.end_char) for c in chunks):
+        if start > span_end:
+            covered += _non_whitespace_len(content[span_start:span_end])
+            span_start = start
+        span_end = max(span_end, end)
+    covered += _non_whitespace_len(content[span_start:span_end])
+
+    return min(covered / total, 1.0)
+
+
+def _coverage_stats(
+    content: str, chunks: Sequence[TextChunk], source_id: str | None
+) -> dict:
+    ratio = chunk_coverage_ratio(content, chunks)
+    if ratio < COVERAGE_WARNING_THRESHOLD:
+        logger.warning(
+            "chunk_coverage_low source_id=%s coverage_ratio=%.3f chunks=%d "
+            "content_chars=%d max_end_char=%d",
+            source_id,
+            ratio,
+            len(chunks),
+            len(content),
+            max((c.end_char for c in chunks), default=0),
+        )
+    return {"coverage_ratio": round(ratio, 4)}
 
 
 class ChunkData(TextChunk):
@@ -114,10 +167,11 @@ class ChunkAndEmbedAlgorithm(IndexingAlgorithm):
 
         # Step 1: Chunk the content
         text_chunks = self.chunker.chunk(content, source_id=source_id)
+        stats = _coverage_stats(content, text_chunks, source_id)
 
         if not text_chunks:
             logger.warning("No chunks generated from content")
-            return ChunkEmbedResult(chunks=[], source_id=source_id)
+            return ChunkEmbedResult(chunks=[], source_id=source_id, stats=stats)
 
         logger.debug(f"Generated {len(text_chunks)} chunks")
 
@@ -150,6 +204,7 @@ class ChunkAndEmbedAlgorithm(IndexingAlgorithm):
         return ChunkEmbedResult(
             chunks=chunk_data_list,
             source_id=source_id,
+            stats=stats,
         )
 
     async def aindex(
@@ -175,13 +230,14 @@ class ChunkAndEmbedAlgorithm(IndexingAlgorithm):
         t_chunk = time.monotonic()
         text_chunks = self.chunker.chunk(content, source_id=source_id)
         chunk_secs = time.monotonic() - t_chunk
+        stats = _coverage_stats(content, text_chunks, source_id)
 
         if not text_chunks:
             logger.info(
                 "chunk_embed_timing chunk_secs=%.2f embed_secs=0 chunks=0",
                 chunk_secs,
             )
-            return ChunkEmbedResult(chunks=[], source_id=source_id)
+            return ChunkEmbedResult(chunks=[], source_id=source_id, stats=stats)
 
         # Step 2: Async embed
         t_embed = time.monotonic()
@@ -216,4 +272,5 @@ class ChunkAndEmbedAlgorithm(IndexingAlgorithm):
         return ChunkEmbedResult(
             chunks=chunk_data_list,
             source_id=source_id,
+            stats=stats,
         )

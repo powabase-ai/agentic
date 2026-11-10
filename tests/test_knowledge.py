@@ -266,6 +266,182 @@ Subsection content.
             MarkdownHeaderChunking(chunk_size=100, overlap=100)
 
 
+def _assert_covers_in_order(chunks, markers):
+    """Every marker appears in some chunk, and the chunks reach them in order."""
+    joined = "\n".join(c.text for c in chunks)
+    positions = [joined.find(m) for m in markers]
+    assert all(p >= 0 for p in positions), dict(zip(markers, positions, strict=True))
+    assert positions == sorted(positions)
+
+
+class TestMarkdownHeaderChunkingUnbalancedFences:
+    """An unclosed code fence must never drop the rest of the document (#46)."""
+
+    def test_lone_closing_fence_keeps_rest_of_document(self):
+        """OCR loses the opening backticks of a diagram but keeps the closer."""
+        markdown = (
+            "# Part A\n\nintro AAA\n\nmermaid\ngraph TD\n```\n\n"
+            "# Part B\n\nafter fence BBB\n\n# Part C\n\nmore text CCC\n"
+        )
+
+        chunks = MarkdownHeaderChunking(chunk_size=200, overlap=10).chunk(markdown)
+
+        _assert_covers_in_order(chunks, ["AAA", "graph TD", "BBB", "CCC"])
+        part_c = [c for c in chunks if "CCC" in c.text]
+        assert part_c[0].metadata.get("Header 1") == "Part C"
+
+    @pytest.mark.parametrize("opener", ["```", "```markdown", "~~~"])
+    def test_unclosed_opening_fence_keeps_rest_of_document(self, opener):
+        """An opening fence that is never closed, with and without a language tag."""
+        markdown = f"# Part A\n\nintro AAA\n\n{opener}\nsome md\n\n# Part B\n\ntail BBB\n"
+
+        chunks = MarkdownHeaderChunking(chunk_size=200, overlap=10).chunk(markdown)
+
+        _assert_covers_in_order(chunks, ["AAA", "some md", "BBB"])
+        assert max(c.end_char for c in chunks) == len(markdown.rstrip())
+
+    def test_unclosed_fence_is_not_its_own_chunk(self):
+        """The stray fence line is folded into the following text, not emitted alone."""
+        markdown = "# Part A\n\nintro AAA\n\n```\nafter fence BBB\n"
+
+        chunks = MarkdownHeaderChunking(chunk_size=200, overlap=10).chunk(markdown)
+
+        assert all(c.text.split("\n", 1)[-1].strip() != "```" for c in chunks)
+        assert all("Code" not in c.metadata for c in chunks)
+        _assert_covers_in_order(chunks, ["AAA", "BBB"])
+
+    def test_odd_fence_count_mid_document(self):
+        """A stray fence before a real code block shifts the pairing but loses nothing."""
+        markdown = (
+            "# Part A\n\nintro AAA\n\n```\n\n# Part B\n\nmiddle BBB\n\n"
+            "```python\nx = 1\n```\n\n# Part C\n\ntail CCC\n"
+        )
+
+        chunks = MarkdownHeaderChunking(chunk_size=200, overlap=10).chunk(markdown)
+
+        _assert_covers_in_order(chunks, ["AAA", "BBB", "x = 1", "CCC"])
+
+    def test_long_document_after_unclosed_fence_is_fully_chunked(self):
+        """The production shape: a stray fence early in a long document."""
+        sections = "".join(
+            f"# Chapter {i}\n\n" + f"chapter {i} body text. " * 40 + f"END{i}\n\n"
+            for i in range(50)
+        )
+        markdown = "# Preface\n\nmermaid\ngraph TD\n```\n\n" + sections
+
+        chunks = MarkdownHeaderChunking(chunk_size=100, overlap=10).chunk(markdown)
+
+        _assert_covers_in_order(chunks, [f"END{i}" for i in range(50)])
+
+    def test_well_formed_code_block_is_not_split(self):
+        """A closed fence stays one section, and headers inside it are not headers."""
+        markdown = (
+            "# Part A\n\nintro AAA\n\n```python\nx = 1\n# not a header\ny = 2\n```\n\n"
+            "# Part B\n\ntail BBB\n"
+        )
+
+        chunks = MarkdownHeaderChunking(chunk_size=200, overlap=10).chunk(markdown)
+
+        code = [c for c in chunks if c.metadata.get("Code") == "python"]
+        assert len(code) == 1
+        assert "x = 1\n# not a header\ny = 2\n```" in code[0].text
+        assert not any(c.metadata.get("Header 1") == "not a header" for c in chunks)
+        _assert_covers_in_order(chunks, ["AAA", "x = 1", "BBB"])
+
+
+class TestChunkCoverageGuard:
+    """ChunkAndEmbed records how much of the input its chunks cover (#46)."""
+
+    class _LengthEmbedder(Embedder):
+        model = "test-model"
+
+        def embed(self, text):
+            return [float(len(text))]
+
+        async def aembed(self, text):
+            return [float(len(text))]
+
+    class _HalfChunker(ChunkingStrategy):
+        """Stands in for a chunker that silently drops the back half of the input."""
+
+        name = "half"
+
+        def chunk(self, text, source_id=None):
+            end = len(text) // 2
+            return [TextChunk(text=text[:end], index=0, start_char=0, end_char=end)]
+
+    @staticmethod
+    async def _run(algorithm, content, use_async):
+        if use_async:
+            return await algorithm.aindex(content)
+        return algorithm.index(content)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("use_async", [False, True])
+    async def test_full_coverage_recorded(self, use_async):
+        from agentic.knowledge.chunking import RecursiveChunking
+        from agentic.knowledge.indexing.chunk_embed import ChunkAndEmbedAlgorithm
+
+        content = "Paragraph one is here.\n\n" * 50
+        algorithm = ChunkAndEmbedAlgorithm(
+            chunker=RecursiveChunking(chunk_size=50, overlap=5),
+            embedder=self._LengthEmbedder(),
+        )
+
+        result = await self._run(algorithm, content, use_async)
+
+        assert result.stats["coverage_ratio"] == 1.0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("use_async", [False, True])
+    async def test_truncation_recorded_and_warned(self, use_async, caplog):
+        from agentic.knowledge.indexing.chunk_embed import ChunkAndEmbedAlgorithm
+
+        content = "word " * 400
+        algorithm = ChunkAndEmbedAlgorithm(
+            chunker=self._HalfChunker(), embedder=self._LengthEmbedder()
+        )
+
+        with caplog.at_level("WARNING", logger="agentic.knowledge.indexing.chunk_embed"):
+            result = await self._run(algorithm, content, use_async)
+
+        assert result.stats["coverage_ratio"] == pytest.approx(0.5, abs=0.01)
+        assert "coverage" in caplog.text
+
+    def test_markdown_with_stray_fence_has_high_coverage(self):
+        from agentic.knowledge.indexing.chunk_embed import ChunkAndEmbedAlgorithm
+
+        content = "# Preface\n\nmermaid\ngraph TD\n```\n\n" + "".join(
+            f"# Chapter {i}\n\n" + f"chapter {i} body text. " * 40 + "\n\n"
+            for i in range(20)
+        )
+        algorithm = ChunkAndEmbedAlgorithm(
+            chunker=MarkdownHeaderChunking(chunk_size=100, overlap=10),
+            embedder=self._LengthEmbedder(),
+        )
+
+        result = algorithm.index(content)
+
+        assert result.stats["coverage_ratio"] > 0.95
+
+    def test_whitespace_only_content_counts_as_covered(self):
+        from agentic.knowledge.indexing.chunk_embed import chunk_coverage_ratio
+
+        assert chunk_coverage_ratio("  \n\n ", []) == 1.0
+        assert chunk_coverage_ratio("text", []) == 0.0
+
+    def test_overlapping_chunks_are_not_double_counted(self):
+        from agentic.knowledge.indexing.chunk_embed import chunk_coverage_ratio
+
+        content = "abcdefghij"
+        chunks = [
+            TextChunk(text=content[0:6], index=0, start_char=0, end_char=6),
+            TextChunk(text=content[4:8], index=1, start_char=4, end_char=8),
+        ]
+
+        assert chunk_coverage_ratio(content, chunks) == pytest.approx(0.8)
+
+
 class TestEmbedder:
     """Tests for Embedder base class."""
 

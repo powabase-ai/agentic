@@ -34,6 +34,39 @@ _HEADER_MAP = {
 _HEADER_VALUES = frozenset(_HEADER_MAP.values())
 
 
+class _FenceSafeMarkdownSplitter(ExperimentalMarkdownSyntaxTextSplitter):
+    """ExperimentalMarkdownSyntaxTextSplitter that never drops text at an unclosed fence.
+
+    Upstream ``_resolve_code_chunk`` pops every remaining line looking for a
+    closing fence and returns ``""`` when there is none, discarding the rest of
+    the document. OCR output often has a stray or unbalanced fence, so here an
+    unclosed fence instead puts the consumed lines back and its own line is
+    carried into the following text as plain content.
+    """
+
+    _pending_fence = ""
+
+    def _resolve_code_chunk(self, current_line: str, raw_lines: list[str]) -> str:
+        consumed: list[str] = []
+        while raw_lines:
+            raw_line = raw_lines.pop(0)
+            consumed.append(raw_line)
+            if self._match_code(raw_line):
+                return current_line + "".join(consumed)
+        raw_lines[:0] = consumed
+        # The caller stores the returned text as a code chunk. Returning "" makes
+        # that chunk empty, so it is discarded, and the fence line is held until
+        # _complete_chunk_doc starts the next chunk with it.
+        self._pending_fence = current_line
+        return ""
+
+    def _complete_chunk_doc(self) -> None:
+        super()._complete_chunk_doc()
+        if self._pending_fence:
+            self.current_chunk.page_content = self._pending_fence
+            self._pending_fence = ""
+
+
 class MarkdownHeaderChunking(ChunkingStrategy):
     """
     Chunking strategy that splits by Markdown headers first, then by length.
@@ -67,7 +100,7 @@ class MarkdownHeaderChunking(ChunkingStrategy):
             )
 
         super().__init__(chunk_size=chunk_size, overlap=overlap)
-        self._header_splitter = ExperimentalMarkdownSyntaxTextSplitter()
+        self._header_splitter = _FenceSafeMarkdownSplitter()
         self._length_splitter = RecursiveChunking(
             chunk_size=chunk_size,
             overlap=overlap,
