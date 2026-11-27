@@ -30,6 +30,10 @@ Core Components:
 See Also:
     - README.md for installation and quickstart
     - docs/CONCEPTS.md for detailed concept explanations
+
+License:
+    Source-available under PolyForm Noncommercial 1.0.0; commercial use
+    requires an enterprise agreement — see LICENSING.md.
 """
 
 from . import llm  # noqa: F401  -- triggers llm/setup.py global config

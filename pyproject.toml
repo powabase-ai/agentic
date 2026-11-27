@@ -6,7 +6,8 @@ readme = "README.md"
 authors = [
     { name = "Powabase AI" }
 ]
-license = "Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE", "LICENSING.md"]
 requires-python = ">=3.13"
 dependencies = [
     "PyMuPDF>=1.24.0",
@@ -66,7 +67,7 @@ timeout = 60
 timeout_method = "thread"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]  # PEP 639: SPDX `license` + `license-files`
 build-backend = "hatchling.build"
 
 # Distribution is `powabase-agentic`; the import module stays `agentic`
