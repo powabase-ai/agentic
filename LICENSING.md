@@ -40,7 +40,7 @@ available under that license. This change applies to later releases only.
 
 ## Third-party components
 
-Third-party software keeps its own license. The Python dependencies this library installs (for example LangChain, LiteLLM and PyMuPDF) are distributed under their own licenses, which this license does not change.
+Third-party software keeps its own license. The Python dependencies this library installs (for example LangChain, LiteLLM and pypdfium2) are distributed under their own licenses, which this license does not change.
 
 ## Contributing
 

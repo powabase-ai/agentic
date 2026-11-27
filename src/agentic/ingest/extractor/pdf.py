@@ -2,7 +2,12 @@
 PDFExtractor - extract text from PDF documents with fallback strategy.
 
 Adapted from proven implementation in agentic/etl/transformers/extractors/pdf.py.
-Uses fallback strategy: LightOnOCR → OpenDataLoader → PyMuPDF (fitz) → pdfplumber
+Uses fallback strategy: LightOnOCR → Mistral OCR → OpenDataLoader → PDFium → pdfplumber
+
+Page counting, page splitting, page rendering and the "pdfium" text-layer
+method all use PDFium through pypdfium2. The method names "fitz" and
+"PyMuPDF", from when this was PyMuPDF, are accepted as aliases of "pdfium" so
+stored configurations keep working.
 """
 
 import asyncio
@@ -31,20 +36,87 @@ from agentic.ingest.models import Derivative, ExtractionResult, RawContent
 
 logger = logging.getLogger(__name__)
 
+# Older names of the "pdfium" method. Stored KB/source configs may still say
+# "fitz" (PyMuPDF's import name) or "PyMuPDF"; both run the PDFium method.
+_METHOD_ALIASES = {"fitz": "pdfium", "pymupdf": "pdfium"}
+
+
+def _canonical_method(method):
+    """The extraction method *method* names, with legacy aliases resolved."""
+    if isinstance(method, str):
+        return _METHOD_ALIASES.get(method.lower(), method)
+    return method
+
+
+def _clean_page_text(text: str) -> str:
+    """A page's text layer as stripped, non-blank lines joined by newlines.
+
+    PDFium ends lines with CRLF and may leave NULs in the text.
+    """
+    lines = (line.strip() for line in text.replace("\x00", "").splitlines())
+    return "\n".join(line for line in lines if line)
+
+
+def _pdfium_page_text(doc, index: int) -> str:
+    """The text layer of page *index* of an open ``pypdfium2.PdfDocument``.
+
+    The page is flattened in memory first (the document is never saved), so
+    the values of filled form fields and the appearance of annotations are
+    part of the text, as they were under MuPDF; PDFium's text page otherwise
+    covers the page content only.
+    """
+    import pypdfium2.raw as pdfium_c
+
+    page = doc[index]
+    try:
+        flattened = pdfium_c.FPDFPage_Flatten(page.raw, pdfium_c.FLAT_NORMALDISPLAY)
+    except BaseException:
+        page.close()
+        raise
+    if flattened == pdfium_c.FLATTEN_SUCCESS:
+        # Flattening rewrites the page dictionary; the loaded page does not see it.
+        page.close()
+        page = doc[index]
+    try:
+        textpage = page.get_textpage()
+        try:
+            return textpage.get_text_range()
+        finally:
+            textpage.close()
+    finally:
+        page.close()
+
+
+def _render_scale(page, zoom: float) -> float:
+    """The scale to render *page* at for *zoom*, absorbing floating-point error.
+
+    PDFium sizes the bitmap ``ceil(points * scale)``, so a US Letter page at
+    150 DPI (792 pt x 150/72 = 1650.0000000000002) would come out 1651 px
+    tall. Sizes within 0.001 px above a whole pixel are rounded down instead,
+    as MuPDF did, so a page is ``round(points * dpi / 72)`` pixels when that
+    is whole.
+    """
+    width, height = page.get_size()
+    exact = [math.ceil(side * zoom) for side in (width, height)]
+    wanted = [math.ceil(side * zoom - 0.001) for side in (width, height)]
+    if exact == wanted:
+        return zoom
+    return zoom - 0.002 / max(width, height)
+
 
 def _count_pages(data: bytes) -> int:
-    """Count pages in a PDF from bytes using fitz, with regex fallback."""
+    """Count pages in a PDF from bytes using pypdfium2, with regex fallback."""
     try:
-        import fitz
+        import pypdfium2 as pdfium
     except ImportError:
         pass  # fall through to regex
     else:
-        doc = fitz.open(stream=data, filetype="pdf")
+        doc = pdfium.PdfDocument(data)
         try:
             return len(doc)
         finally:
             doc.close()
-    # Regex fallback (used when fitz is not installed)
+    # Regex fallback (used when pypdfium2 is not installed)
     rxcountpages = re.compile(
         rb"/Type\s*/Page([^s]|$)", re.MULTILINE | re.DOTALL
     )
@@ -223,9 +295,9 @@ def _plan_pdf_batches(
     Raises:
         _BatchTooLarge: a single page is larger than *max_bytes* on its own.
     """
-    import fitz
+    import pypdfium2 as pdfium
 
-    src = fitz.open(stream=data, filetype="pdf")
+    src = pdfium.PdfDocument(data)
     try:
         total = len(src)
         per_batch = max_pages
@@ -255,13 +327,18 @@ def _plan_pdf_batches(
 
 
 def _pdf_page_range(src, start: int, end: int) -> bytes:
-    """Bytes of a new PDF holding pages *start*..*end* (0-indexed, inclusive)."""
-    import fitz
+    """Bytes of a new PDF holding pages *start*..*end* (0-indexed, inclusive).
 
-    batch_doc = fitz.open()
+    *src* is an open ``pypdfium2.PdfDocument``.
+    """
+    import pypdfium2 as pdfium
+
+    batch_doc = pdfium.PdfDocument.new()
     try:
-        batch_doc.insert_pdf(src, from_page=start, to_page=end)
-        return batch_doc.tobytes()
+        batch_doc.import_pages(src, pages=list(range(start, end + 1)))
+        buf = io.BytesIO()
+        batch_doc.save(buf)
+        return buf.getvalue()
     finally:
         batch_doc.close()
 
@@ -272,9 +349,9 @@ def _iter_pdf_batches(data: bytes, ranges: list[tuple[int, int]]):
     start_page and end_page are 1-indexed inclusive. Built lazily so only the
     batch being sent is in memory, not every batch of the document.
     """
-    import fitz
+    import pypdfium2 as pdfium
 
-    src = fitz.open(stream=data, filetype="pdf")
+    src = pdfium.PdfDocument(data)
     try:
         for start, end in ranges:
             yield _pdf_page_range(src, start, end), start + 1, end + 1
@@ -326,11 +403,12 @@ class PDFExtractor(Extractor):
     1. LightOnOCR - Default OCR head for scanned PDFs (auto mode; requires API key)
     2. Mistral OCR - OCR fallback behind LightOnOCR (auto mode; requires API key)
     3. OpenDataLoader - High-accuracy structural extraction (local, needs Java)
-    4. PyMuPDF (fitz) - Fast, good for text-based PDFs
+    4. PDFium ("pdfium", via pypdfium2) - Fast, good for text-based PDFs.
+       "fitz" and "PyMuPDF" are accepted as aliases of "pdfium".
     5. pdfplumber - Fallback for edge cases
 
     In auto mode LightOnOCR runs first as the default head, then Mistral OCR,
-    then the local chain (opendataloader → fitz → pdfplumber). Either OCR entry
+    then the local chain (opendataloader → pdfium → pdfplumber). Either OCR entry
     is skipped when its API key is not configured. Mistral sits ahead of the
     local methods because those read the text layer only — dropping a scanned
     PDF straight to them yields empty output instead of an error. PaddleOCR and
@@ -384,34 +462,54 @@ class PDFExtractor(Extractor):
     def _iter_page_images(self, raw: RawContent, dpi: int = 150) -> Iterator[Derivative]:
         """Render PDF pages as PNG image derivatives, one page at a time.
 
-        Raises ImportError when PyMuPDF is missing and whatever PyMuPDF raises
-        for a document it cannot render; ``_render_page_images`` is the
+        Pages are rendered opaque (white background, RGB, no alpha) at
+        ``dpi / 72`` times their size in points, with annotations and filled
+        form fields drawn.
+
+        Raises ImportError when pypdfium2 is missing and whatever pypdfium2
+        raises for a document it cannot render; ``_render_page_images`` is the
         forgiving wrapper.
         """
-        import fitz
+        import pypdfium2 as pdfium
 
-        doc = fitz.open(stream=raw.content, filetype="pdf")
+        doc = pdfium.PdfDocument(raw.content)
         try:
+            # Without a form environment PDFium leaves filled form fields
+            # blank; MuPDF drew them. Must come before any page is loaded.
+            doc.init_forms()
             zoom = dpi / 72
-            mat = fitz.Matrix(zoom, zoom)
-            for page in doc:
-                pix = page.get_pixmap(matrix=mat, alpha=False)
+            for index in range(len(doc)):
+                page = doc[index]
+                try:
+                    bitmap = page.render(scale=_render_scale(page, zoom))
+                    try:
+                        image = bitmap.to_pil()
+                        width, height = image.size
+                        buf = io.BytesIO()
+                        image.save(buf, format="PNG")
+                        # The image shares the bitmap's buffer; let go of it
+                        # before the buffer is freed.
+                        del image
+                    finally:
+                        bitmap.close()
+                finally:
+                    page.close()
                 deriv = Derivative(
                     type="image",
-                    content=pix.tobytes("png"),
+                    content=buf.getvalue(),
                     format="png",
-                    page=page.number + 1,  # 1-indexed
-                    metadata={"width": pix.width, "height": pix.height, "dpi": dpi},
+                    page=index + 1,  # 1-indexed
+                    metadata={"width": width, "height": height, "dpi": dpi},
                 )
-                # The raw pixmap is several times the PNG; drop it before the
+                # The raw bitmap is several times the PNG; drop it before the
                 # consumer holds this page for as long as it likes.
-                del pix
+                del bitmap, buf
                 yield deriv
         finally:
             doc.close()
 
     def _render_page_images(self, raw: RawContent, dpi: int = 150) -> list[Derivative]:
-        """Render each PDF page as a PNG image derivative using PyMuPDF.
+        """Render each PDF page as a PNG image derivative using pypdfium2.
 
         When the host passed ``raw.metadata["page_image_sink"]`` — a callable
         taking one image ``Derivative`` — each page is handed to it as soon as
@@ -460,7 +558,7 @@ class PDFExtractor(Extractor):
                     break
                 except Exception as e:
                     if isinstance(e, ImportError):
-                        logger.warning("PyMuPDF not available for page image rendering")
+                        logger.warning("pypdfium2 not available for page image rendering")
                     else:
                         logger.warning(f"Failed to render page images: {e}")
                     failed = _PageImages()
@@ -491,8 +589,10 @@ class PDFExtractor(Extractor):
         """Call a single extraction method by name.
 
         For ``mistral``, applies the existing retry-with-backoff logic.
-        Other methods are called directly.
+        Other methods are called directly. Legacy names ("fitz", "PyMuPDF")
+        resolve to "pdfium".
         """
+        method = _canonical_method(method)
         if method == "mistral":
             if not self.mistral_api_key:
                 raise ExtractionError(
@@ -588,8 +688,8 @@ class PDFExtractor(Extractor):
             return await self._extract_llamaparse(raw)
         elif method == "opendataloader":
             return self._extract_opendataloader(raw)
-        elif method == "fitz":
-            return self._extract_fitz(raw)
+        elif method == "pdfium":
+            return self._extract_pdfium(raw)
         elif method == "pdfplumber":
             return self._extract_pdfplumber(raw)
         else:
@@ -626,7 +726,8 @@ class PDFExtractor(Extractor):
             "extraction_model", EXTRACTION_DEFAULT_METHOD
         )
 
-        LOCAL_METHODS = {"opendataloader", "fitz", "pdfplumber"}
+        preference = _canonical_method(preference)
+        LOCAL_METHODS = {"opendataloader", "pdfium", "pdfplumber"}
 
         if preference != "auto":
             try:
@@ -643,7 +744,7 @@ class PDFExtractor(Extractor):
                     f"{preference} extraction failed: {e}, "
                     f"falling back to local extraction methods"
                 )
-                for method in ["opendataloader", "fitz", "pdfplumber"]:
+                for method in ["opendataloader", "pdfium", "pdfplumber"]:
                     try:
                         result = await self._try_method(method, raw)
                         result.auto_metadata["requested_method"] = preference
@@ -663,7 +764,7 @@ class PDFExtractor(Extractor):
                 ) from e
 
         # Auto mode — iterate fallback chain
-        chain = list(EXTRACTION_FALLBACK_CHAIN)
+        chain = [_canonical_method(m) for m in EXTRACTION_FALLBACK_CHAIN]
         # Skip lighton in the chain when no API key is configured. lighton is the
         # default OCR head, so make the skip observable: an operator who forgot to
         # set LIGHTON_API_KEY would otherwise silently get the local-only chain
@@ -727,16 +828,16 @@ class PDFExtractor(Extractor):
             ) from None
 
         try:
-            import fitz
+            import pypdfium2 as pdfium
         except ImportError:
             raise ExtractionError(
-                "PyMuPDF (fitz) is required for per-page PDF splitting. "
-                "Install with: pip install pymupdf",
+                "pypdfium2 is required for per-page PDF splitting. "
+                "Install with: pip install pypdfium2",
                 extractor_name=self.name,
                 source_uri=raw.source_uri,
             ) from None
 
-        src_doc = fitz.open(stream=raw.content, filetype="pdf")
+        src_doc = pdfium.PdfDocument(raw.content)
         try:
             num_pages = len(src_doc)
 
@@ -745,14 +846,10 @@ class PDFExtractor(Extractor):
 
             with tempfile.TemporaryDirectory() as tmpdir:
                 for page_num in range(num_pages):
-                    # Create a single-page PDF via insert_pdf (same pattern as _pdf_page_range)
-                    single = fitz.open()  # new empty PDF
-                    try:
-                        single.insert_pdf(src_doc, from_page=page_num, to_page=page_num)
-                        page_pdf_path = os.path.join(tmpdir, f"page_{page_num}.pdf")
-                        single.save(page_pdf_path)
-                    finally:
-                        single.close()
+                    # A single-page PDF of just this page
+                    page_pdf_path = os.path.join(tmpdir, f"page_{page_num}.pdf")
+                    with open(page_pdf_path, "wb") as f:
+                        f.write(_pdf_page_range(src_doc, page_num, page_num))
 
                     # Extract with opendataloader
                     page_output_dir = os.path.join(tmpdir, f"output_{page_num}")
@@ -805,42 +902,36 @@ class PDFExtractor(Extractor):
             stats={"pages_processed": num_pages},
         )
 
-    def _extract_fitz(self, raw: RawContent) -> ExtractionResult:
-        """Extract using PyMuPDF (Fitz) - proven implementation."""
+    def _extract_pdfium(self, raw: RawContent) -> ExtractionResult:
+        """Extract the text layer with PDFium (pypdfium2).
+
+        Runs for the method names "pdfium", "fitz" and "PyMuPDF". Each page's
+        text is its lines, stripped, with blank lines dropped.
+        """
         try:
-            import fitz
+            import pypdfium2 as pdfium
         except ImportError:
             raise ExtractionError(
-                "PyMuPDF (fitz) is required for PDF extraction. "
-                "Install with: pip install pymupdf",
+                "pypdfium2 is required for PDF extraction. "
+                "Install with: pip install pypdfium2",
                 extractor_name=self.name,
                 source_uri=raw.source_uri,
             ) from None
 
-        doc = fitz.open(stream=raw.content, filetype="pdf")
+        doc = pdfium.PdfDocument(raw.content)
         try:
             page_text_strings = []
             page_text_derivs = []
 
-            for page in doc:
-                blocks = page.get_text("blocks")
-                block_texts = []
-                for block in blocks:
-                    # block format: (x0, y0, x1, y1, text, block_no, block_type)
-                    if len(block) >= 7 and block[6] == 0:  # Text block
-                        block_text = block[4]
-                        if isinstance(block_text, str):
-                            block_text = block_text.replace("\n", " ").strip()
-                            if block_text:
-                                block_texts.append(block_text)
-                page_text = "\n".join(block_texts)
+            for index in range(len(doc)):
+                page_text = _clean_page_text(_pdfium_page_text(doc, index))
                 page_text_strings.append(page_text)
                 page_text_derivs.append(
                     Derivative(
                         type="page_text",
                         content=page_text,
                         format="plain",
-                        page=page.number + 1,
+                        page=index + 1,
                     )
                 )
 
@@ -870,7 +961,7 @@ class PDFExtractor(Extractor):
                 "char_count": len(fulltext),
                 **_page_image_metadata(image_derivs),
             },
-            extraction_method="fitz",
+            extraction_method="pdfium",
             stats={"pages_processed": len(page_text_strings)},
         )
 
@@ -901,8 +992,8 @@ class PDFExtractor(Extractor):
             )
         except ImportError:
             raise ExtractionError(
-                "PyMuPDF (fitz) is required for PDF splitting. "
-                "Install with: pip install pymupdf",
+                "pypdfium2 is required for PDF splitting. "
+                "Install with: pip install pypdfium2",
                 extractor_name=self.name,
                 source_uri=raw.source_uri,
             ) from None
@@ -1258,7 +1349,7 @@ class PDFExtractor(Extractor):
             image_derivs = self._render_page_images(raw)
             if not image_derivs:
                 raise ExtractionError(
-                    "LightOnOCR requires PyMuPDF to render page images",
+                    "LightOnOCR requires pypdfium2 to render page images",
                     extractor_name=self.name,
                     source_uri=raw.source_uri,
                 )
@@ -1523,13 +1614,13 @@ class PDFExtractor(Extractor):
                     except ImportError:
                         aborted = True
                         settled.append((0, ExtractionError(
-                            "LightOnOCR requires PyMuPDF to render page images",
+                            "LightOnOCR requires pypdfium2 to render page images",
                             extractor_name=self.name,
                             source_uri=raw.source_uri,
                         )))
                         return
                     except Exception as e:
-                        # A document PyMuPDF cannot render will not render on
+                        # A document PDFium cannot render will not render on
                         # a second pass either.
                         aborted = True
                         settled.append((0, ExtractionError(
@@ -1586,7 +1677,7 @@ class PDFExtractor(Extractor):
             finally:
                 # Queued behind any render still running on that thread, so
                 # the generator is never closed while it is executing — and
-                # waited for, because PyMuPDF is not thread-safe: the next
+                # waited for, because PDFium is not thread-safe: the next
                 # method in the chain opens the document on this thread, and
                 # must not do so while this one is still closing its copy. On
                 # a normal exit every worker has already collected its render,
@@ -1594,7 +1685,7 @@ class PDFExtractor(Extractor):
                 # waits out the one page being rendered, and it does so
                 # synchronously: the event loop is blocked for up to one page
                 # render (a few seconds for a large scanned page). Accepted,
-                # because the alternative is PyMuPDF on two threads at once.
+                # because the alternative is PDFium on two threads at once.
                 render_pool.submit(pages.close)
                 render_pool.shutdown(wait=True)
                 # Not waited for: on a normal exit every sink call has been
@@ -1604,7 +1695,7 @@ class PDFExtractor(Extractor):
 
             if not settled:
                 raise ExtractionError(
-                    "LightOnOCR requires PyMuPDF to render page images",
+                    "LightOnOCR requires pypdfium2 to render page images",
                     extractor_name=self.name,
                     source_uri=raw.source_uri,
                 )

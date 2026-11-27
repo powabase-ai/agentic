@@ -7,7 +7,7 @@ Extractors transform raw content (bytes) into structured derivatives
 Built-in extractors:
 - TextExtractor: Plain text and markdown files
 - HTMLExtractor: HTML with tag stripping
-- PDFExtractor: PDF documents (fitz/pdfplumber/Mistral OCR)
+- PDFExtractor: PDF documents (PDFium/pdfplumber/Mistral OCR)
 - DocxExtractor: Word documents (pypandoc/python-docx)
 
 The ExtractorRegistry provides automatic extractor selection based on

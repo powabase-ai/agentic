@@ -278,15 +278,16 @@ AGENT_DEFAULT_MODEL = "gpt-4o-mini"
 # Extraction defaults
 # =============================================================================
 # Default extraction method for PDFs. "auto" uses the fallback chain below.
-EXTRACTION_DEFAULT_METHOD = "auto"  # "auto", "mistral", "opendataloader", "paddleocr", "lighton", "llamaparse", "fitz", "pdfplumber"
+EXTRACTION_DEFAULT_METHOD = "auto"  # "auto", "mistral", "opendataloader", "paddleocr", "lighton", "llamaparse", "pdfium", "pdfplumber"
+# ("fitz" and "PyMuPDF" are accepted as legacy aliases of "pdfium".)
 
 # Ordered fallback chain used when extraction_model is "auto".
 # paddleocr and llamaparse are NOT in the chain — user-selectable only.
 # mistral sits directly behind lighton so that a lighton outage still yields OCR:
-# everything after it (opendataloader, fitz, pdfplumber) is text-layer extraction,
+# everything after it (opendataloader, pdfium, pdfplumber) is text-layer extraction,
 # so dropping straight to them turns a scanned PDF into empty output rather than
 # an error. Both OCR entries are skipped when their API key is absent.
-EXTRACTION_FALLBACK_CHAIN = ["lighton", "mistral", "opendataloader", "fitz", "pdfplumber"]
+EXTRACTION_FALLBACK_CHAIN = ["lighton", "mistral", "opendataloader", "pdfium", "pdfplumber"]
 
 # --- PaddleOCR-VL configuration ---
 PADDLEOCR_DEFAULT_BASE_URL = "https://s1naa1u9e7v9f7ub.aistudio-app.com"
