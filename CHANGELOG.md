@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.7.0](https://github.com/powabase-ai/agentic/compare/v0.6.2...v0.7.0) (2026-11-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* relicense under PolyForm Noncommercial 1.0.0 ([#49](https://github.com/powabase-ai/agentic/issues/49))
+
+### Features
+
+* relicense under PolyForm Noncommercial 1.0.0 ([#49](https://github.com/powabase-ai/agentic/issues/49)) ([a0815fe](https://github.com/powabase-ai/agentic/commit/a0815fe2936ce47b9722ca0f14c5e633c7710281))
+
 ## [0.6.2](https://github.com/powabase-ai/agentic/compare/v0.6.1...v0.6.2) (2026-11-10)
 
 
