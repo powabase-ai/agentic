@@ -44,7 +44,7 @@ def init_reasoning_effort(effort: str | None) -> None:
 __all__ = [
     # Underscore-prefixed helpers used by page_index_md.py / page_index.py via star import
     "_ensure_pypdf2",
-    "_ensure_pymupdf",
+    "_ensure_pypdfium2",
     "_llm_completion",
     "_llm_json",
     "init_llm_semaphore",
@@ -123,7 +123,7 @@ __all__ = [
 
 # Lazy imports for PDF-only dependencies (not needed for md_to_tree path)
 PyPDF2 = None
-pymupdf = None
+pdfium = None
 
 
 def _ensure_pypdf2():
@@ -135,13 +135,13 @@ def _ensure_pypdf2():
     return PyPDF2
 
 
-def _ensure_pymupdf():
-    global pymupdf
-    if pymupdf is None:
-        import pymupdf as _pymupdf
+def _ensure_pypdfium2():
+    global pdfium
+    if pdfium is None:
+        import pypdfium2 as _pdfium
 
-        pymupdf = _pymupdf
-    return pymupdf
+        pdfium = _pdfium
+    return pdfium
 
 
 def count_tokens(text, model=None):
@@ -551,21 +551,29 @@ def get_page_tokens(pdf_path, model=None, pdf_parser="PyPDF2"):
             token_length = len(enc.encode(page_text))
             page_list.append((page_text, token_length))
         return page_list
-    elif pdf_parser == "PyMuPDF":
+    elif pdf_parser in ("pdfium", "PyMuPDF"):
+        # "PyMuPDF" is the legacy name of this parser and runs PDFium too.
         if isinstance(pdf_path, BytesIO):
-            pdf_stream = pdf_path
-            doc = _ensure_pymupdf().open(stream=pdf_stream, filetype="pdf")
+            source = pdf_path.getvalue()
         elif (
             isinstance(pdf_path, str)
             and os.path.isfile(pdf_path)
             and pdf_path.lower().endswith(".pdf")
         ):
-            doc = _ensure_pymupdf().open(pdf_path)
+            source = pdf_path
+        else:
+            raise ValueError(f"Unsupported PDF input for {pdf_parser}: {pdf_path!r}")
+        from agentic.ingest.extractor.pdf import _pdfium_page_text
+
+        doc = _ensure_pypdfium2().PdfDocument(source)
         page_list = []
-        for page in doc:
-            page_text = page.get_text()
-            token_length = len(enc.encode(page_text))
-            page_list.append((page_text, token_length))
+        try:
+            for index in range(len(doc)):
+                page_text = _pdfium_page_text(doc, index).replace("\r\n", "\n")
+                token_length = len(enc.encode(page_text))
+                page_list.append((page_text, token_length))
+        finally:
+            doc.close()
         return page_list
     else:
         raise ValueError(f"Unsupported PDF parser: {pdf_parser}")

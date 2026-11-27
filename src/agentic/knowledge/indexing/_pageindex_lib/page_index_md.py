@@ -1003,7 +1003,7 @@ async def md_to_tree_from_pages(
     """Build a hierarchical tree from per-page text using the full ToC pipeline.
 
     This is the entry point for the page-aware pipeline, used for PDF-sourced
-    documents where per-page text arrays are available from extractors (Fitz,
+    documents where per-page text arrays are available from extractors (PDFium,
     Mistral OCR, pdfplumber).
 
     Instead of parsing markdown headers, this pipeline delegates to tree_parser()

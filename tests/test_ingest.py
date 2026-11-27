@@ -28,6 +28,7 @@ from agentic.ingest import (
 from agentic.ingest.extractor.image import ImageExtractor
 from agentic.ingest.extractor.pptx import PptxExtractor
 from agentic.ingest.extractor.xlsx import XlsxExtractor
+from tests.fixtures.pdfs import page_count, text_pdf
 
 
 class TestModels:
@@ -671,7 +672,7 @@ class TestPDFExtractorLightOnOCR:
         assert len(img_derivs) == 2
 
     @pytest.mark.asyncio
-    async def test_lighton_requires_fitz_for_rendering(self):
+    async def test_lighton_requires_page_rendering(self):
         """LightOnOCR should fail if page rendering returns no images."""
         extractor = PDFExtractor(lighton_api_key="test-key")
         raw = RawContent(
@@ -682,7 +683,7 @@ class TestPDFExtractorLightOnOCR:
         )
 
         with patch.object(extractor, "_render_page_images", return_value=[]):
-            with pytest.raises(ExtractionError, match="PyMuPDF"):
+            with pytest.raises(ExtractionError, match="pypdfium2"):
                 await extractor.extract(raw)
 
 
@@ -2128,7 +2129,7 @@ class TestPDFExtractorOpenDataLoader:
         """OpenDataLoader should produce per-page page_text derivatives and joined markdown."""
         extractor = PDFExtractor()
         raw = RawContent(
-            content=b"%PDF-1.4 fake",
+            content=text_pdf(3),
             mime_type="application/pdf",
             source_uri="upload://test.pdf",
             metadata={"extraction_model": "opendataloader"},
@@ -2148,27 +2149,15 @@ class TestPDFExtractorOpenDataLoader:
             assert len(input_path) == 1
             idx = convert_call_count["n"]
             convert_call_count["n"] += 1
+            # Each call gets a real single-page PDF split out of the source.
+            with open(input_path[0], "rb") as f:
+                assert page_count(f.read()) == 1
             os.makedirs(output_dir, exist_ok=True)
             with open(os.path.join(output_dir, "page.md"), "w") as f:
                 f.write(page_contents[idx])
 
-        # Mock fitz: first call opens src_doc (with stream= kwarg),
-        # subsequent calls create empty single-page docs (no args)
-        mock_src_doc = MagicMock()
-        mock_src_doc.__len__ = lambda self: 3
-
-        mock_fitz = MagicMock()
-
-        def mock_fitz_open(*args, **kwargs):
-            if "stream" in kwargs:
-                return mock_src_doc  # src_doc = fitz.open(stream=..., filetype="pdf")
-            return MagicMock()  # single = fitz.open()  — empty doc for insert_pdf
-
-        mock_fitz.open.side_effect = mock_fitz_open
-
         with patch.dict("sys.modules", {
                 "opendataloader_pdf": MagicMock(convert=mock_convert),
-                "fitz": mock_fitz,
              }), \
              patch.object(extractor, "_render_page_images", return_value=[
                  Derivative(type="image", content=b"fake-png", format="png", page=1),
@@ -2231,32 +2220,36 @@ class TestPDFExtractorOCRLocalFallback:
             source_uri="upload://test.pdf",
             mime_type="application/pdf",
             derivatives=[Derivative(type="text", content="fallback text")],
-            extraction_method="fitz",
+            extraction_method="pdfium",
         )
 
         with patch.object(extractor, "_extract_mistral", side_effect=Exception("API down")), \
              patch.object(extractor, "_extract_opendataloader", side_effect=Exception("no java")), \
-             patch.object(extractor, "_extract_fitz", return_value=mock_result):
+             patch.object(extractor, "_extract_pdfium", return_value=mock_result):
             result = await extractor.extract(raw)
 
-        assert result.extraction_method == "fitz"
+        assert result.extraction_method == "pdfium"
 
     @pytest.mark.asyncio
-    async def test_local_method_no_circular_fallback(self):
-        """When a local method (fitz) fails explicitly, should NOT fall back."""
+    @pytest.mark.parametrize("model", ["pdfium", "fitz", "PyMuPDF"])
+    async def test_local_method_no_circular_fallback(self, model):
+        """When a local method (pdfium, or a legacy alias of it) fails
+        explicitly, should NOT fall back."""
         extractor = PDFExtractor()
         raw = RawContent(
             content=b"%PDF-1.4 fake",
             mime_type="application/pdf",
             source_uri="upload://test.pdf",
-            metadata={"extraction_model": "fitz"},
+            metadata={"extraction_model": model},
         )
 
-        with patch.object(extractor, "_extract_fitz", side_effect=ExtractionError(
-            "fitz broken", extractor_name="pdf", source_uri="upload://test.pdf"
-        )):
-            with pytest.raises(ExtractionError, match="fitz broken"):
+        with patch.object(extractor, "_extract_pdfium", side_effect=ExtractionError(
+            "pdfium broken", extractor_name="pdf", source_uri="upload://test.pdf"
+        )), patch.object(extractor, "_extract_pdfplumber") as pdfplumber:
+            with pytest.raises(ExtractionError, match="pdfium broken"):
                 await extractor.extract(raw)
+
+        pdfplumber.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_cloud_ocr_all_fallbacks_fail(self):
@@ -2271,7 +2264,7 @@ class TestPDFExtractorOCRLocalFallback:
 
         with patch.object(extractor, "_extract_mistral", side_effect=Exception("API down")), \
              patch.object(extractor, "_extract_opendataloader", side_effect=Exception("no java")), \
-             patch.object(extractor, "_extract_fitz", side_effect=Exception("fitz fail")), \
+             patch.object(extractor, "_extract_pdfium", side_effect=Exception("pdfium fail")), \
              patch.object(extractor, "_extract_pdfplumber", side_effect=Exception("plumber fail")):
             with pytest.raises(ExtractionError, match="all local fallbacks failed"):
                 await extractor.extract(raw)
@@ -2287,7 +2280,7 @@ class TestPDFExtractorAutoMode:
 
         mistral sits between the cloud OCR head and the local methods so that a
         lighton outage still yields OCR output. Without it, a failed lighton drops
-        straight to opendataloader/fitz/pdfplumber — none of which OCR — so a
+        straight to opendataloader/pdfium/pdfplumber — none of which OCR — so a
         scanned PDF silently produces empty text rather than an error.
 
         Asserting only the negatives (paddle not called) is not enough: with every
@@ -2324,7 +2317,7 @@ class TestPDFExtractorAutoMode:
         with patch.object(extractor, "_extract_lighton", side_effect=_record("lighton")) as mock_lighton, \
              patch.object(extractor, "_extract_mistral", side_effect=_record("mistral")) as mock_mistral, \
              patch.object(extractor, "_extract_opendataloader", side_effect=_record("opendataloader")), \
-             patch.object(extractor, "_extract_fitz", side_effect=_record("fitz")), \
+             patch.object(extractor, "_extract_pdfium", side_effect=_record("pdfium")), \
              patch.object(extractor, "_extract_pdfplumber", side_effect=_record("pdfplumber")), \
              patch.object(extractor, "_extract_paddleocr") as mock_paddle:
             with pytest.raises(ExtractionError, match="All extraction methods failed"):
@@ -2333,7 +2326,7 @@ class TestPDFExtractorAutoMode:
         # lighton stays the head; mistral is the OCR-preserving second hop.
         mock_lighton.assert_called_once()
         mock_mistral.assert_called_once()
-        assert call_order == ["lighton", "mistral", "opendataloader", "fitz", "pdfplumber"]
+        assert call_order == ["lighton", "mistral", "opendataloader", "pdfium", "pdfplumber"]
         # paddleocr is explicit-only — never reached in auto mode.
         mock_paddle.assert_not_called()
 

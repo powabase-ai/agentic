@@ -16,17 +16,14 @@ footprint near one page instead:
 import asyncio
 import base64
 import gc
-import io
 import pickle
 import threading
 import time
 import weakref
 from unittest.mock import MagicMock, patch
 
-import fitz
-import numpy as np
+import pypdfium2 as pdfium
 import pytest
-from PIL import Image
 
 from agentic.ingest import (
     Derivative,
@@ -37,31 +34,9 @@ from agentic.ingest import (
     RawContent,
 )
 from agentic.ingest.extractor import pdf as pdf_module
-
-
-def _text_pdf(pages: int) -> bytes:
-    doc = fitz.open()
-    for i in range(pages):
-        page = doc.new_page(width=300, height=300)
-        page.insert_text((20, 40), f"page {i + 1} body text")
-    data = doc.tobytes()
-    doc.close()
-    return data
-
-
-def _scan_pdf(pages: int, side: int = 400) -> bytes:
-    """Pages that are nothing but a noisy image, like a scanned book."""
-    rng = np.random.default_rng(0)
-    doc = fitz.open()
-    for _ in range(pages):
-        buf = io.BytesIO()
-        pixels = rng.integers(0, 255, (side, side), dtype=np.uint8)
-        Image.fromarray(pixels, "L").save(buf, "JPEG", quality=90)
-        page = doc.new_page(width=300, height=300)
-        page.insert_image(page.rect, stream=buf.getvalue())
-    data = doc.tobytes()
-    doc.close()
-    return data
+from tests.fixtures.pdfs import build_pdf, noise_jpeg, page_count
+from tests.fixtures.pdfs import scan_pdf as _scan_pdf
+from tests.fixtures.pdfs import text_pdf as _text_pdf
 
 
 def _raw(data: bytes, **metadata) -> RawContent:
@@ -140,7 +115,7 @@ class TestPageImageStreaming:
         assert excinfo.value.cause is storage_down
         assert excinfo.value.page == 1
 
-    @pytest.mark.parametrize("method", ["fitz", "pdfplumber"])
+    @pytest.mark.parametrize("method", ["pdfium", "pdfplumber"])
     def test_local_methods_stream_images_to_sink(self, method):
         received = []
         raw = _raw(_text_pdf(3), page_image_sink=received.append)
@@ -250,7 +225,7 @@ class TestLightOnStreaming:
         with (
             patch.object(extractor, "_iter_page_images", side_effect=fake_iter),
             patch.object(extractor, "_extract_opendataloader", side_effect=Exception("x")),
-            patch.object(extractor, "_extract_fitz", side_effect=Exception("x")),
+            patch.object(extractor, "_extract_pdfium", side_effect=Exception("x")),
             patch.object(extractor, "_extract_pdfplumber", side_effect=Exception("x")),
             patch("requests.post", side_effect=refuse),
         ):
@@ -270,7 +245,7 @@ class TestMistralFileLimit:
         sent = []
 
         async def fake_single(pdf_bytes, raw, page_offset=0, render_images=True):
-            n = fitz.open(stream=pdf_bytes, filetype="pdf").page_count
+            n = page_count(pdf_bytes)
             sent.append((len(pdf_bytes), page_offset, n))
             from agentic.ingest import ExtractionResult
 
@@ -396,7 +371,7 @@ class TestSinkFailureAbortsExtraction:
             patch.object(extractor, "_iter_page_images", side_effect=_fake_pages(total)),
             patch.object(extractor, "_extract_mistral") as mistral,
             patch.object(extractor, "_extract_opendataloader") as opendataloader,
-            patch.object(extractor, "_extract_fitz") as fitz_method,
+            patch.object(extractor, "_extract_pdfium") as pdfium_method,
             patch.object(extractor, "_extract_pdfplumber") as pdfplumber,
             patch("requests.post", side_effect=post),
         ):
@@ -408,7 +383,7 @@ class TestSinkFailureAbortsExtraction:
         assert isinstance(excinfo.value.__cause__, RuntimeError)
         mistral.assert_not_called()
         opendataloader.assert_not_called()
-        fitz_method.assert_not_called()
+        pdfium_method.assert_not_called()
         pdfplumber.assert_not_called()
 
     @pytest.mark.asyncio
@@ -430,7 +405,7 @@ class TestSinkFailureAbortsExtraction:
         with (
             patch.object(extractor, "_iter_page_images", side_effect=_fake_pages(total)),
             patch.object(extractor, "_extract_opendataloader") as opendataloader,
-            patch.object(extractor, "_extract_fitz") as fitz_method,
+            patch.object(extractor, "_extract_pdfium") as pdfium_method,
             patch.object(extractor, "_extract_pdfplumber") as pdfplumber,
             patch("requests.post", side_effect=post),
         ):
@@ -440,7 +415,7 @@ class TestSinkFailureAbortsExtraction:
         assert 1 <= len(posts) <= total
         assert len(posts) == len(set(posts)), posts
         opendataloader.assert_not_called()
-        fitz_method.assert_not_called()
+        pdfium_method.assert_not_called()
         pdfplumber.assert_not_called()
 
     @pytest.mark.asyncio
@@ -505,14 +480,14 @@ class TestSinkFailureAbortsExtraction:
             patch.object(
                 extractor, "_extract_opendataloader", side_effect=sink_failure
             ),
-            patch.object(extractor, "_extract_fitz") as fitz_method,
+            patch.object(extractor, "_extract_pdfium") as pdfium_method,
             patch.object(extractor, "_extract_pdfplumber") as pdfplumber,
         ):
             with pytest.raises(PageImageSinkError) as excinfo:
                 await extractor.extract(raw)
 
         assert excinfo.value is sink_failure
-        fitz_method.assert_not_called()
+        pdfium_method.assert_not_called()
         pdfplumber.assert_not_called()
 
     @pytest.mark.asyncio
@@ -531,7 +506,7 @@ class TestSinkFailureAbortsExtraction:
             # the installed mistralai major version.
             patch("mistralai.client.Mistral", return_value=client, create=True),
             patch.object(extractor, "_extract_opendataloader") as opendataloader,
-            patch.object(extractor, "_extract_fitz") as fitz_method,
+            patch.object(extractor, "_extract_pdfium") as pdfium_method,
             patch.object(extractor, "_extract_pdfplumber") as pdfplumber,
         ):
             with pytest.raises(PageImageSinkError):
@@ -540,7 +515,7 @@ class TestSinkFailureAbortsExtraction:
         assert client.files.upload.call_count == 1
         assert client.ocr.process.call_count == 1
         opendataloader.assert_not_called()
-        fitz_method.assert_not_called()
+        pdfium_method.assert_not_called()
         pdfplumber.assert_not_called()
 
     @pytest.mark.parametrize("method", ["lighton", "mistral", "paddleocr"])
@@ -605,7 +580,7 @@ class TestSinkFailureAbortsExtraction:
         assert "Unprintable" in str(error)
 
     @pytest.mark.parametrize("sink", ["not callable", 42])
-    @pytest.mark.parametrize("model", ["auto", "lighton", "fitz"])
+    @pytest.mark.parametrize("model", ["auto", "lighton", "pdfium", "fitz"])
     @pytest.mark.asyncio
     async def test_a_sink_that_is_not_callable_is_refused(self, sink, model):
         """Silently ignoring it would turn the memory bound off with no sign.
@@ -637,7 +612,7 @@ class TestSinkFailureAbortsExtraction:
 
     def test_renderer_is_closed_when_the_sink_fails(self):
         """Not left to the garbage collector: the traceback keeps the frame,
-        and with it an open PyMuPDF document, alive for as long as the caller
+        and with it an open PDFium document, alive for as long as the caller
         holds the error."""
         extractor = PDFExtractor()
         closed = []
@@ -859,8 +834,8 @@ class TestLightOnStreamingOrder:
 
     @pytest.mark.asyncio
     async def test_renderer_is_closed_before_the_next_method_opens_the_pdf(self):
-        """PyMuPDF is not thread-safe. The render thread must have finished
-        closing the document before a fallback method touches PyMuPDF."""
+        """PDFium is not thread-safe. The render thread must have finished
+        closing the document before a fallback method touches PDFium."""
         import requests
 
         closed = threading.Event()
@@ -888,7 +863,7 @@ class TestLightOnStreamingOrder:
         with (
             patch.object(extractor, "_iter_page_images", side_effect=fake_iter),
             patch.object(extractor, "_extract_opendataloader", side_effect=fallback),
-            patch.object(extractor, "_extract_fitz", side_effect=fallback),
+            patch.object(extractor, "_extract_pdfium", side_effect=fallback),
             patch.object(extractor, "_extract_pdfplumber", side_effect=fallback),
             patch("requests.post", side_effect=refuse),
         ):
@@ -900,12 +875,10 @@ class TestLightOnStreamingOrder:
 
 def _uneven_pdf(text_pages: int, scan_pages: int) -> bytes:
     """Cheap text pages followed by expensive scanned pages."""
-    doc = fitz.open()
-    doc.insert_pdf(fitz.open(stream=_text_pdf(text_pages), filetype="pdf"))
-    doc.insert_pdf(fitz.open(stream=_scan_pdf(scan_pages), filetype="pdf"))
-    data = doc.tobytes()
-    doc.close()
-    return data
+    return build_pdf(
+        [f"page {i + 1} body text" for i in range(text_pages)]
+        + [noise_jpeg(seed=i) for i in range(scan_pages)]
+    )
 
 
 def _guarded_page_range(limit_calls: int):
@@ -927,7 +900,7 @@ class TestMistralBatchPlanning:
         text_pages, scan_pages = 6, 6
         data = _uneven_pdf(text_pages, scan_pages)
         total = text_pages + scan_pages
-        src = fitz.open(stream=data, filetype="pdf")
+        src = pdfium.PdfDocument(data)
         largest_page = max(
             len(pdf_module._pdf_page_range(src, i, i)) for i in range(total)
         )
@@ -949,7 +922,7 @@ class TestMistralBatchPlanning:
         assert ranges[-1][1] == total - 1
         assert all(b[0] == a[1] + 1 for a, b in zip(ranges, ranges[1:], strict=False))
         # And every one of them fits.
-        src = fitz.open(stream=data, filetype="pdf")
+        src = pdfium.PdfDocument(data)
         try:
             sizes = [len(pdf_module._pdf_page_range(src, s, e)) for s, e in ranges]
         finally:
@@ -958,7 +931,7 @@ class TestMistralBatchPlanning:
 
     def test_two_page_range_over_the_limit_splits_into_single_pages(self):
         data = _scan_pdf(2)
-        src = fitz.open(stream=data, filetype="pdf")
+        src = pdfium.PdfDocument(data)
         largest_page = max(len(pdf_module._pdf_page_range(src, i, i)) for i in range(2))
         src.close()
         guarded, _ = _guarded_page_range(limit_calls=20)
@@ -973,7 +946,7 @@ class TestMistralBatchPlanning:
     @pytest.mark.asyncio
     async def test_extract_mistral_numbers_pages_across_halved_batches(self):
         data = _uneven_pdf(6, 6)
-        src = fitz.open(stream=data, filetype="pdf")
+        src = pdfium.PdfDocument(data)
         largest_page = max(len(pdf_module._pdf_page_range(src, i, i)) for i in range(12))
         src.close()
         limit = largest_page * 3 // 2
@@ -981,7 +954,7 @@ class TestMistralBatchPlanning:
         sent = []
 
         async def fake_single(pdf_bytes, raw, page_offset=0, render_images=True):
-            n = fitz.open(stream=pdf_bytes, filetype="pdf").page_count
+            n = page_count(pdf_bytes)
             sent.append((len(pdf_bytes), page_offset, n))
             return ExtractionResult(
                 source_uri=raw.source_uri,
@@ -1035,7 +1008,7 @@ class TestMistralBatchPlanning:
 
         async def fake_single(pdf_bytes, raw, page_offset=0, render_images=True):
             built_before_each_send.append(builds[0] - planned_builds[0])
-            n = fitz.open(stream=pdf_bytes, filetype="pdf").page_count
+            n = page_count(pdf_bytes)
             return ExtractionResult(
                 source_uri=raw.source_uri,
                 mime_type=raw.mime_type,
@@ -1073,7 +1046,7 @@ class TestPartialPageImages:
     fails, the result says the image set is incomplete instead of reading as a
     clean extraction."""
 
-    @pytest.mark.parametrize("method", ["fitz", "pdfplumber"])
+    @pytest.mark.parametrize("method", ["pdfium", "pdfplumber"])
     def test_render_failure_after_pages_reached_the_sink_is_reported(self, method):
         extractor = PDFExtractor()
         received = []
@@ -1097,7 +1070,7 @@ class TestPartialPageImages:
         assert [d.page for d in received] == [1]
         assert result.auto_metadata["page_images_incomplete"] is True
 
-    @pytest.mark.parametrize("method", ["fitz", "pdfplumber"])
+    @pytest.mark.parametrize("method", ["pdfium", "pdfplumber"])
     def test_complete_image_set_carries_no_flag(self, method):
         raw = _raw(_text_pdf(3), page_image_sink=lambda d: None)
 
@@ -1113,7 +1086,7 @@ class TestPartialPageImages:
         raw = _raw(_text_pdf(3), page_image_sink=received.append)
 
         with patch.object(extractor, "_iter_page_images", side_effect=_failing_after(0)):
-            result = extractor._extract_fitz(raw)
+            result = extractor._extract_pdfium(raw)
 
         assert received == []
         assert "page_images_incomplete" not in result.auto_metadata
@@ -1122,7 +1095,7 @@ class TestPartialPageImages:
         extractor = PDFExtractor()
 
         with patch.object(extractor, "_iter_page_images", side_effect=_failing_after(2)):
-            result = extractor._extract_fitz(_raw(_text_pdf(3)))
+            result = extractor._extract_pdfium(_raw(_text_pdf(3)))
 
         assert [d for d in result.derivatives if d.type == "image"] == []
         assert "page_images_incomplete" not in result.auto_metadata
@@ -1212,7 +1185,7 @@ class TestDeliveredImagesAreReleased:
             delivered.append(weakref.ref(d))
 
         raw = _raw(_text_pdf(6), page_image_sink=sink)
-        extractor._extract_fitz(raw)
+        extractor._extract_pdfium(raw)
         gc.collect()
 
         assert alive_at_each_delivery == [0] * 6
@@ -1254,25 +1227,25 @@ class TestDeliveredImagesAreReleased:
         assert peak_alive <= LIGHTON_MAX_CONCURRENCY, peak_alive
         assert sum(ref() is not None for ref in delivered) == 0
 
-    def test_pages_are_rendered_one_at_a_time_and_pixmaps_are_freed(self):
-        """At page N's delivery exactly N pixmaps have been made — rendering is
-        lazy — and none of them is still alive: the raw pixmap, several times
+    def test_pages_are_rendered_one_at_a_time_and_bitmaps_are_freed(self):
+        """At page N's delivery exactly N bitmaps have been made — rendering is
+        lazy — and none of them is still alive: the raw bitmap, several times
         the PNG, is not kept."""
         extractor = PDFExtractor()
-        real_get_pixmap = fitz.Page.get_pixmap
-        pixmaps = []
+        real_render = pdfium.PdfPage.render
+        bitmaps = []
         seen = []
 
-        def counting_get_pixmap(page, *args, **kwargs):
-            pix = real_get_pixmap(page, *args, **kwargs)
-            pixmaps.append(weakref.ref(pix))
-            return pix
+        def counting_render(page, *args, **kwargs):
+            bitmap = real_render(page, *args, **kwargs)
+            bitmaps.append(weakref.ref(bitmap))
+            return bitmap
 
         def sink(d):
             gc.collect()
-            seen.append((d.page, len(pixmaps), sum(r() is not None for r in pixmaps)))
+            seen.append((d.page, len(bitmaps), sum(r() is not None for r in bitmaps)))
 
-        with patch.object(fitz.Page, "get_pixmap", counting_get_pixmap):
+        with patch.object(pdfium.PdfPage, "render", counting_render):
             extractor._render_page_images(_raw(_text_pdf(5), page_image_sink=sink))
 
         assert seen == [(n, n, 0) for n in range(1, 6)]
@@ -1324,7 +1297,7 @@ class TestSinkThreadContract:
             page_image_sink=lambda d: threads.add(threading.get_ident()),
         )
 
-        PDFExtractor()._extract_fitz(raw)
+        PDFExtractor()._extract_pdfium(raw)
 
         assert threads == {threading.get_ident()}
 

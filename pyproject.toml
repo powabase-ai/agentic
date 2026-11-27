@@ -10,7 +10,7 @@ license = "PolyForm-Noncommercial-1.0.0"
 license-files = ["LICENSE", "LICENSING.md"]
 requires-python = ">=3.13"
 dependencies = [
-    "PyMuPDF>=1.24.0",
+    "pypdfium2>=5.0.0",  # PDF page counting, splitting, rendering and the "pdfium" text method (Apache-2.0/BSD-3; replaced AGPL PyMuPDF)
     "pdfplumber>=0.11.0",
     "litellm>=1.103.2",  # >=1.103.2 knows gpt-5.6 / gpt-6-astra / claude-opus-5 / claude-fable-5-1 / kimi-k3, ships the per-model reasoning-effort resolver routing.py uses, and requires the provider argument compaction.py passes to _map_reasoning_effort; >=1.90.1 was the floor for Opus 4.7/4.8 adaptive thinking (1.83.14 sent the deprecated thinking.enabled -> 400s)
     "mistralai>=1.0.0",  # Still needed by PDF extractor
