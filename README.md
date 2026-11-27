@@ -2,6 +2,8 @@
 
 The agent/knowledge/orchestration/workflow engine that powers the [Powabase](https://github.com/powabase-ai/powabase) stack — a well-documented Python library you can also import on its own.
 
+[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue)](LICENSING.md)
+
 ## Features
 
 - **Agent**: Single LLM-powered agent with a clean run() interface
@@ -176,9 +178,14 @@ mypy src/agentic
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE).
+Source-available under [PolyForm Noncommercial 1.0.0](LICENSE); commercial use
+requires an enterprise agreement — see [LICENSING.md](LICENSING.md). Free for
+government, research, education, charity, and personal noncommercial use.
+Releases up to and including v0.6.2 remain available under Apache-2.0.
 
 ## Contributing
 
-Contributions are welcome! Please read our contributing guidelines and submit a pull request.
+Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md), including
+the [licensing of contributions](CONTRIBUTING.md#licensing-of-contributions), and
+submit a pull request.
 

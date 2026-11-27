@@ -2,6 +2,9 @@
 
 This document provides detailed explanations of the core concepts in the agentic framework.
 
+> The `agentic` library is source-available under PolyForm Noncommercial 1.0.0;
+> commercial use requires an enterprise agreement — see [LICENSING.md](../LICENSING.md).
+
 ## Table of Contents
 
 1. [Overview](#overview)
@@ -306,7 +309,7 @@ The content ingestion system is designed for extensibility:
 3. **Custom Derivatives**: Extractors can produce multiple derivative types
 4. **Chained Extraction**: Future support for extraction pipelines (e.g., PDF → images → OCR)
 
-### OSS vs Platform Responsibilities
+### Library vs Platform Responsibilities
 
 | Component | Location | Reason |
 |-----------|----------|--------|
